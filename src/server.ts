@@ -22,7 +22,7 @@ async function startServer() {
       'http://localhost:3000',
       'http://localhost:3001',
       'http://127.0.0.1:3000',
-      process.env.FRONTEND_URL,
+      process.env.CORS_ORIGIN,
     ].filter(Boolean) as string[],
     credentials: true,
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -37,8 +37,8 @@ async function startServer() {
   const server = new ApolloServer({
     typeDefs,
     resolvers,
-    introspection: process.env.NODE_ENV !== 'production',
-    csrfPrevention: true, // Keep CSRF protection enabled
+    introspection: true, // Enable introspection for GraphQL Playground
+    csrfPrevention: false, // Disable CSRF prevention to allow GraphQL Playground access
   })
 
   await server.start()
