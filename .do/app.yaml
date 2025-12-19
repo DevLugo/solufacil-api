@@ -2,6 +2,7 @@ name: solufacil-api
 region: nyc
 services:
   - name: api
+    environment_slug: node-js
     github:
       repo: DevLugo/solufacil-api
       branch: main
