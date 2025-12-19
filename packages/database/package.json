@@ -6,7 +6,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "postinstall": "test -n \"$DATABASE_URL\" && prisma generate || echo 'Skipped prisma generate (no DATABASE_URL)'",
-    "build": "prisma generate && tsc && cp -r src/generated dist/",
+    "build": "prisma generate && tsc",
     "dev": "tsc --watch",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
@@ -14,7 +14,7 @@
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:migrate-data": "tsx scripts/migrate-data.ts",
-    "clean": "rm -rf dist .turbo node_modules generated"
+    "clean": "rm -rf dist .turbo node_modules"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.0.0",
