@@ -471,13 +471,13 @@ export class ClientHistoryService {
       activeLoansAsClient: activeLoansAsClient.length,
       activeLoansAsCollateral: activeLoansAsCollateral.length,
       totalAmountRequestedAsClient: loansAsClient
-        .reduce((sum, l) => sum + parseFloat(l.requestedAmount || '0'), 0)
+        .reduce((sum, l) => sum + parseFloat(l.requestedAmount?.toString() || '0'), 0)
         .toString(),
       totalAmountPaidAsClient: loansAsClient
-        .reduce((sum, l) => sum + parseFloat(l.totalPaid || '0'), 0)
+        .reduce((sum, l) => sum + parseFloat(l.totalPaid?.toString() || '0'), 0)
         .toString(),
       currentPendingDebtAsClient: activeLoansAsClient
-        .reduce((sum, l) => sum + parseFloat(l.pendingAmountStored || '0'), 0)
+        .reduce((sum, l) => sum + parseFloat(l.pendingAmountStored?.toString() || '0'), 0)
         .toString(),
       hasBeenClient: loansAsClient.length > 0,
       hasBeenCollateral: loansAsCollateral.length > 0,

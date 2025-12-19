@@ -309,6 +309,11 @@ export class BorrowerRepository {
 
       return {
         ...borrower,
+        loans: borrower.loans.map(loan => ({
+          ...loan,
+          pendingAmountStored: loan.pendingAmountStored.toString(),
+          status: loan.status as string,
+        })),
         isFromCurrentLocation: locationId ? finalLocationId === locationId : true,
         locationId: finalLocationId,
         locationName: finalLocationName,
