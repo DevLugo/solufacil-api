@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@apollo/server": "^4.12.2",
+    "@prisma/client": "^7.0.0",
     "@solufacil/business-logic": "workspace:*",
     "@solufacil/database": "workspace:*",
     "@solufacil/graphql-schema": "workspace:*",

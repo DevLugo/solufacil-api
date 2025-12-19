@@ -11,6 +11,9 @@ importers:
       '@apollo/server':
         specifier: ^4.12.2
         version: 4.12.2(graphql@16.12.0)
+      '@prisma/client':
+        specifier: ^7.0.0
+        version: 7.2.0(prisma@7.2.0(@types/react@19.2.7)(magicast@0.3.5)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(typescript@5.9.3))(typescript@5.9.3)
       '@solufacil/business-logic':
         specifier: workspace:*
         version: link:packages/business-logic
