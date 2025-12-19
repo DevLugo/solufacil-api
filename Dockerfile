@@ -31,8 +31,9 @@ ARG DATABASE_URL
 ENV DATABASE_URL=$DATABASE_URL
 RUN pnpm --filter @solufacil/database db:generate
 
-# Build packages and API
+# Build packages and API in dependency order
 RUN pnpm --filter @solufacil/shared build && \
+    pnpm --filter @solufacil/database build && \
     pnpm --filter @solufacil/graphql-schema build && \
     pnpm --filter @solufacil/business-logic build && \
     pnpm build
