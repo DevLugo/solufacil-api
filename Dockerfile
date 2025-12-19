@@ -45,11 +45,19 @@ RUN corepack enable && corepack prepare pnpm@10.24.0 --activate
 
 WORKDIR /app
 
-# Copy built application
+# Copy package files
 COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
+COPY --from=builder /app/packages/database/package.json ./packages/database/
+COPY --from=builder /app/packages/graphql-schema/package.json ./packages/graphql-schema/
+COPY --from=builder /app/packages/business-logic/package.json ./packages/business-logic/
+COPY --from=builder /app/packages/shared/package.json ./packages/shared/
+
+# Install production dependencies only
+RUN pnpm install --prod --frozen-lockfile
+
+# Copy built application
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/packages ./packages
-COPY --from=builder /app/node_modules ./node_modules
 
 # Set environment
 ENV NODE_ENV=production
