@@ -15,6 +15,9 @@ RUN pnpm install --frozen-lockfile
 ARG DATABASE_URL
 ENV DATABASE_URL=$DATABASE_URL
 
+# Generate Prisma Client in production
+RUN pnpm --filter @solufacil/database prisma generate
+
 # Build everything
 RUN pnpm build
 
