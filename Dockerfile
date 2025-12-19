@@ -7,7 +7,7 @@ RUN corepack enable && corepack prepare pnpm@10.24.0 --activate
 WORKDIR /app
 
 # Copy root package files (exclude turbo.json to avoid workspace-wide builds)
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 
 # Copy all package.json files to leverage Docker cache
 COPY packages/database/package.json ./packages/database/
