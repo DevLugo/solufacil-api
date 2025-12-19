@@ -1,0 +1,25 @@
+{
+  "name": "solufacil-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Solufacil API - GraphQL backend service",
+  "scripts": {
+    "dev": "pnpm --filter @solufacil/api dev",
+    "build": "pnpm --filter @solufacil/shared build && pnpm --filter @solufacil/graphql-schema build && pnpm --filter @solufacil/business-logic build && pnpm --filter @solufacil/api build",
+    "start": "pnpm --filter @solufacil/api start",
+    "db:generate": "pnpm --filter @solufacil/database db:generate",
+    "db:push": "pnpm --filter @solufacil/database db:push",
+    "db:migrate": "pnpm --filter @solufacil/database db:migrate",
+    "db:studio": "pnpm --filter @solufacil/database db:studio",
+    "clean": "rm -rf node_modules apps/api/node_modules packages/*/node_modules"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.16",
+    "typescript": "^5.3.3"
+  },
+  "packageManager": "pnpm@8.15.1",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

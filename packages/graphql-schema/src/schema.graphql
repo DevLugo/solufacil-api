@@ -1,0 +1,1871 @@
+# Custom Scalars
+scalar DateTime
+scalar Decimal
+scalar JSON
+scalar Upload
+
+# Enums
+enum UserRole {
+  ADMIN
+  NORMAL
+  CAPTURA
+  DOCUMENT_REVIEWER
+}
+
+enum EmployeeType {
+  ROUTE_LEAD
+  LEAD
+  ROUTE_ASSISTENT
+}
+
+enum LoanStatus {
+  ACTIVE
+  FINISHED
+  RENOVATED
+  CANCELLED
+}
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+  TRANSFER
+  INVESTMENT
+}
+
+enum PaymentMethod {
+  CASH
+  MONEY_TRANSFER
+}
+
+enum DocumentType {
+  INE
+  DOMICILIO
+  PAGARE
+  OTRO
+}
+
+enum AccountType {
+  BANK
+  OFFICE_CASH_FUND
+  EMPLOYEE_CASH_FUND
+  PREPAID_GAS
+  TRAVEL_EXPENSES
+}
+
+enum PeriodType {
+  WEEKLY
+  MONTHLY
+}
+
+enum Trend {
+  UP
+  DOWN
+  STABLE
+}
+
+enum CVStatus {
+  AL_CORRIENTE
+  EN_CV
+  EXCLUIDO
+}
+
+enum DistributionMode {
+  FIXED_EQUAL
+  VARIABLE
+}
+
+# Directives
+directive @auth on FIELD_DEFINITION | OBJECT
+directive @requireRole(roles: [UserRole!]!) on FIELD_DEFINITION | OBJECT
+
+# Core Types
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  role: UserRole!
+  employee: Employee
+  telegramUser: TelegramUser
+  createdAt: DateTime!
+}
+
+type PersonalData {
+  id: ID!
+  fullName: String!
+  clientCode: String!
+  birthDate: DateTime
+  phones: [Phone!]!
+  addresses: [Address!]!
+  employee: Employee
+  borrower: Borrower
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Phone {
+  id: ID!
+  number: String!
+  personalData: PersonalData!
+}
+
+type Address {
+  id: ID!
+  street: String!
+  numberInterior: String
+  numberExterior: String
+  zipCode: String
+  location: Location!
+  personalData: PersonalData!
+}
+
+type Employee {
+  id: ID!
+  type: EmployeeType!
+  personalData: PersonalData!
+  location: Location
+  routes: [Route!]!
+  user: User
+  loansGranted: [Loan!]!
+  loansManagedAsLead: [Loan!]!
+  transactions: [Transaction!]!
+  commissionPayments: [CommissionPayment!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Borrower {
+  id: ID!
+  personalData: PersonalData!
+  loans: [Loan!]!
+  loanFinishedCount: Int!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+# Tipo para resultados de búsqueda de borrowers (autocomplete)
+type BorrowerSearchResult {
+  id: ID!
+  personalData: PersonalData!
+  loanFinishedCount: Int!
+  hasActiveLoans: Boolean!
+  pendingDebtAmount: String
+  locationId: ID
+  locationName: String
+  isFromCurrentLocation: Boolean!
+}
+
+type Loantype {
+  id: ID!
+  name: String!
+  weekDuration: Int!
+  rate: Decimal!
+  loanPaymentComission: Decimal!
+  loanGrantedComission: Decimal!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Loan {
+  id: ID!
+  requestedAmount: Decimal!
+  amountGived: Decimal!
+  signDate: DateTime!
+  finishedDate: DateTime
+  badDebtDate: DateTime
+  isDeceased: Boolean!
+  profitAmount: Decimal!
+  totalDebtAcquired: Decimal!
+  expectedWeeklyPayment: Decimal!
+  totalPaid: Decimal!
+  pendingAmountStored: Decimal!
+  comissionAmount: Decimal!
+  status: LoanStatus!
+  borrower: Borrower!
+  loantype: Loantype!
+  grantor: Employee!
+  lead: Employee!
+  collaterals: [PersonalData!]!
+  payments: [LoanPayment!]!
+  transactions: [Transaction!]!
+  documentPhotos: [DocumentPhoto!]!
+  snapshotLeadId: String
+  snapshotLeadName: String
+  snapshotLeadAssignedAt: DateTime
+  snapshotRouteId: String
+  snapshotRouteName: String
+  previousLoan: Loan
+  renewedBy: Loan
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type LoanPayment {
+  id: ID!
+  amount: Decimal!
+  comission: Decimal!
+  receivedAt: DateTime!
+  paymentMethod: PaymentMethod!
+  type: String!
+  loan: Loan!
+  leadPaymentReceived: LeadPaymentReceived
+  transactions: [Transaction!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Transaction {
+  id: ID!
+  amount: Decimal!
+  date: DateTime!
+  type: TransactionType!
+  incomeSource: String
+  expenseSource: String
+  profitAmount: Decimal
+  returnToCapital: Decimal
+  loan: Loan
+  loanPayment: LoanPayment
+  sourceAccount: Account!
+  destinationAccount: Account
+  route: Route
+  lead: Employee
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Account {
+  id: ID!
+  name: String!
+  type: AccountType!
+  amount: Decimal!
+  accountBalance: Decimal!
+  routes: [Route!]!
+  transactionsSource: [Transaction!]!
+  transactionsDestination: [Transaction!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Route {
+  id: ID!
+  name: String!
+  employees: [Employee!]!
+  accounts: [Account!]!
+  transactions: [Transaction!]!
+  locations: [Location!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+"""
+Route with calculated statistics for administration
+"""
+type RouteWithStats {
+  routeId: ID!
+  routeName: String!
+  totalActivos: Int!
+  enCV: Int!
+  alCorriente: Int!
+  employees: [EmployeeWithStats!]!
+}
+
+"""
+Employee with individual statistics
+"""
+type EmployeeWithStats {
+  id: ID!
+  type: EmployeeType!
+  personalData: PersonalData
+  activos: Int!
+  enCV: Int!
+  alCorriente: Int!
+}
+
+type Location {
+  id: ID!
+  name: String!
+  route: Route
+  municipality: Municipality!
+  addresses: [Address!]!
+  createdAt: DateTime!
+}
+
+type Municipality {
+  id: ID!
+  name: String!
+  state: State!
+  locations: [Location!]!
+}
+
+type State {
+  id: ID!
+  name: String!
+  municipalities: [Municipality!]!
+}
+
+type DocumentPhoto {
+  id: ID!
+  title: String
+  description: String
+  photoUrl: String
+  publicId: String
+  documentType: DocumentType!
+  isError: Boolean!
+  errorDescription: String
+  isMissing: Boolean!
+  personalData: PersonalData
+  loan: Loan
+  uploadedBy: User
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type CommissionPayment {
+  id: ID!
+  amount: Decimal!
+  employee: Employee!
+  loan: Loan!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type LeadPaymentReceived {
+  id: ID!
+  expectedAmount: Decimal!
+  paidAmount: Decimal!
+  cashPaidAmount: Decimal!
+  bankPaidAmount: Decimal!
+  falcoAmount: Decimal!
+  paymentStatus: String!
+  lead: Employee!
+  agent: Employee!
+  payments: [LoanPayment!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+# Client History Types (para historial de clientes)
+type ClientSearchResult {
+  id: ID!
+  name: String!
+  clientCode: String!
+  phone: String
+  address: String
+  route: String
+  location: String
+  municipality: String
+  state: String
+  latestLoanDate: DateTime
+  hasLoans: Boolean!
+  hasBeenCollateral: Boolean!
+  totalLoans: Int!
+  activeLoans: Int!
+  finishedLoans: Int!
+  collateralLoans: Int!
+}
+
+type ClientHistoryData {
+  client: ClientInfo!
+  summary: ClientSummary!
+  loansAsClient: [LoanHistoryDetail!]!
+  loansAsCollateral: [LoanHistoryDetail!]!
+}
+
+type ClientInfo {
+  id: ID!
+  fullName: String!
+  clientCode: String!
+  phones: [String!]!
+  addresses: [ClientAddressInfo!]!
+  leader: LeaderInfo
+}
+
+type ClientAddressInfo {
+  street: String!
+  city: String
+  location: String!
+  route: String!
+}
+
+type LeaderInfo {
+  name: String!
+  route: String!
+  location: String!
+  municipality: String
+  state: String
+  phone: String
+}
+
+type ClientSummary {
+  totalLoansAsClient: Int!
+  totalLoansAsCollateral: Int!
+  activeLoansAsClient: Int!
+  activeLoansAsCollateral: Int!
+  totalAmountRequestedAsClient: Decimal!
+  totalAmountPaidAsClient: Decimal!
+  currentPendingDebtAsClient: Decimal!
+  hasBeenClient: Boolean!
+  hasBeenCollateral: Boolean!
+}
+
+type LoanHistoryDetail {
+  id: ID!
+  signDate: DateTime!
+  signDateFormatted: String!
+  finishedDate: DateTime
+  finishedDateFormatted: String
+  renewedDate: DateTime
+  loanType: String!
+  amountRequested: Decimal!
+  totalAmountDue: Decimal!
+  interestAmount: Decimal!
+  totalPaid: Decimal!
+  pendingDebt: Decimal!
+  daysSinceSign: Int!
+  status: String!
+  wasRenewed: Boolean!
+  weekDuration: Int!
+  rate: Decimal!
+  leadName: String
+  routeName: String
+  paymentsCount: Int!
+  payments: [LoanPaymentDetail!]!
+  noPaymentPeriods: [NoPaymentPeriod!]!
+  renewedFrom: ID
+  renewedTo: ID
+  avalName: String
+  avalPhone: String
+  clientName: String
+  clientDui: String
+}
+
+type LoanPaymentDetail {
+  id: ID!
+  amount: Decimal!
+  receivedAt: DateTime!
+  receivedAtFormatted: String!
+  type: String!
+  paymentMethod: String!
+  paymentNumber: Int!
+  balanceBeforePayment: Decimal!
+  balanceAfterPayment: Decimal!
+}
+
+type NoPaymentPeriod {
+  id: ID!
+  startDate: DateTime!
+  endDate: DateTime!
+  startDateFormatted: String!
+  endDateFormatted: String!
+  weekCount: Int!
+}
+
+# Pagination Types
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+type LoanEdge {
+  node: Loan!
+  cursor: String!
+}
+
+type LoanConnection {
+  edges: [LoanEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type TransactionEdge {
+  node: Transaction!
+  cursor: String!
+}
+
+type TransactionConnection {
+  edges: [TransactionEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+# Report Types
+type FinancialReport {
+  summary: FinancialSummary!
+  weeklyData: [WeeklyData!]!
+  comparisonData: ComparisonData
+  performanceMetrics: PerformanceMetrics!
+}
+
+type ActiveLoansBreakdown {
+  total: Int!
+  alCorriente: Int!
+  carteraVencida: Int!
+}
+
+type FinancialSummary {
+  activeLoans: Int!
+  activeLoansBreakdown: ActiveLoansBreakdown!
+  totalPortfolio: Decimal!
+  totalPaid: Decimal!
+  pendingAmount: Decimal!
+  averagePayment: Decimal!
+}
+
+type WeeklyData {
+  week: Int!
+  date: DateTime!
+  loansGranted: Int!
+  paymentsReceived: Decimal!
+  paymentsCount: Int!
+  expectedPayments: Decimal!
+  recoveryRate: Decimal!
+}
+
+type ComparisonData {
+  previousMonth: FinancialSummary!
+  growth: Decimal!
+  trend: String!
+}
+
+type PerformanceMetrics {
+  recoveryRate: Decimal!
+  averageTicket: Decimal!
+  activeLoansCount: Int!
+  finishedLoansCount: Int!
+}
+
+type BadDebtData {
+  routeId: ID!
+  routeName: String!
+  loanCount: Int!
+  totalAmount: Decimal!
+}
+
+type BadDebtSummary {
+  totalLoans: Int!
+  totalAmount: Decimal!
+  byRoute: [BadDebtData!]!
+}
+
+# Week Information Types
+type WeekInfo {
+  year: Int!
+  weekNumber: Int!
+  startDate: DateTime!
+  endDate: DateTime!
+}
+
+# Portfolio Report Types (Reporte de Cartera)
+type WeekRange {
+  start: DateTime!
+  end: DateTime!
+  weekNumber: Int!
+  year: Int!
+}
+
+type ClientBalanceData {
+  nuevos: Int!
+  terminadosSinRenovar: Int!
+  renovados: Int!
+  balance: Int!
+  trend: Trend!
+}
+
+type PeriodComparison {
+  previousClientesActivos: Int!
+  previousClientesEnCV: Int!
+  previousBalance: Int!
+  cvChange: Int!
+  balanceChange: Int!
+}
+
+type PortfolioSummary {
+  totalClientesActivos: Int!
+  clientesAlCorriente: Int!
+  clientesEnCV: Int!
+  "Promedio de clientes en CV de las semanas completadas (solo para reportes mensuales)"
+  promedioCV: Int
+  "Número de semanas completadas usadas para calcular el promedio"
+  semanasCompletadas: Int
+  "Total de semanas en el período"
+  totalSemanas: Int
+  clientBalance: ClientBalanceData!
+  comparison: PeriodComparison
+}
+
+type WeeklyPortfolioData {
+  weekRange: WeekRange!
+  clientesActivos: Int!
+  clientesEnCV: Int!
+  balance: Int!
+  "Si la semana ya está completada (pasó el domingo)"
+  isCompleted: Boolean!
+}
+
+type LocationBreakdown {
+  locationId: ID!
+  locationName: String!
+  routeId: ID
+  routeName: String
+  clientesActivos: Int!
+  clientesAlCorriente: Int!
+  clientesEnCV: Int!
+  balance: Int!
+}
+
+type RenovationKPIs {
+  totalRenovaciones: Int!
+  totalCierresSinRenovar: Int!
+  tasaRenovacion: Decimal!
+  tendencia: Trend!
+}
+
+type PortfolioReport {
+  reportDate: DateTime!
+  periodType: PeriodType!
+  year: Int!
+  month: Int
+  weekNumber: Int
+  summary: PortfolioSummary!
+  weeklyData: [WeeklyPortfolioData!]!
+  byLocation: [LocationBreakdown!]!
+  renovationKPIs: RenovationKPIs!
+}
+
+type ActiveClientStatus {
+  loanId: ID!
+  borrowerId: ID!
+  clientName: String!
+  pendingAmount: Decimal!
+  cvStatus: CVStatus!
+  daysSinceLastPayment: Int
+  locationName: String!
+  routeName: String!
+}
+
+type PDFGenerationResult {
+  success: Boolean!
+  url: String
+  base64: String
+  filename: String!
+  generatedAt: DateTime!
+  error: String
+}
+
+input PortfolioFiltersInput {
+  locationIds: [ID!]
+  routeIds: [ID!]
+  loantypeIds: [ID!]
+}
+
+# Locality Report Types (Vista por Localidad con desglose semanal)
+enum ClientCategory {
+  NUEVO
+  RENOVADO
+  REINTEGRO
+  ACTIVO
+  FINALIZADO
+  EN_CV
+}
+
+type LocalityWeekData {
+  weekRange: WeekRange!
+  clientesActivos: Int!
+  clientesAlCorriente: Int!
+  clientesEnCV: Int!
+  nuevos: Int!
+  renovados: Int!
+  reintegros: Int!
+  finalizados: Int!
+  balance: Int!
+  "Si la semana ya está completada (pasó el domingo)"
+  isCompleted: Boolean!
+}
+
+type LocalitySummary {
+  totalClientesActivos: Int!
+  totalClientesAlCorriente: Int!
+  totalClientesEnCV: Int!
+  totalNuevos: Int!
+  totalRenovados: Int!
+  totalReintegros: Int!
+  totalFinalizados: Int!
+  balance: Int!
+  alCorrientePromedio: Float!
+  cvPromedio: Float!
+  porcentajePagando: Float!
+}
+
+type LocalityBreakdownDetail {
+  localityId: ID!
+  localityName: String!
+  routeId: ID
+  routeName: String
+  weeklyData: [LocalityWeekData!]!
+  summary: LocalitySummary!
+}
+
+type LocalityReport {
+  periodType: PeriodType!
+  year: Int!
+  month: Int
+  weekNumber: Int
+  weeks: [WeekRange!]!
+  localities: [LocalityBreakdownDetail!]!
+  totals: LocalitySummary!
+}
+
+type LocalityClientDetail {
+  loanId: ID!
+  clientName: String!
+  clientCode: String!
+  amountGived: Decimal!
+  pendingAmount: Decimal!
+  signDate: DateTime!
+  cvStatus: CVStatus!
+  daysSinceLastPayment: Int
+  loanType: String!
+  category: ClientCategory!
+}
+
+# Annual Financial Report Types
+type AnnualFinancialReport {
+  routes: [RouteInfo!]!
+  year: Int!
+  months: [String!]!
+  data: [MonthlyFinancialData!]!
+  annualWeeklyAverageProfit: Decimal!
+  annualWeeklyAverageExpenses: Decimal!
+  annualWeeklyAverageIncome: Decimal!
+  totalActiveWeeks: Int!
+}
+
+type RouteInfo {
+  id: ID!
+  name: String!
+}
+
+type MonthlyFinancialData {
+  month: String!
+  # Egresos
+  totalExpenses: Decimal!
+  generalExpenses: Decimal!
+  nomina: Decimal!
+  comissions: Decimal!
+  nominaInterna: Decimal!
+  salarioExterno: Decimal!
+  viaticos: Decimal!
+  travelExpenses: Decimal!
+  tokaGasolina: Decimal!
+  cashGasolina: Decimal!
+  totalGasolina: Decimal!
+  badDebtAmount: Decimal!
+  # Ingresos
+  incomes: Decimal!
+  # Resultados
+  operationalProfit: Decimal!
+  profitPercentage: Decimal!
+  gainPerPayment: Decimal!
+  # Semanas
+  activeWeeks: Int!
+  weeklyAverageProfit: Decimal!
+  weeklyAverageExpenses: Decimal!
+  weeklyAverageIncome: Decimal!
+  # Reinversión
+  loanDisbursements: Decimal!
+  # Portfolio
+  carteraActiva: Int!
+  carteraVencida: Int!
+  carteraMuerta: Decimal!
+  renovados: Int!
+  # Flujo de efectivo
+  totalIncomingCash: Decimal!
+  capitalReturn: Decimal!
+  profitReturn: Decimal!
+  operationalCashUsed: Decimal!
+  totalInvestment: Decimal!
+  availableCash: Decimal!
+  paymentsCount: Int!
+}
+
+# Portfolio Cleanup Types
+type PortfolioCleanup {
+  id: ID!
+  name: String!
+  description: String
+  cleanupDate: DateTime!
+  toDate: DateTime
+  excludedLoansCount: Int!
+  excludedAmount: Decimal!
+  route: Route
+  executedBy: User!
+  createdAt: DateTime!
+}
+
+type CleanupPreview {
+  totalLoans: Int!
+  totalPendingAmount: Decimal!
+  sampleLoans: [CleanupLoanPreview!]!
+}
+
+type CleanupLoanPreview {
+  id: ID!
+  clientName: String!
+  clientCode: String!
+  signDate: DateTime!
+  pendingAmount: Decimal!
+  routeName: String!
+}
+
+input CreatePortfolioCleanupInput {
+  name: String!
+  description: String
+  cleanupDate: DateTime!
+  maxSignDate: DateTime!
+  routeId: String
+}
+
+input UpdatePortfolioCleanupInput {
+  name: String
+  description: String
+  cleanupDate: DateTime
+}
+
+# Auth Types
+type AuthPayload {
+  accessToken: String!
+  refreshToken: String!
+  user: User!
+}
+
+# Queries
+type Query {
+  # Auth
+  me: User @auth
+
+  # Users & Employees
+  user(id: ID!): User @auth
+  users(role: UserRole, limit: Int, offset: Int): [User!]! @requireRole(roles: [ADMIN])
+  employee(id: ID!): Employee @auth
+  employees(type: EmployeeType, routeId: ID): [Employee!]! @auth
+
+  # Loans
+  loan(id: ID!): Loan @auth
+  loans(
+    status: LoanStatus
+    routeId: ID
+    leadId: ID
+    locationId: ID
+    borrowerId: ID
+    fromDate: DateTime
+    toDate: DateTime
+    limit: Int
+    offset: Int
+  ): LoanConnection! @auth
+  loansByWeekAndLocation(
+    year: Int!
+    weekNumber: Int!
+    locationId: ID
+    limit: Int
+    offset: Int
+  ): [Loan!]! @auth
+  currentWeek: WeekInfo! @auth
+
+  # Payments
+  loanPayments(loanId: ID!, limit: Int, offset: Int): [LoanPayment!]! @auth
+  loanPaymentsByLeadAndDate(leadId: ID!, startDate: DateTime!, endDate: DateTime!): [LoanPayment!]! @auth
+  leadPaymentReceivedByLeadAndDate(leadId: ID!, startDate: DateTime!, endDate: DateTime!): LeadPaymentReceived @auth
+
+  # Transactions
+  transactions(
+    type: TransactionType
+    routeId: ID
+    accountId: ID
+    fromDate: DateTime
+    toDate: DateTime
+    limit: Int
+    offset: Int
+  ): TransactionConnection! @auth
+
+  # Accounts
+  account(id: ID!): Account @auth
+  accounts(routeId: ID, type: AccountType): [Account!]! @auth
+
+  # Routes & Geography
+  route(id: ID!): Route @auth
+  routes: [Route!]! @auth
+  routesWithStats(year: Int!, month: Int!): [RouteWithStats!]! @requireRole(roles: [ADMIN])
+  locations(routeId: ID): [Location!]! @auth
+  locationsCreatedInPeriod(fromDate: DateTime!, toDate: DateTime!, routeId: ID): [Location!]! @auth
+  municipalities: [Municipality!]! @auth
+
+  # Loan types
+  loantype(id: ID!): Loantype @auth
+  loantypes(isActive: Boolean): [Loantype!]! @auth
+
+  # Search (para autocomplete)
+  searchBorrowers(
+    searchTerm: String!
+    leadId: ID
+    locationId: ID
+    limit: Int
+  ): [BorrowerSearchResult!]! @auth
+
+  searchPersonalData(
+    searchTerm: String!
+    excludeBorrowerId: ID
+    locationId: ID
+    limit: Int
+  ): [PersonalData!]! @auth
+
+  # Check existing leader in location
+  checkExistingLeader(locationId: ID!): ExistingLeaderInfo @auth
+
+  # Client History (historial de clientes)
+  searchClients(
+    searchTerm: String!
+    routeId: ID
+    locationId: ID
+    limit: Int
+  ): [ClientSearchResult!]! @auth
+
+  getClientHistory(
+    clientId: ID!
+    routeId: ID
+    locationId: ID
+  ): ClientHistoryData! @auth
+
+  # Reports
+  financialReport(routeIds: [ID!]!, year: Int!, month: Int!): FinancialReport! @requireRole(roles: [ADMIN])
+  getFinancialReportAnnual(routeIds: [ID!]!, year: Int!): AnnualFinancialReport! @requireRole(roles: [ADMIN])
+  badDebtByMonth(year: Int!, month: Int!): [BadDebtData!]! @requireRole(roles: [ADMIN])
+  badDebtSummary: BadDebtSummary! @requireRole(roles: [ADMIN])
+  loansForBadDebt(routeId: ID): [Loan!]! @auth
+
+  # Portfolio Report (Reporte de Cartera)
+  portfolioReportWeekly(year: Int!, weekNumber: Int!, filters: PortfolioFiltersInput): PortfolioReport! @auth
+  portfolioReportMonthly(year: Int!, month: Int!, filters: PortfolioFiltersInput): PortfolioReport! @auth
+  activeClientsWithCVStatus(filters: PortfolioFiltersInput): [ActiveClientStatus!]! @auth
+  currentActiveWeek: WeekRange! @auth
+
+  # Locality Report (Vista por Localidad con desglose semanal)
+  portfolioByLocality(year: Int!, month: Int!, filters: PortfolioFiltersInput): LocalityReport! @auth
+  localityClients(
+    localityId: ID!
+    year: Int!
+    month: Int!
+    weekNumber: Int
+    category: ClientCategory
+  ): [LocalityClientDetail!]! @auth
+
+  # Portfolio Cleanup
+  previewPortfolioCleanup(maxSignDate: DateTime!, routeId: ID): CleanupPreview! @requireRole(roles: [ADMIN])
+  portfolioCleanups(limit: Int, offset: Int): [PortfolioCleanup!]! @requireRole(roles: [ADMIN])
+
+  # Documents
+  documentPhoto(id: ID!): DocumentPhoto @auth
+  documentPhotos(
+    loanId: ID
+    personalDataId: ID
+    documentType: DocumentType
+    hasErrors: Boolean
+    limit: Int
+    offset: Int
+  ): [DocumentPhoto!]! @auth
+  documentsWithErrors(routeId: ID): [DocumentPhoto!]! @auth
+
+  # Telegram Users
+  telegramUsers(
+    filters: TelegramUserFiltersInput
+    limit: Int
+    offset: Int
+  ): [TelegramUser!]! @requireRole(roles: [ADMIN])
+  telegramUser(id: ID!): TelegramUser @requireRole(roles: [ADMIN])
+  telegramUserStats: TelegramUserStats! @requireRole(roles: [ADMIN])
+  telegramUserByChatId(chatId: String!): TelegramUser @requireRole(roles: [ADMIN])
+
+  # Report Configs
+  reportConfigs(isActive: Boolean): [ReportConfig!]! @requireRole(roles: [ADMIN])
+  reportConfig(id: ID!): ReportConfig @requireRole(roles: [ADMIN])
+  reportExecutionLogs(
+    reportConfigId: ID
+    status: String
+    fromDate: DateTime
+    toDate: DateTime
+    limit: Int
+    offset: Int
+  ): [ReportExecutionLog!]! @requireRole(roles: [ADMIN])
+
+  # Document Notifications
+  documentNotificationLogs(
+    routeId: ID
+    status: NotificationStatus
+    issueType: IssueType
+    fromDate: DateTime
+    toDate: DateTime
+    limit: Int
+    offset: Int
+  ): [DocumentNotificationLog!]! @requireRole(roles: [ADMIN])
+  documentsWithNotificationStatus(
+    routeId: ID
+    hasErrors: Boolean
+    hasMissing: Boolean
+    limit: Int
+    offset: Int
+  ): [DocumentWithNotificationStatus!]! @requireRole(roles: [ADMIN])
+
+  # Bank Income Transactions
+  getBankIncomeTransactions(
+    startDate: String!
+    endDate: String!
+    routeIds: [ID!]!
+    onlyAbonos: Boolean
+  ): BankIncomeTransactionsResponse! @requireRole(roles: [ADMIN])
+
+  # Dead Debt (Cartera Muerta)
+  deadDebtLoans(
+    weeksSinceLoanMin: Int
+    weeksWithoutPaymentMin: Int
+    routeId: ID
+    localities: [String!]
+    badDebtStatus: DeadDebtStatus
+    fromDate: DateTime
+    toDate: DateTime
+  ): DeadDebtQueryResult! @requireRole(roles: [ADMIN])
+
+  deadDebtMonthlySummary(
+    year: Int!
+    routeId: ID
+    localities: [String!]
+    weeksSinceLoanMin: Int
+    weeksWithoutPaymentMin: Int
+    badDebtStatus: DeadDebtStatus
+    fromDate: DateTime
+    toDate: DateTime
+  ): DeadDebtMonthlySummaryResult! @requireRole(roles: [ADMIN])
+
+  deadDebtSummaryByLocality(
+    weeksSinceLoanMin: Int
+    weeksWithoutPaymentMin: Int
+    routeId: ID
+    localities: [String!]
+    badDebtStatus: DeadDebtStatus
+  ): [DeadDebtSummaryByLocality!]! @requireRole(roles: [ADMIN])
+
+  # Recovered Dead Debt - payments from loans already marked as dead debt
+  recoveredDeadDebt(
+    year: Int!
+    month: Int!
+    routeId: ID
+  ): RecoveredDeadDebtResult! @requireRole(roles: [ADMIN])
+}
+
+# Input Types
+input CreateUserInput {
+  name: String!
+  email: String!
+  password: String!
+  role: UserRole!
+  telegramChatId: String
+  employeeId: ID
+  # Para crear empleado junto con el usuario
+  createEmployee: Boolean
+  employeeType: EmployeeType
+  # Para vincular PersonalData existente al crear empleado
+  personalDataId: ID
+}
+
+input UpdateUserInput {
+  name: String
+  email: String
+  password: String
+  role: UserRole
+  telegramChatId: String
+  employeeId: ID
+}
+
+input CreateEmployeeInput {
+  type: EmployeeType!
+  personalData: CreatePersonalDataInput!
+  routeIds: [ID!]
+}
+
+input UpdateEmployeeInput {
+  type: EmployeeType
+  routeIds: [ID!]
+}
+
+input CreatePersonalDataInput {
+  fullName: String!
+  clientCode: String
+  birthDate: DateTime
+  phones: [CreatePhoneInput!]
+  addresses: [CreateAddressInput!]
+}
+
+input CreatePhoneInput {
+  number: String!
+}
+
+input CreateAddressInput {
+  street: String!
+  numberInterior: String
+  numberExterior: String
+  zipCode: String
+  locationId: ID!
+}
+
+input CreateBorrowerInput {
+  personalData: CreatePersonalDataInput!
+}
+
+input UpdateBorrowerInput {
+  personalData: UpdatePersonalDataInput
+}
+
+input UpdatePersonalDataInput {
+  fullName: String
+  birthDate: DateTime
+}
+
+input CreateLoanInput {
+  requestedAmount: Decimal!
+  amountGived: Decimal!
+  signDate: DateTime!
+  borrowerId: ID!
+  loantypeId: ID!
+  grantorId: ID!
+  leadId: ID!
+  collateralIds: [ID!]
+  previousLoanId: ID
+}
+
+input UpdateLoanInput {
+  amountGived: Decimal
+  badDebtDate: DateTime
+  isDeceased: Boolean
+  leadId: ID
+  status: LoanStatus
+}
+
+input RenewLoanInput {
+  requestedAmount: Decimal!
+  amountGived: Decimal!
+  signDate: DateTime!
+  loantypeId: ID!
+}
+
+input CreateLoanPaymentInput {
+  loanId: ID!
+  amount: Decimal!
+  comission: Decimal
+  receivedAt: DateTime!
+  paymentMethod: PaymentMethod!
+}
+
+input UpdateLoanPaymentInput {
+  amount: Decimal
+  comission: Decimal
+  paymentMethod: PaymentMethod
+}
+
+input CreateLeadPaymentReceivedInput {
+  leadId: ID!
+  agentId: ID!
+  expectedAmount: Decimal!
+  paidAmount: Decimal!
+  cashPaidAmount: Decimal!
+  bankPaidAmount: Decimal!
+  falcoAmount: Decimal
+  paymentDate: DateTime!
+  payments: [PaymentForLeadInput!]!
+}
+
+input PaymentForLeadInput {
+  loanId: ID!
+  amount: Decimal!
+  comission: Decimal
+  paymentMethod: PaymentMethod!
+}
+
+input UpdateLeadPaymentReceivedInput {
+  expectedAmount: Decimal
+  paidAmount: Decimal
+  cashPaidAmount: Decimal
+  bankPaidAmount: Decimal
+  falcoAmount: Decimal
+  payments: [UpdatePaymentForLeadInput!]
+}
+
+input UpdatePaymentForLeadInput {
+  paymentId: ID
+  loanId: ID!
+  amount: Decimal!
+  comission: Decimal
+  paymentMethod: PaymentMethod!
+  isDeleted: Boolean
+}
+
+input CreateAccountInput {
+  name: String!
+  type: AccountType!
+  amount: Decimal!
+  routeIds: [ID!]
+}
+
+input UpdateAccountInput {
+  name: String
+  isActive: Boolean
+}
+
+input CreateTransactionInput {
+  amount: Decimal!
+  date: DateTime!
+  type: TransactionType!
+  incomeSource: String
+  expenseSource: String
+  sourceAccountId: ID
+  destinationAccountId: ID
+  loanId: ID
+  loanPaymentId: ID
+  routeId: ID
+  leadId: ID
+}
+
+input UpdateTransactionInput {
+  amount: Decimal
+  expenseSource: String
+  incomeSource: String
+  sourceAccountId: ID
+  description: String
+}
+
+input TransferInput {
+  amount: Decimal!
+  sourceAccountId: ID!
+  destinationAccountId: ID!
+  description: String
+}
+
+# Batch Transfer Inputs
+input DrainRoutesInput {
+  routeIds: [ID!]!
+  destinationAccountId: ID!
+  description: String
+}
+
+input RouteAmountInput {
+  routeId: ID!
+  amount: Decimal!
+}
+
+input DistributeMoneyInput {
+  sourceAccountId: ID!
+  routeIds: [ID!]!
+  distributionMode: DistributionMode!
+  fixedAmount: Decimal
+  variableAmounts: [RouteAmountInput!]
+  description: String
+}
+
+input CreateRouteInput {
+  name: String!
+}
+
+input UpdateRouteInput {
+  name: String
+  isActive: Boolean
+}
+
+input CreateLoantypeInput {
+  name: String!
+  weekDuration: Int!
+  rate: Decimal!
+  interestRate: Decimal!
+  loanPaymentComission: Decimal!
+  loanGrantedComission: Decimal!
+  maxAmount: Decimal
+  maxTerm: Int
+}
+
+input UpdateLoantypeInput {
+  name: String
+  weekDuration: Int
+  rate: Decimal
+  interestRate: Decimal
+  loanPaymentComission: Decimal
+  loanGrantedComission: Decimal
+  maxAmount: Decimal
+  maxTerm: Int
+  isActive: Boolean
+}
+
+input UploadDocumentInput {
+  title: String
+  description: String
+  documentType: DocumentType!
+  file: Upload!
+  personalDataId: ID
+  loanId: ID
+  isError: Boolean
+  errorDescription: String
+  isMissing: Boolean
+}
+
+input UpdateDocumentInput {
+  title: String
+  description: String
+  isError: Boolean
+  errorDescription: String
+  isMissing: Boolean
+}
+
+input MarkDocumentAsMissingInput {
+  loanId: ID!
+  personalDataId: ID!
+  documentType: DocumentType!
+}
+
+# Inputs para creación de préstamos en batch
+input CreateLoansInBatchInput {
+  loans: [CreateSingleLoanInput!]!
+  sourceAccountId: ID!
+  signDate: DateTime!
+  leadId: ID!
+  grantorId: ID!
+}
+
+input CreateSingleLoanInput {
+  tempId: String!
+  requestedAmount: Decimal!
+  amountGived: Decimal!
+  loantypeId: ID!
+  comissionAmount: Decimal
+  previousLoanId: ID
+  borrowerId: ID
+  newBorrower: CreateBorrowerInput
+  collateralIds: [ID!]
+  newCollateral: CreatePersonalDataInput
+  firstPayment: FirstPaymentInput
+  isFromDifferentLocation: Boolean
+}
+
+input FirstPaymentInput {
+  amount: Decimal!
+  comission: Decimal
+  paymentMethod: PaymentMethod!
+}
+
+input UpdateLoanExtendedInput {
+  loantypeId: ID
+  requestedAmount: Decimal
+  borrowerName: String
+  borrowerPhone: String
+  collateralIds: [ID!]
+  newCollateral: CreatePersonalDataInput
+  collateralPhone: String
+  comissionAmount: Decimal
+}
+
+input UpdatePhoneInput {
+  personalDataId: ID!
+  phoneId: ID
+  number: String!
+}
+
+# Mutations
+type Mutation {
+  # Auth
+  login(email: String!, password: String!): AuthPayload!
+  refreshToken(refreshToken: String!): AuthPayload!
+  logout: Boolean! @auth
+  changePassword(oldPassword: String!, newPassword: String!): Boolean! @auth
+
+  # Users
+  createUser(input: CreateUserInput!): User! @requireRole(roles: [ADMIN])
+  updateUser(id: ID!, input: UpdateUserInput!): User! @requireRole(roles: [ADMIN])
+  deleteUser(id: ID!): Boolean! @requireRole(roles: [ADMIN])
+
+  # Employees
+  createEmployee(input: CreateEmployeeInput!): Employee! @auth
+  updateEmployee(id: ID!, input: UpdateEmployeeInput!): Employee! @auth
+  promoteToLead(employeeId: ID!): Employee! @requireRole(roles: [ADMIN])
+  createNewLeader(input: CreateNewLeaderInput!): CreateNewLeaderResult! @auth
+
+  # Borrowers
+  createBorrower(input: CreateBorrowerInput!): Borrower! @auth
+  updateBorrower(id: ID!, input: UpdateBorrowerInput!): Borrower! @auth
+
+  # Loans
+  createLoan(input: CreateLoanInput!): Loan! @auth
+  updateLoan(id: ID!, input: UpdateLoanInput!): Loan! @auth
+  renewLoan(loanId: ID!, input: RenewLoanInput!): Loan! @auth
+  markLoanAsBadDebt(loanId: ID!, badDebtDate: DateTime!): Loan! @auth
+  finishLoan(loanId: ID!): Loan! @auth
+  cancelLoan(id: ID!): Loan! @auth
+
+  # Loans - Batch y edición extendida
+  createLoansInBatch(input: CreateLoansInBatchInput!): [Loan!]! @auth
+  updateLoanExtended(id: ID!, input: UpdateLoanExtendedInput!): Loan! @auth
+  cancelLoanWithAccountRestore(id: ID!, accountId: ID!): Loan! @auth
+
+  # PersonalData
+  updatePersonalData(id: ID!, fullName: String!): PersonalData! @auth
+
+  # Phones
+  updatePhone(input: UpdatePhoneInput!): Phone! @auth
+
+  # Payments
+  createLoanPayment(input: CreateLoanPaymentInput!): LoanPayment! @auth
+  updateLoanPayment(id: ID!, input: UpdateLoanPaymentInput!): LoanPayment! @auth
+  deleteLoanPayment(id: ID!): LoanPayment! @auth
+  createLeadPaymentReceived(input: CreateLeadPaymentReceivedInput!): LeadPaymentReceived! @auth
+  updateLeadPaymentReceived(id: ID!, input: UpdateLeadPaymentReceivedInput!): LeadPaymentReceived! @auth
+
+  # Accounts
+  createAccount(input: CreateAccountInput!): Account! @requireRole(roles: [ADMIN])
+  updateAccount(id: ID!, input: UpdateAccountInput!): Account! @requireRole(roles: [ADMIN])
+
+  # Transactions
+  createTransaction(input: CreateTransactionInput!): Transaction! @auth
+  updateTransaction(id: ID!, input: UpdateTransactionInput!): Transaction! @auth
+  deleteTransaction(id: ID!): Boolean! @auth
+  transferBetweenAccounts(input: TransferInput!): Transaction! @auth
+
+  # Batch Transfers (Operaciones Masivas)
+  drainRoutes(input: DrainRoutesInput!): BatchTransferResult! @requireRole(roles: [ADMIN])
+  distributeMoney(input: DistributeMoneyInput!): BatchTransferResult! @requireRole(roles: [ADMIN])
+
+  # Routes
+  createRoute(input: CreateRouteInput!): Route! @requireRole(roles: [ADMIN])
+  updateRoute(id: ID!, input: UpdateRouteInput!): Route! @requireRole(roles: [ADMIN])
+
+  # Locations
+  createLocation(input: CreateLocationInput!): Location! @auth
+
+  # Loan types
+  createLoantype(input: CreateLoantypeInput!): Loantype! @requireRole(roles: [ADMIN])
+  updateLoantype(id: ID!, input: UpdateLoantypeInput!): Loantype! @requireRole(roles: [ADMIN])
+
+  # Portfolio Report PDF
+  generatePortfolioReportPDF(
+    periodType: PeriodType!
+    year: Int!
+    month: Int
+    weekNumber: Int
+    filters: PortfolioFiltersInput
+  ): PDFGenerationResult! @auth
+
+  # Portfolio Cleanup
+  createPortfolioCleanup(input: CreatePortfolioCleanupInput!): PortfolioCleanup! @requireRole(roles: [ADMIN])
+  updatePortfolioCleanup(id: ID!, input: UpdatePortfolioCleanupInput!): PortfolioCleanup! @requireRole(roles: [ADMIN])
+  deletePortfolioCleanup(id: ID!): Boolean! @requireRole(roles: [ADMIN])
+
+  # Documents
+  uploadDocumentPhoto(input: UploadDocumentInput!): DocumentPhoto! @auth
+  updateDocumentPhoto(id: ID!, input: UpdateDocumentInput!): DocumentPhoto! @auth
+  deleteDocumentPhoto(id: ID!): Boolean! @auth
+  markDocumentAsMissing(input: MarkDocumentAsMissingInput!): DocumentPhoto! @auth
+
+  # Telegram Users
+  activateTelegramUser(id: ID!): TelegramUser! @requireRole(roles: [ADMIN])
+  deactivateTelegramUser(id: ID!): TelegramUser! @requireRole(roles: [ADMIN])
+  updateTelegramUser(id: ID!, input: UpdateTelegramUserInput!): TelegramUser! @requireRole(roles: [ADMIN])
+  linkTelegramToUser(input: LinkTelegramToUserInput!): TelegramUser! @requireRole(roles: [ADMIN])
+  unlinkTelegramFromUser(telegramUserId: ID!): TelegramUser! @requireRole(roles: [ADMIN])
+  deleteTelegramUser(id: ID!): Boolean! @requireRole(roles: [ADMIN])
+
+  # Report Configs
+  createReportConfig(input: CreateReportConfigInput!): ReportConfig! @requireRole(roles: [ADMIN])
+  updateReportConfig(id: ID!, input: UpdateReportConfigInput!): ReportConfig! @requireRole(roles: [ADMIN])
+  deleteReportConfig(id: ID!): Boolean! @requireRole(roles: [ADMIN])
+  toggleReportConfig(id: ID!): ReportConfig! @requireRole(roles: [ADMIN])
+  executeReportManually(reportConfigId: ID!): ReportExecutionResult! @requireRole(roles: [ADMIN])
+
+  # Document Notifications
+  sendDocumentNotification(input: SendDocumentNotificationInput!): SendNotificationResult! @requireRole(roles: [ADMIN])
+  retryFailedNotification(notificationId: ID!): SendNotificationResult! @requireRole(roles: [ADMIN])
+  sendBulkDocumentNotifications(
+    documentIds: [ID!]!
+    recipientChatIds: [String!]!
+    includePhoto: Boolean
+  ): [SendNotificationResult!]! @requireRole(roles: [ADMIN])
+
+  # Dead Debt (Cartera Muerta)
+  markLoansAsDeadDebt(loanIds: [ID!]!, deadDebtDate: DateTime!): MarkDeadDebtResult! @requireRole(roles: [ADMIN])
+}
+
+# Inputs for creating new leader
+input CreateNewLeaderInput {
+  fullName: String!
+  birthDate: DateTime
+  phone: String
+  locationId: ID!
+  routeId: ID!
+  replaceExisting: Boolean
+}
+
+# Result type for creating new leader
+type CreateNewLeaderResult {
+  success: Boolean!
+  message: String!
+  newLeaderId: ID
+  loansTransferred: Int
+}
+
+# Input for creating new location
+input CreateLocationInput {
+  name: String!
+  municipalityId: ID!
+  routeId: ID!
+}
+
+# Query to check existing leader
+type ExistingLeaderInfo {
+  id: ID!
+  fullName: String!
+  locationName: String!
+}
+
+# ========================================
+# TELEGRAM & NOTIFICATIONS
+# ========================================
+
+enum ReportType {
+  NOTIFICACION_TIEMPO_REAL
+  CREDITOS_CON_ERRORES
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  RETRY
+}
+
+enum IssueType {
+  ERROR
+  MISSING
+}
+
+type TelegramUser {
+  id: ID!
+  chatId: String!
+  name: String!
+  username: String
+  isActive: Boolean!
+  registeredAt: DateTime!
+  lastActivity: DateTime!
+  reportsReceived: Int!
+  isInRecipientsList: Boolean!
+  notes: String
+  platformUser: User
+  reportConfigs: [ReportConfig!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type TelegramUserStats {
+  totalUsers: Int!
+  activeUsers: Int!
+  inactiveUsers: Int!
+  linkedToPlataform: Int!
+  inRecipientsList: Int!
+}
+
+type ReportSchedule {
+  days: [String!]!
+  hour: String!
+  timezone: String!
+}
+
+type ReportConfig {
+  id: ID!
+  name: String!
+  reportType: String!
+  schedule: ReportSchedule
+  isActive: Boolean!
+  routes: [Route!]!
+  telegramRecipients: [TelegramUser!]!
+  executionLogs: [ReportExecutionLog!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type ReportExecutionLog {
+  id: ID!
+  status: String!
+  executionType: String!
+  message: String
+  errorDetails: String
+  recipientsCount: Int
+  successfulDeliveries: Int
+  failedDeliveries: Int
+  startTime: DateTime!
+  endTime: DateTime
+  duration: Int
+  cronExpression: String
+  timezone: String
+  reportConfig: ReportConfig!
+  createdAt: DateTime!
+}
+
+type DocumentNotificationLog {
+  id: ID!
+  documentId: String!
+  documentType: String!
+  personalDataId: String!
+  personName: String!
+  loanId: String
+  routeId: String!
+  routeName: String!
+  localityName: String
+  routeLeadId: String
+  routeLeadName: String
+  telegramUserId: String!
+  telegramChatId: String!
+  telegramUsername: String
+  issueType: IssueType!
+  description: String
+  messageContent: String!
+  status: NotificationStatus!
+  telegramResponse: String
+  telegramErrorCode: Int
+  telegramErrorMessage: String
+  sentAt: DateTime
+  responseTimeMs: Int
+  retryCount: Int!
+  lastRetryAt: DateTime
+  notes: String
+  createdAt: DateTime!
+}
+
+type DocumentWithNotificationStatus {
+  document: DocumentPhoto!
+  notificationSent: Boolean!
+  lastNotification: DocumentNotificationLog
+}
+
+type SendNotificationResult {
+  success: Boolean!
+  message: String!
+  notificationId: ID
+  telegramResponse: String
+}
+
+type ReportExecutionResult {
+  success: Boolean!
+  message: String!
+  recipientsNotified: Int!
+  errors: [String!]
+}
+
+# Bank Income Types
+type BankIncomeTransaction {
+  id: ID!
+  amount: Float!
+  type: String!
+  incomeSource: String
+  date: DateTime!
+  description: String
+  locality: String
+  employeeName: String
+  leaderLocality: String
+  isClientPayment: Boolean!
+  isLeaderPayment: Boolean!
+  name: String!
+}
+
+type BankIncomeTransactionsResponse {
+  success: Boolean!
+  message: String
+  transactions: [BankIncomeTransaction!]!
+}
+
+# ========================================
+# DEAD DEBT (CARTERA MUERTA) TYPES
+# ========================================
+
+enum DeadDebtStatus {
+  ALL
+  MARKED
+  UNMARKED
+}
+
+type DeadDebtLoan {
+  id: ID!
+  amountGived: Decimal!
+  signDate: DateTime!
+  pendingAmountStored: Decimal!
+  badDebtDate: DateTime
+  badDebtCandidate: Decimal!
+  weeksSinceLoan: Int!
+  weeksWithoutPayment: Int!
+  borrower: DeadDebtBorrower!
+  lead: DeadDebtLead!
+  payments: [DeadDebtPayment!]!
+}
+
+type DeadDebtBorrower {
+  fullName: String!
+  clientCode: String!
+}
+
+type DeadDebtLead {
+  fullName: String!
+  locality: String!
+  route: String!
+}
+
+type DeadDebtPayment {
+  receivedAt: DateTime
+  amount: Decimal!
+}
+
+type DeadDebtSummaryByLocality {
+  locality: String!
+  loanCount: Int!
+  totalPending: Decimal!
+  totalBadDebtCandidate: Decimal!
+}
+
+type DeadDebtQueryResult {
+  loans: [DeadDebtLoan!]!
+  summary: DeadDebtTotals!
+  localities: [String!]!
+}
+
+type DeadDebtTotals {
+  totalLoans: Int!
+  totalPendingAmount: Decimal!
+  totalBadDebtCandidate: Decimal!
+}
+
+type MonthInfo {
+  year: Int!
+  month: Int!
+  name: String!
+  startDate: DateTime!
+  endDate: DateTime!
+}
+
+type EvaluationPeriod {
+  from: DateTime!
+  to: DateTime!
+  description: String!
+}
+
+type DeadDebtCriteria {
+  weeksSinceLoanMin: Int
+  weeksWithoutPaymentMin: Int
+  badDebtStatus: String
+  localities: [String!]!
+}
+
+type DeadDebtMonthSummary {
+  month: MonthInfo!
+  evaluationPeriod: EvaluationPeriod!
+  criteria: DeadDebtCriteria!
+  summary: DeadDebtTotals!
+  loans: [DeadDebtLoan!]!
+}
+
+type DeadDebtMonthlySummaryResult {
+  year: Int!
+  monthlySummary: [DeadDebtMonthSummary!]!
+  yearTotals: DeadDebtTotals!
+  routesInfo: [RouteInfo!]!
+}
+
+type MarkDeadDebtResult {
+  success: Boolean!
+  message: String!
+  count: Int!
+}
+
+# Batch Transfer Result
+type BatchTransferResult {
+  success: Boolean!
+  message: String!
+  transactionsCreated: Int!
+  totalAmount: Decimal!
+  transactions: [Transaction!]!
+}
+
+# Recovered Dead Debt types - payments from loans marked as dead debt
+type RecoveredDeadDebtResult {
+  year: Int!
+  month: Int!
+  summary: RecoveredDeadDebtSummary!
+  payments: [RecoveredDeadDebtPayment!]!
+}
+
+type RecoveredDeadDebtSummary {
+  totalRecovered: Decimal!
+  paymentsCount: Int!
+  loansCount: Int!
+  clientsCount: Int!
+}
+
+type RecoveredDeadDebtPayment {
+  id: ID!
+  amount: Decimal!
+  receivedAt: DateTime!
+  loanId: ID!
+  clientName: String!
+  clientCode: String!
+  badDebtDate: DateTime!
+  routeName: String!
+  locality: String!
+  pendingAmount: Decimal!
+}
+
+# Telegram Input Types
+input TelegramUserFiltersInput {
+  isActive: Boolean
+  isLinkedToUser: Boolean
+  isInRecipientsList: Boolean
+  searchTerm: String
+}
+
+input ReportScheduleInput {
+  days: [String!]!
+  hour: String!
+  timezone: String
+}
+
+input CreateReportConfigInput {
+  name: String!
+  reportType: ReportType!
+  schedule: ReportScheduleInput!
+  routeIds: [ID!]!
+  recipientIds: [ID!]!
+  isActive: Boolean
+}
+
+input UpdateReportConfigInput {
+  name: String
+  schedule: ReportScheduleInput
+  routeIds: [ID!]
+  recipientIds: [ID!]
+  isActive: Boolean
+}
+
+input SendDocumentNotificationInput {
+  documentId: ID!
+  recipientChatIds: [String!]!
+  customMessage: String
+  includePhoto: Boolean
+}
+
+input LinkTelegramToUserInput {
+  telegramUserId: ID!
+  platformUserId: ID!
+}
+
+input UpdateTelegramUserInput {
+  isActive: Boolean
+  isInRecipientsList: Boolean
+  notes: String
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@solufacil/graphql-schema",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "codegen": "graphql-codegen --config codegen.ts",
+    "codegen:watch": "graphql-codegen --config codegen.ts --watch",
+    "clean": "rm -rf dist .turbo node_modules generated"
+  },
+  "dependencies": {
+    "@solufacil/database": "workspace:^",
+    "decimal.js": "^10.4.3",
+    "graphql": "^16.8.1",
+    "graphql-scalars": "^1.22.4",
+    "graphql-upload-minimal": "^1.6.4"
+  },
+  "devDependencies": {
+    "@graphql-codegen/cli": "^5.0.0",
+    "@graphql-codegen/typescript": "^4.0.1",
+    "@graphql-codegen/typescript-resolvers": "^4.0.1",
+    "typescript": "^5.3.3"
+  }
+}

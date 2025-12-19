@@ -1,0 +1,9 @@
+// Export Prisma client - Prisma 7
+export { prisma, type PrismaTransaction, type ExtendedPrismaClient } from './client'
+
+// Re-export Prisma types from generated client
+export * from './generated/prisma'
+
+// Export Decimal from decimal.js for calculations
+// In Prisma 7, Decimal should be imported from decimal.js directly
+export { Decimal } from 'decimal.js'
