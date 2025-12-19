@@ -6,7 +6,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "postinstall": "test -n \"$DATABASE_URL\" && prisma generate || echo 'Skipped prisma generate (no DATABASE_URL)'",
-    "build": "prisma generate && tsc",
+    "build": "prisma generate && tsc && cp -r src/generated dist/",
     "dev": "tsc --watch",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
