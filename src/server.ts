@@ -16,6 +16,10 @@ import { PdfExportService } from './services/PdfExportService'
 async function startServer() {
   const app = express()
 
+  // Apply global middleware
+  app.use(express.json({ limit: '10mb' }))
+  app.use(express.urlencoded({ extended: true }))
+
   // CORS configuration
   const corsOptions = {
     origin: [
@@ -46,7 +50,6 @@ async function startServer() {
   app.use(
     '/graphql',
     cors(corsOptions),
-    express.json(),
     graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 10 }), // 10MB max, 10 files max
     expressMiddleware(server, {
       context: createContext,
