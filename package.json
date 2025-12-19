@@ -1,25 +1,47 @@
 {
-  "name": "solufacil-api",
+  "name": "@solufacil/api",
   "version": "1.0.0",
   "private": true,
-  "description": "Solufacil API - GraphQL backend service",
+  "main": "src/server.ts",
   "scripts": {
-    "dev": "pnpm --filter @solufacil/api dev",
-    "build": "pnpm --filter @solufacil/shared build && pnpm --filter @solufacil/graphql-schema build && pnpm --filter @solufacil/business-logic build && pnpm --filter @solufacil/api build",
-    "start": "pnpm --filter @solufacil/api start",
+    "dev": "tsx watch src/server.ts",
+    "build": "pnpm --filter @solufacil/shared build && pnpm --filter @solufacil/graphql-schema build && pnpm --filter @solufacil/business-logic build && tsc",
+    "start": "node dist/server.js",
+    "lint": "eslint src/**/*.ts",
+    "clean": "rm -rf dist node_modules packages/*/dist packages/*/node_modules",
+    "db:studio": "pnpm --filter @solufacil/database db:studio",
     "db:generate": "pnpm --filter @solufacil/database db:generate",
     "db:push": "pnpm --filter @solufacil/database db:push",
     "db:migrate": "pnpm --filter @solufacil/database db:migrate",
-    "db:studio": "pnpm --filter @solufacil/database db:studio",
-    "clean": "rm -rf node_modules apps/api/node_modules packages/*/node_modules"
+    "db:seed": "pnpm --filter @solufacil/database db:seed"
+  },
+  "dependencies": {
+    "@apollo/server": "^4.12.2",
+    "@solufacil/business-logic": "workspace:*",
+    "@solufacil/database": "workspace:*",
+    "@solufacil/graphql-schema": "workspace:*",
+    "@solufacil/shared": "workspace:*",
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.5.0",
+    "cors": "^2.8.5",
+    "decimal.js": "^10.4.3",
+    "dotenv": "^16.4.1",
+    "express": "^5.2.1",
+    "graphql": "^16.8.1",
+    "graphql-scalars": "^1.22.4",
+    "graphql-upload-minimal": "^1.6.4",
+    "jsonwebtoken": "^9.0.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "pdfkit": "^0.17.2"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.5",
     "@types/node": "^20.11.16",
+    "@types/pdfkit": "^0.17.4",
+    "tsx": "^4.7.1",
     "typescript": "^5.3.3"
-  },
-  "packageManager": "pnpm@8.15.1",
-  "engines": {
-    "node": ">=20.0.0",
-    "pnpm": ">=8.0.0"
   }
 }

@@ -18,7 +18,7 @@ GraphQL API backend for SoluFácil microloans management system.
 pnpm install
 
 # Setup database
-cp apps/api/.env.example apps/api/.env
+cp .env.example .env
 # Edit .env with your DATABASE_URL
 
 # Generate Prisma client
@@ -48,4 +48,4 @@ Required:
 - `CORS_ORIGIN` - Frontend URL (Vercel)
 - `CLOUDINARY_*` - Image upload credentials
 
-See `apps/api/.env.example` for full list.
+See `.env.example` for full list.
