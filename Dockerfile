@@ -2,7 +2,7 @@
 FROM node:20-alpine AS builder
 
 # Install pnpm
-RUN corepack enable && corepack prepare pnpm@8.15.1 --activate
+RUN corepack enable && corepack prepare pnpm@10.24.0 --activate
 
 WORKDIR /app
 
@@ -40,7 +40,7 @@ RUN pnpm --filter @solufacil/shared build && \
 # Production stage
 FROM node:20-alpine AS runner
 
-RUN corepack enable && corepack prepare pnpm@8.15.1 --activate
+RUN corepack enable && corepack prepare pnpm@10.24.0 --activate
 
 WORKDIR /app
 
