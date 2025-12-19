@@ -453,6 +453,7 @@ export type CreateUserInput = {
     employeeType?: InputMaybe<EmployeeType>;
     name: Scalars['String']['input'];
     password: Scalars['String']['input'];
+    personalDataId?: InputMaybe<Scalars['ID']['input']>;
     role: UserRole;
     telegramChatId?: InputMaybe<Scalars['String']['input']>;
 };
@@ -2047,6 +2048,7 @@ export type User = {
 export declare enum UserRole {
     Admin = "ADMIN",
     Captura = "CAPTURA",
+    DocumentReviewer = "DOCUMENT_REVIEWER",
     Normal = "NORMAL"
 }
 export type WeekInfo = {
