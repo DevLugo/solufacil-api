@@ -46,9 +46,8 @@ async function startServer() {
   app.use(
     '/graphql',
     cors(corsOptions),
-    // Process file uploads before JSON parsing
-    graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 10 }), // 10MB max, 10 files max
     express.json(),
+    graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 10 }), // 10MB max, 10 files max
     expressMiddleware(server, {
       context: createContext,
     }) as unknown as express.RequestHandler
