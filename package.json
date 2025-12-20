@@ -7,6 +7,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "pnpm --filter @solufacil/shared build && pnpm --filter @solufacil/database build && pnpm --filter @solufacil/graphql-schema build && pnpm --filter @solufacil/business-logic build && tsc",
     "start": "node dist/server.js",
+    "deploy:migrate": "pnpm --filter @solufacil/database prisma migrate deploy",
+    "deploy:full": "pnpm build && pnpm deploy:migrate && pnpm start",
     "lint": "eslint src/**/*.ts",
     "clean": "rm -rf dist node_modules packages/*/dist packages/*/node_modules",
     "db:studio": "pnpm --filter @solufacil/database db:studio",
