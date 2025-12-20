@@ -62,6 +62,84 @@ export interface BadDebtSummary {
 export class ReportService {
   constructor(private prisma: PrismaClient) {}
 
+  // ========== Private Helper Methods ==========
+
+  /**
+   * Builds the base WHERE clause for querying active loans.
+   */
+  private getActiveLoansWhereClause(
+    routeIds: string[],
+    signDateFilter?: { lte?: Date; gte?: Date }
+  ) {
+    return {
+      snapshotRouteId: { in: routeIds },
+      finishedDate: null,
+      pendingAmountStored: { gt: 0 },
+      excludedByCleanup: null,
+      ...(signDateFilter && { signDate: signDateFilter }),
+    }
+  }
+
+  /**
+   * Calculates CV breakdown (Al Corriente vs Cartera Vencida) from loans with payments.
+   */
+  private calculateCVBreakdown(
+    loansWithPayments: Array<{ payments: { id: string }[] }>
+  ): { alCorriente: number; carteraVencida: number } {
+    let alCorriente = 0
+    let carteraVencida = 0
+
+    for (const loan of loansWithPayments) {
+      if (loan.payments.length > 0) {
+        alCorriente++
+      } else {
+        carteraVencida++
+      }
+    }
+
+    return { alCorriente, carteraVencida }
+  }
+
+  /**
+   * Calculates loan totals (portfolio, paid, pending, average).
+   */
+  private calculateLoanTotals(
+    loans: Array<{
+      totalDebtAcquired: { toString(): string }
+      totalPaid: { toString(): string }
+      pendingAmountStored: { toString(): string }
+    }>
+  ): {
+    totalPortfolio: Decimal
+    totalPaid: Decimal
+    pendingAmount: Decimal
+    averagePayment: Decimal
+  } {
+    const totalPortfolio = loans.reduce(
+      (acc, loan) => acc.plus(new Decimal(loan.totalDebtAcquired.toString())),
+      new Decimal(0)
+    )
+
+    const totalPaid = loans.reduce(
+      (acc, loan) => acc.plus(new Decimal(loan.totalPaid.toString())),
+      new Decimal(0)
+    )
+
+    const pendingAmount = loans.reduce(
+      (acc, loan) => acc.plus(new Decimal(loan.pendingAmountStored.toString())),
+      new Decimal(0)
+    )
+
+    const averagePayment =
+      loans.length > 0
+        ? totalPaid.dividedBy(loans.length).toDecimalPlaces(2)
+        : new Decimal(0)
+
+    return { totalPortfolio, totalPaid, pendingAmount, averagePayment }
+  }
+
+  // ========== Public Methods ==========
+
   async getFinancialReport(
     routeIds: string[],
     year: number,
@@ -100,12 +178,7 @@ export class ReportService {
 
     // Get active loans with their payments for CV calculation
     const activeLoansWithPayments = await this.prisma.loan.findMany({
-      where: {
-        snapshotRouteId: { in: routeIds },
-        finishedDate: null,
-        pendingAmountStored: { gt: 0 },
-        excludedByCleanup: null,
-      },
+      where: this.getActiveLoansWhereClause(routeIds),
       select: {
         id: true,
         totalDebtAcquired: true,
@@ -128,20 +201,9 @@ export class ReportService {
 
     const activeLoans = activeLoansWithPayments.length
 
-    // Calculate CV breakdown:
-    // CV (Cartera Vencida) = loans without payment in the current month
-    // Al Corriente = loans with at least one payment in the current month
-    let alCorriente = 0
-    let carteraVencida = 0
-
-    for (const loan of activeLoansWithPayments) {
-      const hasPaymentThisMonth = loan.payments.length > 0
-      if (hasPaymentThisMonth) {
-        alCorriente++
-      } else {
-        carteraVencida++
-      }
-    }
+    // Calculate CV breakdown using helper
+    const { alCorriente, carteraVencida } =
+      this.calculateCVBreakdown(activeLoansWithPayments)
 
     const activeLoansBreakdown: ActiveLoansBreakdown = {
       total: activeLoans,
@@ -149,26 +211,9 @@ export class ReportService {
       carteraVencida,
     }
 
-    const loansWithAmounts = activeLoansWithPayments
-
-    const totalPortfolio = loansWithAmounts.reduce(
-      (acc, loan) => acc.plus(new Decimal(loan.totalDebtAcquired.toString())),
-      new Decimal(0)
-    )
-
-    const totalPaid = loansWithAmounts.reduce(
-      (acc, loan) => acc.plus(new Decimal(loan.totalPaid.toString())),
-      new Decimal(0)
-    )
-
-    const pendingAmount = loansWithAmounts.reduce(
-      (acc, loan) => acc.plus(new Decimal(loan.pendingAmountStored.toString())),
-      new Decimal(0)
-    )
-
-    const averagePayment = activeLoans > 0
-      ? totalPaid.dividedBy(activeLoans).toDecimalPlaces(2)
-      : new Decimal(0)
+    // Calculate loan totals using helper
+    const { totalPortfolio, totalPaid, pendingAmount, averagePayment } =
+      this.calculateLoanTotals(activeLoansWithPayments)
 
     const summary: FinancialSummary = {
       activeLoans,
@@ -202,10 +247,54 @@ export class ReportService {
     month: number
   ): Promise<WeeklyData[]> {
     const startDate = new Date(year, month - 1, 1)
-    const endDate = new Date(year, month, 0)
-    const weeklyData: WeeklyData[] = []
+    const endDate = new Date(year, month, 0, 23, 59, 59)
 
-    let currentWeekStart = new Date(startDate)
+    // OPTIMIZATION: Get all data for the month in 3 queries instead of N*3 queries
+    // Query 1: Get all loans granted in the month
+    const allLoansGranted = await this.prisma.loan.findMany({
+      where: {
+        snapshotRouteId: { in: routeIds },
+        signDate: {
+          gte: startDate,
+          lte: endDate,
+        },
+      },
+      select: {
+        id: true,
+        signDate: true,
+      },
+    })
+
+    // Query 2: Get all payments for the month
+    const allPayments = await this.prisma.loanPayment.findMany({
+      where: {
+        loanRelation: {
+          snapshotRouteId: { in: routeIds },
+        },
+        receivedAt: {
+          gte: startDate,
+          lte: endDate,
+        },
+      },
+      select: {
+        amount: true,
+        receivedAt: true,
+      },
+    })
+
+    // Query 3: Get all active loans (for expected payments calculation)
+    const allActiveLoans = await this.prisma.loan.findMany({
+      where: this.getActiveLoansWhereClause(routeIds, { lte: endDate }),
+      select: {
+        id: true,
+        expectedWeeklyPayment: true,
+        signDate: true,
+      },
+    })
+
+    // Now calculate weekly data by filtering in memory
+    const weeklyData: WeeklyData[] = []
+    let currentWeekStart: Date = new Date(startDate)
     let weekNumber = 1
 
     while (currentWeekStart <= endDate) {
@@ -216,51 +305,25 @@ export class ReportService {
         currentWeekEnd.setTime(endDate.getTime())
       }
 
-      // Loans granted this week
-      const loansGranted = await this.prisma.loan.count({
-        where: {
-          snapshotRouteId: { in: routeIds },
-          signDate: {
-            gte: currentWeekStart,
-            lte: currentWeekEnd,
-          },
-        },
-      })
+      // Filter loans granted this week
+      const loansGranted = allLoansGranted.filter(
+        (loan) => loan.signDate >= currentWeekStart && loan.signDate <= currentWeekEnd
+      ).length
 
-      // Payments received this week
-      const payments = await this.prisma.loanPayment.findMany({
-        where: {
-          loanRelation: {
-            snapshotRouteId: { in: routeIds },
-          },
-          receivedAt: {
-            gte: currentWeekStart,
-            lte: currentWeekEnd,
-          },
-        },
-        select: {
-          amount: true,
-        },
-      })
+      // Filter payments received this week
+      const weekPayments = allPayments.filter(
+        (payment) => payment.receivedAt >= currentWeekStart && payment.receivedAt <= currentWeekEnd
+      )
 
-      const paymentsReceived = payments.reduce(
+      const paymentsReceived = weekPayments.reduce(
         (acc, payment) => acc.plus(new Decimal(payment.amount.toString())),
         new Decimal(0)
       )
 
-      // Expected payments (based on active loans' weekly payment)
-      const activeLoans = await this.prisma.loan.findMany({
-        where: {
-          snapshotRouteId: { in: routeIds },
-          finishedDate: null,
-          pendingAmountStored: { gt: 0 },
-          excludedByCleanup: null,
-          signDate: { lte: currentWeekEnd },
-        },
-        select: {
-          expectedWeeklyPayment: true,
-        },
-      })
+      // Filter active loans that were active by the end of this week
+      const activeLoans = allActiveLoans.filter(
+        (loan) => loan.signDate <= currentWeekEnd
+      )
 
       const expectedPayments = activeLoans.reduce(
         (acc, loan) => acc.plus(new Decimal(loan.expectedWeeklyPayment.toString())),
@@ -276,12 +339,13 @@ export class ReportService {
         date: new Date(currentWeekStart),
         loansGranted,
         paymentsReceived,
-        paymentsCount: payments.length,
+        paymentsCount: weekPayments.length,
         expectedPayments,
         recoveryRate,
       })
 
-      currentWeekStart.setDate(currentWeekStart.getDate() + 7)
+      // Create new Date instead of mutating to avoid side effects
+      currentWeekStart = new Date(currentWeekStart.getTime() + 7 * 24 * 60 * 60 * 1000)
       weekNumber++
     }
 
@@ -302,13 +366,7 @@ export class ReportService {
 
     // Get active loans for previous month with payments for CV calculation
     const prevActiveLoansWithPayments = await this.prisma.loan.findMany({
-      where: {
-        snapshotRouteId: { in: routeIds },
-        finishedDate: null,
-        pendingAmountStored: { gt: 0 },
-        excludedByCleanup: null,
-        signDate: { lte: prevEndDate }, // Only loans that existed in previous month
-      },
+      where: this.getActiveLoansWhereClause(routeIds, { lte: prevEndDate }),
       select: {
         id: true,
         totalDebtAcquired: true,
@@ -330,33 +388,19 @@ export class ReportService {
       return null
     }
 
-    // Calculate CV breakdown for previous month
-    let prevAlCorriente = 0
-    let prevCarteraVencida = 0
-    for (const loan of prevActiveLoansWithPayments) {
-      if (loan.payments.length > 0) {
-        prevAlCorriente++
-      } else {
-        prevCarteraVencida++
-      }
-    }
+    // Calculate CV breakdown for previous month using helper
+    const { alCorriente: prevAlCorriente, carteraVencida: prevCarteraVencida } =
+      this.calculateCVBreakdown(prevActiveLoansWithPayments)
+
+    // Calculate loan totals using helper
+    const {
+      totalPortfolio: prevTotalPortfolio,
+      totalPaid: prevTotalPaid,
+      pendingAmount: prevPendingAmount,
+      averagePayment: prevAveragePayment,
+    } = this.calculateLoanTotals(prevActiveLoansWithPayments)
 
     const prevActiveLoans = prevActiveLoansWithPayments.length
-    const prevTotalPortfolio = prevActiveLoansWithPayments.reduce(
-      (acc, loan) => acc.plus(new Decimal(loan.totalDebtAcquired.toString())),
-      new Decimal(0)
-    )
-    const prevTotalPaid = prevActiveLoansWithPayments.reduce(
-      (acc, loan) => acc.plus(new Decimal(loan.totalPaid.toString())),
-      new Decimal(0)
-    )
-    const prevPendingAmount = prevActiveLoansWithPayments.reduce(
-      (acc, loan) => acc.plus(new Decimal(loan.pendingAmountStored.toString())),
-      new Decimal(0)
-    )
-    const prevAveragePayment = prevActiveLoans > 0
-      ? prevTotalPaid.dividedBy(prevActiveLoans).toDecimalPlaces(2)
-      : new Decimal(0)
 
     const previousMonth: FinancialSummary = {
       activeLoans: prevActiveLoans,
@@ -416,13 +460,10 @@ export class ReportService {
   private async calculatePerformanceMetrics(
     routeIds: string[]
   ): Promise<PerformanceMetrics> {
+    const activeLoansWhereClause = this.getActiveLoansWhereClause(routeIds)
+
     const activeLoansCount = await this.prisma.loan.count({
-      where: {
-        snapshotRouteId: { in: routeIds },
-        finishedDate: null,
-        pendingAmountStored: { gt: 0 },
-        excludedByCleanup: null,
-      },
+      where: activeLoansWhereClause,
     })
 
     const finishedLoansCount = await this.prisma.loan.count({
@@ -433,12 +474,7 @@ export class ReportService {
     })
 
     const activeLoans = await this.prisma.loan.findMany({
-      where: {
-        snapshotRouteId: { in: routeIds },
-        finishedDate: null,
-        pendingAmountStored: { gt: 0 },
-        excludedByCleanup: null,
-      },
+      where: activeLoansWhereClause,
       select: {
         totalDebtAcquired: true,
         totalPaid: true,

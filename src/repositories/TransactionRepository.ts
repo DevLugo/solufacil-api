@@ -58,28 +58,85 @@ export class TransactionRepository {
       }
     }
 
+    // OPTIMIZATION: Use select with specific fields instead of deep includes
+    // This reduces the amount of data fetched from the database significantly
     const [transactions, totalCount] = await Promise.all([
       this.prisma.transaction.findMany({
         where,
         take: options?.limit ?? 50,
         skip: options?.offset ?? 0,
         orderBy: { date: 'desc' },
-        include: {
-          sourceAccountRelation: true,
-          destinationAccountRelation: true,
+        select: {
+          id: true,
+          amount: true,
+          date: true,
+          type: true,
+          incomeSource: true,
+          expenseSource: true,
+          description: true,
+          profitAmount: true,
+          returnToCapital: true,
+          snapshotLeadId: true,
+          snapshotRouteId: true,
+          expenseGroupId: true,
+          sourceAccount: true,
+          destinationAccount: true,
+          loan: true,
+          loanPayment: true,
+          route: true,
+          lead: true,
+          leadPaymentReceived: true,
+          createdAt: true,
+          updatedAt: true,
+          // Include only necessary related data with select
+          sourceAccountRelation: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+            },
+          },
+          destinationAccountRelation: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+            },
+          },
           loanRelation: {
-            include: {
+            select: {
+              id: true,
+              borrower: true,
               borrowerRelation: {
-                include: {
-                  personalDataRelation: true,
+                select: {
+                  id: true,
+                  personalData: true,
+                  personalDataRelation: {
+                    select: {
+                      id: true,
+                      fullName: true,
+                    },
+                  },
                 },
               },
             },
           },
-          routeRelation: true,
+          routeRelation: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
           leadRelation: {
-            include: {
-              personalDataRelation: true,
+            select: {
+              id: true,
+              personalData: true,
+              personalDataRelation: {
+                select: {
+                  id: true,
+                  fullName: true,
+                },
+              },
             },
           },
         },

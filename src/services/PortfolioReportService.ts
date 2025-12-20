@@ -262,17 +262,26 @@ export class PortfolioReportService {
     const lastCompletedWeek = this.getLastCompletedWeek(weeks)
     const previousWeek = completedWeeks.length > 1 ? completedWeeks[completedWeeks.length - 2] : null
 
-    // Build weekly data for ALL weeks (completed and not)
+    // OPTIMIZATION: Get all loans and payments for the entire month in ONE query
+    const { loans, allPayments } = await this.getActiveLoansWithPaymentsForMonth(
+      periodStart,
+      periodEnd,
+      filters
+    )
+
+    // Build weekly data for ALL weeks (completed and not) by filtering payments in memory
     const weeklyData: WeeklyPortfolioData[] = []
     let totalCVFromCompletedWeeks = 0
 
     for (const week of weeks) {
       const isCompleted = this.isWeekCompleted(week)
-      const { loans: weekLoans, paymentsMap: weekPaymentsMap } =
-        await this.getActiveLoansWithPayments(week, filters)
-      const weekStatus = countClientsStatus(weekLoans, weekPaymentsMap, week)
+
+      // Filter payments for this specific week from the allPayments map
+      const weekPaymentsMap = this.filterPaymentsByWeek(allPayments, week)
+
+      const weekStatus = countClientsStatus(loans, weekPaymentsMap, week)
       const weekBalance = calculateClientBalance(
-        weekLoans,
+        loans,
         week.start,
         week.end
       )
@@ -296,19 +305,17 @@ export class PortfolioReportService {
       ? Math.round(totalCVFromCompletedWeeks / completedWeeks.length)
       : 0
 
-    // Get loans for the last completed week (or use empty data if no completed weeks)
-    let loans: LoanForPortfolio[] = []
-    let paymentsMap = new Map<string, PaymentForCV[]>()
+    // Use payments from the last completed week for summary calculation
+    let paymentsMap: Map<string, PaymentForCV[]>
 
     if (lastCompletedWeek) {
-      const result = await this.getActiveLoansWithPayments(lastCompletedWeek, filters)
-      loans = result.loans
-      paymentsMap = result.paymentsMap
+      // Filter payments for the last completed week
+      paymentsMap = this.filterPaymentsByWeek(allPayments, lastCompletedWeek)
     } else if (weeks.length > 0) {
-      // If no completed weeks, get current active loans for count purposes
-      const result = await this.getActiveLoansWithPayments(weeks[0], filters)
-      loans = result.loans
-      paymentsMap = result.paymentsMap
+      // If no completed weeks, use first week
+      paymentsMap = this.filterPaymentsByWeek(allPayments, weeks[0])
+    } else {
+      paymentsMap = new Map<string, PaymentForCV[]>()
     }
 
     // Calculate summary using last completed week data
@@ -424,17 +431,8 @@ export class PortfolioReportService {
       const leadRoutes = loan.leadRelation?.routes || []
       const leadRoute = leadRoutes.length > 0 ? leadRoutes[0] : null
 
-      // PRIORITY: Use snapshotRouteId first (synced from lead's locality), then lead's route as fallback
-      // Priority for route name:
-      // 1. snapshotRoute.name (JOIN with Route using snapshotRouteId)
-      // 2. leadRoute.name (lead's current route from M:M relation)
-      // 3. snapshotRouteName (stored snapshot field)
-      // 4. 'Sin ruta'
-      const routeName =
-        loan.snapshotRoute?.name ||
-        leadRoute?.name ||
-        loan.snapshotRouteName ||
-        'Sin ruta'
+      // Get route using priority helper
+      const { routeName } = this.getRoutePriority(loan, leadRoute)
 
       result.push({
         loanId: loan.id,
@@ -935,22 +933,7 @@ export class PortfolioReportService {
     })
 
     // Query 2: Get loans that finished this week (for "finalizados" count)
-    const finishedWhereClause: any = {
-      ...baseWhereClause,
-      renewedDate: undefined, // Remove this filter
-      finishedDate: {
-        gte: weekRange.start,
-        lte: weekRange.end,
-      },
-    }
-    delete finishedWhereClause.finishedDate // Remove the null filter we set
-    finishedWhereClause.finishedDate = {
-      gte: weekRange.start,
-      lte: weekRange.end,
-    }
-    // For finished loans, renewedDate should be null (finished without renewal)
-    finishedWhereClause.renewedDate = null
-
+    // Build where clause directly - cleaner than spreading and deleting
     const finishedLoans = await this.prisma.loan.findMany({
       where: {
         badDebtDate: null,
@@ -985,9 +968,6 @@ export class PortfolioReportService {
         },
       },
     })
-
-    // Create a Set of finished loan IDs for quick lookup
-    const finishedLoanIds = new Set(finishedLoans.map(l => l.id))
 
     // Map active loans
     const result = activeLoans.map((loan) => {
@@ -1114,6 +1094,117 @@ export class PortfolioReportService {
       receivedAt: p.receivedAt,
       amount: new Decimal(p.amount).toNumber(),
     }))
+  }
+
+  /**
+   * Filters payments by week range from a Map of all payments.
+   * Returns a new Map containing only payments within the specified week.
+   */
+  private filterPaymentsByWeek(
+    allPayments: Map<string, PaymentForCV[]>,
+    week: WeekRange
+  ): Map<string, PaymentForCV[]> {
+    const filteredMap = new Map<string, PaymentForCV[]>()
+    for (const [loanId, payments] of allPayments.entries()) {
+      const weekPayments = payments.filter(
+        (p) => p.receivedAt >= week.start && p.receivedAt <= week.end
+      )
+      if (weekPayments.length > 0) {
+        filteredMap.set(loanId, weekPayments)
+      }
+    }
+    return filteredMap
+  }
+
+  /**
+   * Gets route priority based on snapshot and lead data.
+   * Priority: snapshotRouteId > lead's route > 'unknown'
+   */
+  private getRoutePriority(
+    loan: {
+      snapshotRouteId?: string | null
+      snapshotRoute?: { name: string } | null
+      snapshotRouteName?: string | null
+    },
+    leadRoute?: { id: string; name: string } | null
+  ): { routeId: string; routeName: string } {
+    return {
+      routeId: loan.snapshotRouteId || leadRoute?.id || 'unknown',
+      routeName:
+        loan.snapshotRoute?.name ||
+        leadRoute?.name ||
+        loan.snapshotRouteName ||
+        'Sin ruta',
+    }
+  }
+
+  /**
+   * Optimized method to get active loans with all payments for a month period.
+   * Makes only 2 queries instead of N queries (one per week).
+   *
+   * @param periodStart - Start date of the period
+   * @param periodEnd - End date of the period
+   * @param filters - Optional filters
+   * @returns Loans and all their payments in the period
+   */
+  async getActiveLoansWithPaymentsForMonth(
+    periodStart: Date,
+    periodEnd: Date,
+    filters?: PortfolioFilters
+  ): Promise<{
+    loans: LoanForPortfolio[]
+    allPayments: Map<string, PaymentForCV[]>
+  }> {
+    const whereClause = this.buildActiveLoansWhereClause(filters)
+
+    // Query 1: Get all active loans (without payments include)
+    const dbLoans = await this.prisma.loan.findMany({
+      where: whereClause,
+      include: {
+        leadRelation: filters?.routeIds?.length
+          ? {
+              include: {
+                routes: true,
+              },
+            }
+          : false,
+      },
+    })
+
+    const loans = dbLoans.map((loan) => this.toLoanForPortfolio(loan))
+    const loanIds = dbLoans.map((loan) => loan.id)
+
+    // Query 2: Get all payments for these loans in the month period
+    const allPayments = new Map<string, PaymentForCV[]>()
+
+    if (loanIds.length > 0) {
+      const payments = await this.prisma.loanPayment.findMany({
+        where: {
+          loan: { in: loanIds },
+          receivedAt: {
+            gte: periodStart,
+            lte: periodEnd,
+          },
+        },
+        orderBy: {
+          receivedAt: 'asc',
+        },
+      })
+
+      // Group payments by loan ID
+      for (const payment of payments) {
+        if (!allPayments.has(payment.loan)) {
+          allPayments.set(payment.loan, [])
+        }
+        allPayments.get(payment.loan)!.push({
+          id: payment.id,
+          receivedAt: payment.receivedAt,
+          amount: new Decimal(payment.amount).toNumber(),
+        })
+      }
+    }
+
+    return { loans, allPayments }
   }
 
   async getActiveLoansWithPayments(
@@ -1305,19 +1396,12 @@ export class PortfolioReportService {
       const leadRoutes = dbLoan.leadRelation?.routes || []
       const leadRoute = leadRoutes.length > 0 ? leadRoutes[0] : null
 
-      // Route priority: snapshotRouteId > lead's route > 'unknown'
-      const routeId = dbLoan.snapshotRouteId || leadRoute?.id || 'unknown'
+      // Get route using priority helper
+      const { routeId, routeName } = this.getRoutePriority(dbLoan, leadRoute)
       const loan = loans.find((l) => l.id === dbLoan.id)
       if (!loan) continue
 
       if (!loansByRoute.has(routeId)) {
-        // Route name priority: snapshotRoute.name > leadRoute.name > snapshotRouteName > 'Sin ruta'
-        const routeName =
-          dbLoan.snapshotRoute?.name ||
-          leadRoute?.name ||
-          dbLoan.snapshotRouteName ||
-          'Sin ruta'
-
         loansByRoute.set(routeId, { loans: [], routeName })
       }
       loansByRoute.get(routeId)!.loans.push(loan)
