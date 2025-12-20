@@ -5,6 +5,7 @@ export interface BulkDateMigrationInput {
   startCreatedAt: Date
   endCreatedAt: Date
   newBusinessDate: Date
+  routeId?: string
 }
 
 export interface BulkDateMigrationPreview {
@@ -33,18 +34,34 @@ export class BulkDateMigrationService {
     // Validate input
     this.validateInput(input)
 
-    const where = {
+    const baseCreatedAtFilter = {
       createdAt: {
         gte: input.startCreatedAt,
         lte: input.endCreatedAt,
       },
     }
 
+    // Build where clauses with optional routeId filter
+    const transactionWhere = {
+      ...baseCreatedAtFilter,
+      ...(input.routeId && { route: input.routeId }),
+    }
+
+    const loanPaymentWhere = {
+      ...baseCreatedAtFilter,
+      ...(input.routeId && { loanRelation: { snapshotRouteId: input.routeId } }),
+    }
+
+    const loanWhere = {
+      ...baseCreatedAtFilter,
+      ...(input.routeId && { snapshotRouteId: input.routeId }),
+    }
+
     // Count records in parallel for performance
     const [transactionsCount, loanPaymentsCount, loansCount] = await Promise.all([
-      this.prisma.transaction.count({ where }),
-      this.prisma.loanPayment.count({ where }),
-      this.prisma.loan.count({ where }),
+      this.prisma.transaction.count({ where: transactionWhere }),
+      this.prisma.loanPayment.count({ where: loanPaymentWhere }),
+      this.prisma.loan.count({ where: loanWhere }),
     ])
 
     return {
@@ -80,25 +97,41 @@ export class BulkDateMigrationService {
 
     // Execute all updates in a single atomic transaction
     const result = await this.prisma.$transaction(async (tx) => {
-      const where = {
+      const baseCreatedAtFilter = {
         createdAt: {
           gte: input.startCreatedAt,
           lte: input.endCreatedAt,
         },
       }
 
+      // Build where clauses with optional routeId filter
+      const transactionWhere = {
+        ...baseCreatedAtFilter,
+        ...(input.routeId && { route: input.routeId }),
+      }
+
+      const loanPaymentWhere = {
+        ...baseCreatedAtFilter,
+        ...(input.routeId && { loanRelation: { snapshotRouteId: input.routeId } }),
+      }
+
+      const loanWhere = {
+        ...baseCreatedAtFilter,
+        ...(input.routeId && { snapshotRouteId: input.routeId }),
+      }
+
       // Update all three entity types in parallel
       const [transactionsResult, loanPaymentsResult, loansResult] = await Promise.all([
         tx.transaction.updateMany({
-          where,
+          where: transactionWhere,
           data: { date: input.newBusinessDate },
         }),
         tx.loanPayment.updateMany({
-          where,
+          where: loanPaymentWhere,
           data: { receivedAt: input.newBusinessDate },
         }),
         tx.loan.updateMany({
-          where,
+          where: loanWhere,
           data: { signDate: input.newBusinessDate },
         }),
       ])

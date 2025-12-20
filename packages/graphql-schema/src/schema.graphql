@@ -1061,7 +1061,7 @@ type Query {
   ): RecoveredDeadDebtResult! @requireRole(roles: [ADMIN])
 
   # Bulk Date Migration
-  previewBulkDateMigration(input: BulkDateMigrationInput!): BulkDateMigrationPreview! @auth
+  previewBulkDateMigration(input: BulkDateMigrationInput!): BulkDateMigrationPreview! @requireRole(roles: [ADMIN, CAPTURA])
 }
 
 # Input Types
@@ -1499,7 +1499,7 @@ type Mutation {
   markLoansAsDeadDebt(loanIds: [ID!]!, deadDebtDate: DateTime!): MarkDeadDebtResult! @requireRole(roles: [ADMIN])
 
   # Bulk Date Migration
-  executeBulkDateMigration(input: BulkDateMigrationInput!): BulkDateMigrationResult! @auth
+  executeBulkDateMigration(input: BulkDateMigrationInput!): BulkDateMigrationResult! @requireRole(roles: [ADMIN, CAPTURA])
 }
 
 # Inputs for creating new leader
@@ -1804,6 +1804,7 @@ input BulkDateMigrationInput {
   startCreatedAt: DateTime!
   endCreatedAt: DateTime!
   newBusinessDate: DateTime!
+  routeId: ID
 }
 
 type BulkDateMigrationPreview {

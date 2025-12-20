@@ -8,7 +8,6 @@ services:
       branch: main
       deploy_on_push: true
     source_dir: /
-    build_command: pnpm build && pnpm deploy:migrate
     run_command: node dist/server.js
     http_port: 4000
     instance_count: 1

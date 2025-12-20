@@ -59,7 +59,7 @@ function buildLoanFilters(filters: DeadDebtFilters, now: Date) {
   ]
 
   if (routeId) {
-    andFilters.push({ leadRelation: { routesId: routeId } })
+    andFilters.push({ leadRelation: { routes: { some: { id: routeId } } } })
   }
 
   if (badDebtStatus === 'MARKED') {
@@ -245,7 +245,7 @@ export const deadDebtResolvers = {
       ]
 
       if (routeId) {
-        andFilters.push({ leadRelation: { routesId: routeId } })
+        andFilters.push({ leadRelation: { routes: { some: { id: routeId } } } })
       }
 
       if (badDebtStatus === 'MARKED') {
@@ -443,7 +443,7 @@ export const deadDebtResolvers = {
       }
 
       if (routeId) {
-        loanWhere.leadRelation = { routesId: routeId }
+        loanWhere.leadRelation = { routes: { some: { id: routeId } } }
       }
 
       // Find all payments in the period from loans that were marked as dead debt BEFORE the payment date
