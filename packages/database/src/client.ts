@@ -15,7 +15,7 @@ const pool = globalForPrisma.pool ?? new Pool({
 })
 
 const adapter = new PrismaPg(pool, {
-  schema: 'solufacil_mono',
+  schema: 'public',
 })
 
 // Prisma 7: Configuración del cliente con adapter
