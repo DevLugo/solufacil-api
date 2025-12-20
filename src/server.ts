@@ -47,10 +47,26 @@ async function startServer() {
 
   await server.start()
 
+  // Setup middleware for /graphql endpoint
+  app.use('/graphql', cors(corsOptions))
+  app.use('/graphql', express.json({ limit: '10mb' }))
+  app.use('/graphql', express.urlencoded({ extended: true }))
+  // Ensure req.body is always defined (Apollo Server v4 requirement)
+  app.use('/graphql', (req, res, next) => {
+    if (!req.body) {
+      req.body = {}
+    }
+    next()
+  })
+  app.use('/graphql', (req, res, next) => {
+    // Only apply graphqlUploadExpress for POST requests with multipart
+    if (req.method === 'POST' && req.is('multipart/form-data')) {
+      return graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 10 })(req, res, next)
+    }
+    next()
+  })
   app.use(
     '/graphql',
-    cors(corsOptions),
-    graphqlUploadExpress({ maxFileSize: 10000000, maxFiles: 10 }), // 10MB max, 10 files max
     expressMiddleware(server, {
       context: createContext,
     }) as unknown as express.RequestHandler
