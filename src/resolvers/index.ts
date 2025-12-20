@@ -20,6 +20,7 @@ import { telegramResolvers } from './telegram'
 import { bankIncomeResolvers } from './bankIncome'
 import { deadDebtResolvers } from './deadDebt'
 import { batchTransferResolvers } from './batchTransfer'
+import { bulkDateMigrationResolvers } from './bulkDateMigration'
 
 export const resolvers = {
   ...scalars,
@@ -45,6 +46,7 @@ export const resolvers = {
     ...telegramResolvers.Query,
     ...bankIncomeResolvers.Query,
     ...deadDebtResolvers.Query,
+    ...bulkDateMigrationResolvers.Query,
   },
 
   Mutation: {
@@ -66,6 +68,7 @@ export const resolvers = {
     ...telegramResolvers.Mutation,
     ...deadDebtResolvers.Mutation,
     ...batchTransferResolvers.Mutation,
+    ...bulkDateMigrationResolvers.Mutation,
   },
 
   // Type resolvers

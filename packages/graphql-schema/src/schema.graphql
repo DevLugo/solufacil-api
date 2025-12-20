@@ -1059,6 +1059,9 @@ type Query {
     month: Int!
     routeId: ID
   ): RecoveredDeadDebtResult! @requireRole(roles: [ADMIN])
+
+  # Bulk Date Migration
+  previewBulkDateMigration(input: BulkDateMigrationInput!): BulkDateMigrationPreview! @auth
 }
 
 # Input Types
@@ -1494,6 +1497,9 @@ type Mutation {
 
   # Dead Debt (Cartera Muerta)
   markLoansAsDeadDebt(loanIds: [ID!]!, deadDebtDate: DateTime!): MarkDeadDebtResult! @requireRole(roles: [ADMIN])
+
+  # Bulk Date Migration
+  executeBulkDateMigration(input: BulkDateMigrationInput!): BulkDateMigrationResult! @auth
 }
 
 # Inputs for creating new leader
@@ -1791,6 +1797,29 @@ type BatchTransferResult {
   transactionsCreated: Int!
   totalAmount: Decimal!
   transactions: [Transaction!]!
+}
+
+# Bulk Date Migration Types
+input BulkDateMigrationInput {
+  startCreatedAt: DateTime!
+  endCreatedAt: DateTime!
+  newBusinessDate: DateTime!
+}
+
+type BulkDateMigrationPreview {
+  transactionsCount: Int!
+  loanPaymentsCount: Int!
+  loansCount: Int!
+  totalRecords: Int!
+}
+
+type BulkDateMigrationResult {
+  success: Boolean!
+  message: String!
+  transactionsUpdated: Int!
+  loanPaymentsUpdated: Int!
+  loansUpdated: Int!
+  totalUpdated: Int!
 }
 
 # Recovered Dead Debt types - payments from loans marked as dead debt
