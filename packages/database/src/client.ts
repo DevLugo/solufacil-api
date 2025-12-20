@@ -14,8 +14,19 @@ const pool = globalForPrisma.pool ?? new Pool({
   connectionString: process.env.DATABASE_URL,
 })
 
+// Extract schema from DATABASE_URL or default to 'public'
+const getSchemaFromUrl = (url?: string): string => {
+  if (!url) return 'public'
+  try {
+    const parsed = new URL(url)
+    return parsed.searchParams.get('schema') || 'public'
+  } catch {
+    return 'public'
+  }
+}
+
 const adapter = new PrismaPg(pool, {
-  schema: 'public',
+  schema: getSchemaFromUrl(process.env.DATABASE_URL),
 })
 
 // Prisma 7: Configuración del cliente con adapter
