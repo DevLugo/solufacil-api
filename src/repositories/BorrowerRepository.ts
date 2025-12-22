@@ -288,23 +288,48 @@ export class BorrowerRepository {
 
     // Agregar información de localidad y reordenar
     const enrichedResults: BorrowerSearchResultRaw[] = results.map((borrower) => {
-      // Primero intentar obtener la localidad del borrower
+      // Primero intentar obtener la localidad del borrower directamente de su address
       const borrowerAddresses = borrower.personalDataRelation?.addresses || []
       const primaryBorrowerAddress = borrowerAddresses.find((addr) => addr.locationRelation?.name)
 
-      let finalLocationId = primaryBorrowerAddress?.location
-      let finalLocationName = primaryBorrowerAddress?.locationRelation?.name
+      let finalLocationId: string | undefined = primaryBorrowerAddress?.location
+      let finalLocationName: string | undefined = primaryBorrowerAddress?.locationRelation?.name
 
-      // Si el borrower no tiene localidad, obtenerla del lead de su préstamo más reciente
-      if (!finalLocationName && borrower.loans.length > 0) {
+      // Si el borrower no tiene localidad propia, obtenerla del lead de su préstamo más reciente
+      if (!finalLocationId && borrower.loans.length > 0) {
         for (const loan of borrower.loans) {
-          const leadAddress = (loan as any).leadRelation?.personalDataRelation?.addresses?.[0]
-          if (leadAddress?.locationRelation?.name) {
+          const leadRelation = (loan as any).leadRelation
+          const leadAddress = leadRelation?.personalDataRelation?.addresses?.[0]
+
+          // Debug logging
+          if (process.env.DEBUG_LOCATION === 'true') {
+            console.log(`[BorrowerRepository] Borrower: ${borrower.personalDataRelation?.fullName}`)
+            console.log(`  - Loan ID: ${loan.id}`)
+            console.log(`  - leadRelation exists: ${!!leadRelation}`)
+            console.log(`  - leadAddress: ${JSON.stringify(leadAddress)}`)
+          }
+
+          if (leadAddress?.location) {
             finalLocationId = leadAddress.location
-            finalLocationName = leadAddress.locationRelation.name
+            finalLocationName = leadAddress.locationRelation?.name
             break
           }
         }
+      }
+
+      // Determinar si es de la localidad actual:
+      // - Si no se pasa locationId en la búsqueda, siempre es true
+      // - Si no se pudo determinar la location del borrower, asumimos true (no mostrar warning)
+      // - Si sí hay location del borrower, comparamos con el locationId buscado
+      const isFromCurrentLocation = !locationId || !finalLocationId || finalLocationId === locationId
+
+      // Debug logging
+      if (process.env.DEBUG_LOCATION === 'true') {
+        console.log(`[BorrowerRepository] Final result for ${borrower.personalDataRelation?.fullName}:`)
+        console.log(`  - finalLocationId: ${finalLocationId}`)
+        console.log(`  - finalLocationName: ${finalLocationName}`)
+        console.log(`  - searchLocationId: ${locationId}`)
+        console.log(`  - isFromCurrentLocation: ${isFromCurrentLocation}`)
       }
 
       return {
@@ -314,7 +339,7 @@ export class BorrowerRepository {
           pendingAmountStored: loan.pendingAmountStored.toString(),
           status: loan.status as string,
         })),
-        isFromCurrentLocation: locationId ? finalLocationId === locationId : true,
+        isFromCurrentLocation,
         locationId: finalLocationId,
         locationName: finalLocationName,
       } as BorrowerSearchResultRaw

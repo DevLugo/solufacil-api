@@ -1,5 +1,6 @@
 import type { GraphQLContext } from '@solufacil/graphql-schema'
 import { LoanStatus } from '@solufacil/database'
+import { Decimal } from 'decimal.js'
 import { LoanService } from '../services/LoanService'
 import { authenticateUser } from '../middleware/auth'
 import { getCurrentWeek, getWeekStartDate, getWeekEndDate } from '../utils/weekUtils'
@@ -533,6 +534,43 @@ export const loanResolvers = {
       return context.prisma.loan.findFirst({
         where: { previousLoan: parent.id },
       })
+    },
+
+    // Calculated field: sum all payments for this loan
+    calculatedTotalPaid: async (
+      parent: { id: string; totalPaid?: any },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      const result = await context.prisma.loanPayment.aggregate({
+        where: {
+          loan: parent.id,
+          type: 'PAYMENT', // Only count actual payments, not adjustments
+        },
+        _sum: { amount: true },
+      })
+      return new Decimal(result._sum.amount?.toString() || '0').toString()
+    },
+
+    // Calculated field: totalDebtAcquired - calculatedTotalPaid
+    calculatedPendingAmount: async (
+      parent: { id: string; totalDebtAcquired: any },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      const totalDebt = new Decimal(parent.totalDebtAcquired?.toString() || '0')
+
+      const result = await context.prisma.loanPayment.aggregate({
+        where: {
+          loan: parent.id,
+          type: 'PAYMENT',
+        },
+        _sum: { amount: true },
+      })
+      const totalPaid = new Decimal(result._sum.amount?.toString() || '0')
+
+      const pending = totalDebt.minus(totalPaid)
+      return pending.isNegative() ? '0' : pending.toString()
     },
   },
 }

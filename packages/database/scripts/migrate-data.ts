@@ -136,84 +136,83 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
   switch (tableName) {
     case 'State':
       return `INSERT INTO "${tgt}"."State" (id, name, "createdAt", "updatedAt")
-        SELECT id, name, NOW(), NOW() FROM "${src}"."State" ON CONFLICT (id) DO NOTHING`
+        SELECT id, name, NOW(), NOW() FROM "${src}"."State"`
 
     case 'Route':
       return `INSERT INTO "${tgt}"."Route" (id, name)
-        SELECT id, name FROM "${src}"."Route" ON CONFLICT (id) DO NOTHING`
+        SELECT id, name FROM "${src}"."Route"`
 
     case 'Account':
       return `INSERT INTO "${tgt}"."Account" (id, name, type, amount, "createdAt", "updatedAt")
         SELECT id, name, type::text::"${tgt}"."AccountType", amount, "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."Account" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."Account"`
 
     case 'LeadPaymentType':
       return `INSERT INTO "${tgt}"."LeadPaymentType" (id, type)
-        SELECT id, type FROM "${src}"."LeadPaymentType" ON CONFLICT (id) DO NOTHING`
+        SELECT id, type FROM "${src}"."LeadPaymentType"`
 
     case 'User':
       return `INSERT INTO "${tgt}"."User" (id, name, email, password, role, "createdAt")
         SELECT id, COALESCE(name, ''), email, password, role::text::"${tgt}"."UserRole", "createdAt"
-        FROM "${src}"."User" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."User"`
 
     case 'Municipality':
       return `INSERT INTO "${tgt}"."Municipality" (id, name, state, "createdAt", "updatedAt")
-        SELECT id, name, state, NOW(), NOW() FROM "${src}"."Municipality" ON CONFLICT (id) DO NOTHING`
+        SELECT id, name, state, NOW(), NOW() FROM "${src}"."Municipality"`
 
     case 'PersonalData':
       return `INSERT INTO "${tgt}"."PersonalData" (id, "fullName", "clientCode", "birthDate", "createdAt", "updatedAt")
         SELECT id, "fullName", COALESCE(NULLIF("clientCode", ''), 'AUTO-' || id), "birthDate", "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."PersonalData" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."PersonalData"`
 
     case 'Location':
       return `INSERT INTO "${tgt}"."Location" (id, name, municipality, route, "createdAt", "updatedAt")
-        SELECT id, name, municipality, route, NOW(), NOW() FROM "${src}"."Location" ON CONFLICT (id) DO NOTHING`
+        SELECT id, name, municipality, route, NOW(), NOW() FROM "${src}"."Location"`
 
     case 'ReportConfig':
       return `INSERT INTO "${tgt}"."ReportConfig" (id, name, "reportType", schedule, "isActive", "createdAt", "updatedAt")
         SELECT id, name, "reportType"::text, schedule, "isActive", "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."ReportConfig" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."ReportConfig"`
 
     case 'TelegramUser':
       return `INSERT INTO "${tgt}"."TelegramUser" (id, "chatId", name, username, "isActive", "registeredAt", "lastActivity", "reportsReceived", "isInRecipientsList", notes, "platformUser", "createdAt", "updatedAt")
         SELECT t.id, t."chatId", COALESCE(t.name, ''), COALESCE(t.username, ''), t."isActive", t."registeredAt", COALESCE(t."lastActivity", NOW()), t."reportsReceived", t."isInRecipientsList", COALESCE(t.notes, ''),
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."User" WHERE id = t."platformUser") THEN t."platformUser" ELSE NULL END,
           NOW(), NOW()
-        FROM "${src}"."TelegramUser" t ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."TelegramUser" t`
 
     case 'Phone':
       return `INSERT INTO "${tgt}"."Phone" (id, number, "personalData", "createdAt", "updatedAt")
         SELECT id, COALESCE(number, ''), "personalData", "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."Phone" WHERE "personalData" IS NOT NULL ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."Phone" WHERE "personalData" IS NOT NULL`
 
     case 'Address':
       return `INSERT INTO "${tgt}"."Address" (id, street, "exteriorNumber", "interiorNumber", "postalCode", "references", location, "personalData", "createdAt", "updatedAt")
         SELECT id, COALESCE(street, ''), COALESCE("exteriorNumber", ''), COALESCE("interiorNumber", ''), COALESCE("postalCode", ''), COALESCE("references", ''), location, "personalData", NOW(), NOW()
-        FROM "${src}"."Address" WHERE location IS NOT NULL AND "personalData" IS NOT NULL ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."Address" WHERE location IS NOT NULL AND "personalData" IS NOT NULL`
 
     case 'Employee':
       return `INSERT INTO "${tgt}"."Employee" (id, "oldId", type, "personalData", "user", "createdAt", "updatedAt")
         SELECT e.id, e."oldId", e.type::text::"${tgt}"."EmployeeType", e."personalData",
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."User" WHERE id = e."user") THEN e."user" ELSE NULL END, NOW(), NOW()
-        FROM "${src}"."Employee" e WHERE e."personalData" IS NOT NULL ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."Employee" e WHERE e."personalData" IS NOT NULL`
 
     case 'Borrower':
       return `INSERT INTO "${tgt}"."Borrower" (id, "loanFinishedCount", "personalData", "createdAt", "updatedAt")
         SELECT id, "loanFinishedCount", "personalData", "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."Borrower" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."Borrower"`
 
     case 'Loantype':
       return `INSERT INTO "${tgt}"."Loantype" (id, name, "weekDuration", rate, "loanPaymentComission", "loanGrantedComission", "createdAt", "updatedAt")
         SELECT id, name, "weekDuration", rate, "loanPaymentComission", "loanGrantedComission", "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."Loantype" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."Loantype"`
 
     case 'PortfolioCleanup':
       return `INSERT INTO "${tgt}"."PortfolioCleanup" (id, name, description, "cleanupDate", "fromDate", "toDate", "excludedLoansCount", "excludedAmount", route, "executedBy", "createdAt", "updatedAt")
         SELECT p.id, p.name, COALESCE(p.description, ''), p."cleanupDate", p."fromDate", p."toDate", COALESCE(p."excludedLoansCount", 0), COALESCE(p."excludedAmount", 0), p.route, p."executedBy",
           p."createdAt", COALESCE(p."updatedAt", p."createdAt", NOW())
         FROM "${src}"."PortfolioCleanup" p
-        WHERE p."executedBy" IS NOT NULL AND EXISTS (SELECT 1 FROM "${tgt}"."User" WHERE id = p."executedBy")
-        ON CONFLICT (id) DO NOTHING`
+        WHERE p."executedBy" IS NOT NULL AND EXISTS (SELECT 1 FROM "${tgt}"."User" WHERE id = p."executedBy")`
 
     case 'LeadPaymentReceived':
       return `INSERT INTO "${tgt}"."LeadPaymentReceived" (id, "expectedAmount", "paidAmount", "cashPaidAmount", "bankPaidAmount", "falcoAmount", "paymentStatus", lead, agent, "createdAt", "updatedAt")
@@ -221,8 +220,7 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = lpr.agent) THEN lpr.agent ELSE NULL END,
           lpr."createdAt", COALESCE(lpr."updatedAt", lpr."createdAt", NOW())
         FROM "${src}"."LeadPaymentReceived" lpr
-        WHERE lpr.lead IS NOT NULL AND EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = lpr.lead)
-        ON CONFLICT (id) DO NOTHING`
+        WHERE lpr.lead IS NOT NULL AND EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = lpr.lead)`
 
     case 'Loan':
       return `INSERT INTO "${tgt}"."Loan" (id, "oldId", "requestedAmount", "amountGived", "signDate", "finishedDate", "renewedDate", "badDebtDate", "isDeceased", "profitAmount", "totalDebtAcquired", "expectedWeeklyPayment", "totalPaid", "pendingAmountStored", "comissionAmount", status, borrower, loantype, grantor, lead, "snapshotLeadId", "snapshotLeadAssignedAt", "snapshotRouteId", "snapshotRouteName", "previousLoan", "excludedByCleanup", "createdAt", "updatedAt")
@@ -234,8 +232,7 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
           COALESCE(l."snapshotRouteName", ''), NULL,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."PortfolioCleanup" WHERE id = l."excludedByCleanup") THEN l."excludedByCleanup" ELSE NULL END,
           l."createdAt", COALESCE(l."updatedAt", l."createdAt", NOW())
-        FROM "${src}"."Loan" l WHERE l.borrower IS NOT NULL AND l.loantype IS NOT NULL
-        ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."Loan" l WHERE l.borrower IS NOT NULL AND l.loantype IS NOT NULL`
 
     case 'LoanPayment':
       return `INSERT INTO "${tgt}"."LoanPayment" (id, amount, comission, "receivedAt", "paymentMethod", type, "oldLoanId", loan, "leadPaymentReceived", "createdAt", "updatedAt")
@@ -245,8 +242,7 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."LeadPaymentReceived" WHERE id = lp."leadPaymentReceived") THEN lp."leadPaymentReceived" ELSE NULL END,
           lp."createdAt", COALESCE(lp."updatedAt", lp."createdAt", NOW())
         FROM "${src}"."LoanPayment" lp
-        WHERE lp.loan IS NOT NULL AND EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = lp.loan)
-        ON CONFLICT (id) DO NOTHING`
+        WHERE lp.loan IS NOT NULL AND EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = lp.loan)`
 
     case 'DocumentPhoto':
       // Use first available user as default for NULL uploadedBy (required NOT NULL in target)
@@ -254,12 +250,12 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
         SELECT d.id, COALESCE(d.title, ''), COALESCE(d.description, ''), d."photoUrl", d."publicId", d."documentType"::text::"${tgt}"."DocumentType", COALESCE(d."isError", false), COALESCE(d."errorDescription", ''), COALESCE(d."isMissing", false), d."personalData", d.loan,
           COALESCE(d."uploadedBy", (SELECT id FROM "${tgt}"."User" LIMIT 1)),
           d."createdAt", COALESCE(d."updatedAt", d."createdAt", NOW())
-        FROM "${src}"."DocumentPhoto" d ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."DocumentPhoto" d`
 
     case 'CommissionPayment':
       return `INSERT INTO "${tgt}"."CommissionPayment" (id, amount, loan, employee, "createdAt", "updatedAt")
         SELECT id, amount, loan, employee, "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."CommissionPayment" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."CommissionPayment"`
 
     case 'Transaction':
       return `INSERT INTO "${tgt}"."Transaction" (id, amount, date, type, description, "incomeSource", "expenseSource", "snapshotLeadId", "snapshotRouteId", "expenseGroupId", "profitAmount", "returnToCapital", loan, "loanPayment", "sourceAccount", "destinationAccount", route, lead, "leadPaymentReceived", "createdAt", "updatedAt")
@@ -279,30 +275,28 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
           (t."sourceAccount" IS NOT NULL AND t."sourceAccount" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."sourceAccount"))
           OR (t.type = 'INCOME' AND t."destinationAccount" IS NOT NULL AND t."destinationAccount" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."destinationAccount"))
           OR (t.type = 'INCOME' AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '') AND (t."destinationAccount" IS NULL OR t."destinationAccount" = ''))
-        )
-        ON CONFLICT (id) DO NOTHING`
+        )`
 
     case 'FalcoCompensatoryPayment':
       return `INSERT INTO "${tgt}"."FalcoCompensatoryPayment" (id, amount, "leadPaymentReceived", "createdAt", "updatedAt")
         SELECT f.id, f.amount, f."leadPaymentReceived", f."createdAt", COALESCE(f."updatedAt", f."createdAt", NOW())
         FROM "${src}"."FalcoCompensatoryPayment" f
-        WHERE EXISTS (SELECT 1 FROM "${tgt}"."LeadPaymentReceived" WHERE id = f."leadPaymentReceived")
-        ON CONFLICT (id) DO NOTHING`
+        WHERE EXISTS (SELECT 1 FROM "${tgt}"."LeadPaymentReceived" WHERE id = f."leadPaymentReceived")`
 
     case 'AuditLog':
       return `INSERT INTO "${tgt}"."AuditLog" (id, operation, "modelName", "recordId", "userName", "userEmail", "userRole", "sessionId", "ipAddress", "userAgent", "previousValues", "newValues", "changedFields", description, metadata, "user", "createdAt")
         SELECT id, operation, COALESCE("modelName", ''), COALESCE("recordId", ''), COALESCE("userName", ''), COALESCE("userEmail", ''), COALESCE("userRole", ''), COALESCE("sessionId", ''), COALESCE("ipAddress", ''), COALESCE("userAgent", ''), "previousValues", "newValues", "changedFields", COALESCE(description, ''), metadata, "user", "createdAt"
-        FROM "${src}"."AuditLog" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."AuditLog"`
 
     case 'ReportExecutionLog':
       return `INSERT INTO "${tgt}"."ReportExecutionLog" (id, status, "executionType", message, "errorDetails", "recipientsCount", "successfulDeliveries", "failedDeliveries", "startTime", "endTime", duration, "cronExpression", timezone, "reportConfig", "createdAt", "updatedAt")
         SELECT id, status, "executionType", COALESCE(message, ''), COALESCE("errorDetails", ''), "recipientsCount", "successfulDeliveries", "failedDeliveries", "startTime", "endTime", duration, COALESCE("cronExpression", ''), COALESCE(timezone, ''), "reportConfig", "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."ReportExecutionLog" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."ReportExecutionLog"`
 
     case 'DocumentNotificationLog':
       return `INSERT INTO "${tgt}"."DocumentNotificationLog" (id, "documentId", "documentType", "personalDataId", "personName", "loanId", "routeId", "routeName", "localityName", "routeLeadId", "routeLeadName", "routeLeadUserId", "telegramUserId", "telegramChatId", "telegramUsername", "issueType", description, "messageContent", status, "telegramResponse", "telegramErrorCode", "telegramErrorMessage", "sentAt", "responseTimeMs", "retryCount", "lastRetryAt", notes, "createdAt", "updatedAt")
         SELECT id, COALESCE("documentId", ''), COALESCE("documentType", ''), COALESCE("personalDataId", ''), COALESCE("personName", ''), COALESCE("loanId", ''), COALESCE("routeId", ''), COALESCE("routeName", ''), COALESCE("localityName", ''), COALESCE("routeLeadId", ''), COALESCE("routeLeadName", ''), COALESCE("routeLeadUserId", ''), COALESCE("telegramUserId", ''), COALESCE("telegramChatId", ''), COALESCE("telegramUsername", ''), "issueType", COALESCE(description, ''), COALESCE("messageContent", ''), status, COALESCE("telegramResponse", ''), "telegramErrorCode", COALESCE("telegramErrorMessage", ''), "sentAt", "responseTimeMs", "retryCount", "lastRetryAt", COALESCE(notes, ''), "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."DocumentNotificationLog" ON CONFLICT (id) DO NOTHING`
+        FROM "${src}"."DocumentNotificationLog"`
 
     default:
       return null
@@ -501,7 +495,7 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
 
         try {
           await targetClient.query(
-            `INSERT INTO "${TARGET_SCHEMA}"."${tableName}" (${quotedInsertColumns}) VALUES (${placeholders}) ON CONFLICT (id) DO NOTHING`,
+            `INSERT INTO "${TARGET_SCHEMA}"."${tableName}" (${quotedInsertColumns}) VALUES (${placeholders})`,
             insertColumns.map(col => transformed[col])
           )
           insertedCount++
@@ -562,14 +556,13 @@ async function migrateJunctionTable(sourceTable: string, targetTable: string): P
       await sourceClient.query(`
         INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B")
         SELECT "A", "B" FROM "${SOURCE_SCHEMA}"."${sourceTable}"
-        ON CONFLICT ("A", "B") DO NOTHING
       `)
     } else {
       const records = await sourceClient.query(`SELECT "A", "B" FROM "${SOURCE_SCHEMA}"."${sourceTable}"`)
       for (const row of records.rows) {
         try {
           await targetClient.query(
-            `INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B") VALUES ($1, $2) ON CONFLICT ("A", "B") DO NOTHING`,
+            `INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B") VALUES ($1, $2)`,
             [row.A, row.B]
           )
         } catch (err) {
@@ -602,7 +595,6 @@ async function migrateEmployeeRoutes(): Promise<MigrationResult> {
         WHERE e.routes IS NOT NULL
           AND EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Employee" WHERE id = e.id)
           AND EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Route" WHERE id = e.routes)
-        ON CONFLICT ("A", "B") DO NOTHING
       `)
     } else {
       const result = await sourceClient.query(`SELECT id, routes FROM "${SOURCE_SCHEMA}"."Employee" WHERE routes IS NOT NULL`)
@@ -614,7 +606,7 @@ async function migrateEmployeeRoutes(): Promise<MigrationResult> {
         if (targetEmployees.has(row.id) && targetRoutes.has(row.routes)) {
           try {
             await targetClient.query(
-              `INSERT INTO "${TARGET_SCHEMA}"."_RouteEmployees" ("A", "B") VALUES ($1, $2) ON CONFLICT ("A", "B") DO NOTHING`,
+              `INSERT INTO "${TARGET_SCHEMA}"."_RouteEmployees" ("A", "B") VALUES ($1, $2)`,
               [row.id, row.routes]
             )
           } catch (err) {
@@ -648,20 +640,32 @@ async function cleanTargetSchema(): Promise<void> {
     ...MIGRATION_ORDER.slice().reverse(),
   ]
 
+  let truncatedCount = 0
+  let skippedCount = 0
+
   for (const tableName of cleanOrder) {
     try {
-      if (await tableExists(client, TARGET_SCHEMA, tableName)) {
+      const exists = await tableExists(client, TARGET_SCHEMA, tableName)
+      if (exists) {
+        // Contar registros antes del truncate
+        const countBefore = await client.query(`SELECT COUNT(*)::int as count FROM "${TARGET_SCHEMA}"."${tableName}"`)
+        const recordsBefore = countBefore.rows[0].count
+
         await client.query(`TRUNCATE TABLE "${TARGET_SCHEMA}"."${tableName}" CASCADE`)
-        console.log(`   ✅ ${tableName}`)
+        truncatedCount++
+        console.log(`   ✅ ${tableName} (${recordsBefore} registros eliminados)`)
+      } else {
+        skippedCount++
+        console.log(`   ⏭️  ${tableName} (no existe)`)
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
-      if (!msg.includes('does not exist')) console.log(`   ⚠️  ${tableName}: ${msg}`)
+      console.log(`   ❌ ${tableName}: ${msg}`)
     }
   }
 
   client.release()
-  console.log('')
+  console.log(`\n   📊 Resumen: ${truncatedCount} tablas truncadas, ${skippedCount} omitidas\n`)
 }
 
 async function countSourceRecords(): Promise<void> {

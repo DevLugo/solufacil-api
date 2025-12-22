@@ -106,14 +106,21 @@ export class TransactionService {
         tx
       )
 
-      // Recalcular balance de cuenta origen
-      if (input.sourceAccountId) {
-        await this.accountRepository.recalculateAndUpdateBalance(input.sourceAccountId, tx)
-      }
-
-      // Recalcular balance de cuenta destino si existe
-      if (input.destinationAccountId) {
-        await this.accountRepository.recalculateAndUpdateBalance(input.destinationAccountId, tx)
+      // Actualizar balance según tipo de transacción
+      if (input.type === 'INCOME' && input.sourceAccountId) {
+        // INCOME suma al balance
+        await this.accountRepository.addToBalance(input.sourceAccountId, amount, tx)
+      } else if (input.type === 'EXPENSE' && input.sourceAccountId) {
+        // EXPENSE resta del balance
+        await this.accountRepository.subtractFromBalance(input.sourceAccountId, amount, tx)
+      } else if (input.type === 'TRANSFER') {
+        // TRANSFER resta del origen y suma al destino
+        if (input.sourceAccountId) {
+          await this.accountRepository.subtractFromBalance(input.sourceAccountId, amount, tx)
+        }
+        if (input.destinationAccountId) {
+          await this.accountRepository.addToBalance(input.destinationAccountId, amount, tx)
+        }
       }
 
       return transaction
@@ -161,9 +168,9 @@ export class TransactionService {
         tx
       )
 
-      // Recalcular saldos de ambas cuentas desde transacciones
-      await this.accountRepository.recalculateAndUpdateBalance(input.sourceAccountId, tx)
-      await this.accountRepository.recalculateAndUpdateBalance(input.destinationAccountId, tx)
+      // Restar del origen y sumar al destino
+      await this.accountRepository.subtractFromBalance(input.sourceAccountId, amount, tx)
+      await this.accountRepository.addToBalance(input.destinationAccountId, amount, tx)
 
       return transaction
     })
@@ -204,13 +211,34 @@ export class TransactionService {
         tx
       )
 
-      // Recalcular balance de la cuenta anterior si cambió
-      if (input.sourceAccountId && input.sourceAccountId !== oldSourceAccountId) {
-        await this.accountRepository.recalculateAndUpdateBalance(oldSourceAccountId, tx)
-      }
+      // Ajustar balances según el cambio
+      const oldAmount = new Decimal(existingTransaction.amount.toString())
+      const newAmount = input.amount ? new Decimal(input.amount) : oldAmount
+      const transactionType = existingTransaction.type
 
-      // Siempre recalcular la cuenta actual/nueva
-      await this.accountRepository.recalculateAndUpdateBalance(newSourceAccountId, tx)
+      // Si cambió la cuenta, revertir en la antigua y aplicar en la nueva
+      if (input.sourceAccountId && input.sourceAccountId !== oldSourceAccountId) {
+        // Revertir de la cuenta antigua
+        if (transactionType === 'INCOME') {
+          await this.accountRepository.subtractFromBalance(oldSourceAccountId, oldAmount, tx)
+        } else if (transactionType === 'EXPENSE') {
+          await this.accountRepository.addToBalance(oldSourceAccountId, oldAmount, tx)
+        }
+        // Aplicar a la cuenta nueva
+        if (transactionType === 'INCOME') {
+          await this.accountRepository.addToBalance(newSourceAccountId, newAmount, tx)
+        } else if (transactionType === 'EXPENSE') {
+          await this.accountRepository.subtractFromBalance(newSourceAccountId, newAmount, tx)
+        }
+      } else if (!oldAmount.equals(newAmount)) {
+        // Solo cambió el monto, aplicar la diferencia
+        const difference = newAmount.minus(oldAmount)
+        if (transactionType === 'INCOME') {
+          await this.accountRepository.addToBalance(newSourceAccountId, difference, tx)
+        } else if (transactionType === 'EXPENSE') {
+          await this.accountRepository.subtractFromBalance(newSourceAccountId, difference, tx)
+        }
+      }
 
       return updatedTransaction
     })
@@ -228,16 +256,28 @@ export class TransactionService {
     const sourceAccountId = existingTransaction.sourceAccount
     const destinationAccountId = existingTransaction.destinationAccount
 
+    const amount = new Decimal(existingTransaction.amount.toString())
+    const transactionType = existingTransaction.type
+
     return this.prisma.$transaction(async (tx) => {
       // Eliminar la transacción
       await this.transactionRepository.delete(id, tx)
 
-      // Recalcular balance de la cuenta fuente
-      await this.accountRepository.recalculateAndUpdateBalance(sourceAccountId, tx)
-
-      // Si hay cuenta destino (transferencias), también recalcular
-      if (destinationAccountId) {
-        await this.accountRepository.recalculateAndUpdateBalance(destinationAccountId, tx)
+      // Revertir el efecto en los balances
+      if (transactionType === 'INCOME' && sourceAccountId) {
+        // INCOME sumó al balance, hay que restarlo
+        await this.accountRepository.subtractFromBalance(sourceAccountId, amount, tx)
+      } else if (transactionType === 'EXPENSE' && sourceAccountId) {
+        // EXPENSE restó del balance, hay que sumarlo
+        await this.accountRepository.addToBalance(sourceAccountId, amount, tx)
+      } else if (transactionType === 'TRANSFER') {
+        // TRANSFER restó del origen y sumó al destino, hay que revertir ambos
+        if (sourceAccountId) {
+          await this.accountRepository.addToBalance(sourceAccountId, amount, tx)
+        }
+        if (destinationAccountId) {
+          await this.accountRepository.subtractFromBalance(destinationAccountId, amount, tx)
+        }
       }
 
       return true

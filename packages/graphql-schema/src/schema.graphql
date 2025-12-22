@@ -178,6 +178,10 @@ type Loan {
   expectedWeeklyPayment: Decimal!
   totalPaid: Decimal!
   pendingAmountStored: Decimal!
+  "Total pagado calculado desde la tabla de pagos (más preciso que totalPaid almacenado)"
+  calculatedTotalPaid: Decimal!
+  "Deuda pendiente calculada: totalDebtAcquired - calculatedTotalPaid"
+  calculatedPendingAmount: Decimal!
   comissionAmount: Decimal!
   status: LoanStatus!
   borrower: Borrower!
@@ -224,7 +228,7 @@ type Transaction {
   returnToCapital: Decimal
   loan: Loan
   loanPayment: LoanPayment
-  sourceAccount: Account!
+  sourceAccount: Account
   destinationAccount: Account
   route: Route
   lead: Employee
@@ -1411,7 +1415,7 @@ type Mutation {
   # Loans - Batch y edición extendida
   createLoansInBatch(input: CreateLoansInBatchInput!): [Loan!]! @auth
   updateLoanExtended(id: ID!, input: UpdateLoanExtendedInput!): Loan! @auth
-  cancelLoanWithAccountRestore(id: ID!, accountId: ID!): Loan! @auth
+  cancelLoanWithAccountRestore(id: ID!, accountId: ID!): CancelLoanResult! @auth
 
   # PersonalData
   updatePersonalData(id: ID!, fullName: String!): PersonalData! @auth
@@ -1788,6 +1792,23 @@ type MarkDeadDebtResult {
   success: Boolean!
   message: String!
   count: Int!
+}
+
+# Cancel Loan Result
+type CancelLoanResult {
+  success: Boolean!
+  deletedLoanId: ID!
+  "Monto neto restaurado a la cuenta de ruta"
+  restoredAmount: Decimal!
+  accountId: ID!
+  "Cantidad de pagos eliminados"
+  paymentsDeleted: Int!
+  "Total de pagos en efectivo eliminados"
+  totalCashPayments: Decimal!
+  "Total de pagos por transferencia eliminados"
+  totalBankPayments: Decimal!
+  "Total de comisiones de pago revertidas"
+  totalPaymentComissions: Decimal!
 }
 
 # Batch Transfer Result

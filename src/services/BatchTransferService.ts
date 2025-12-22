@@ -135,16 +135,13 @@ export class BatchTransferService {
 
         transactions.push(transaction)
         totalAmount = totalAmount.plus(routeAccount.balance)
-        accountsToRecalculate.add(routeAccount.account.id)
+
+        // Restar del balance de la cuenta origen
+        await this.accountRepository.subtractFromBalance(routeAccount.account.id, routeAccount.balance, tx)
       }
 
-      // Add destination account to recalculation set
-      accountsToRecalculate.add(input.destinationAccountId)
-
-      // Recalculate all affected account balances
-      for (const accountId of accountsToRecalculate) {
-        await this.accountRepository.recalculateAndUpdateBalance(accountId, tx)
-      }
+      // Sumar al balance de la cuenta destino
+      await this.accountRepository.addToBalance(input.destinationAccountId, totalAmount, tx)
 
       return { transactions, totalAmount }
     })
@@ -261,16 +258,13 @@ export class BatchTransferService {
         )
 
         transactions.push(transaction)
-        accountsToRecalculate.add(routeAccount.account.id)
+
+        // Sumar al balance de la cuenta destino
+        await this.accountRepository.addToBalance(routeAccount.account.id, amount, tx)
       }
 
-      // Add source account to recalculation set
-      accountsToRecalculate.add(input.sourceAccountId)
-
-      // Recalculate all affected account balances
-      for (const accountId of accountsToRecalculate) {
-        await this.accountRepository.recalculateAndUpdateBalance(accountId, tx)
-      }
+      // Restar del balance de la cuenta origen
+      await this.accountRepository.subtractFromBalance(input.sourceAccountId, totalToDistribute, tx)
 
       return { transactions, totalAmount: totalToDistribute }
     })

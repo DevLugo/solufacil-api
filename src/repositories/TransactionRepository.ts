@@ -103,9 +103,18 @@ export class TransactionRepository {
               type: true,
             },
           },
+          loanPaymentRelation: {
+            select: {
+              id: true,
+              amount: true,
+              comission: true,
+              paymentMethod: true,
+            },
+          },
           loanRelation: {
             select: {
               id: true,
+              amountGived: true,
               borrower: true,
               borrowerRelation: {
                 select: {

@@ -132,6 +132,52 @@ export interface PaymentResult {
 }
 
 // ============================================================================
+// CANCELLATION TYPES
+// ============================================================================
+
+/**
+ * Payment data for cancellation analysis
+ */
+export interface CancelLoanPayment {
+  /** Payment amount */
+  amount: number
+  /** Date when payment was received (ISO string or Date) */
+  receivedAt: Date | string
+}
+
+/**
+ * Input for canceling a loan
+ */
+export interface CancelLoanInput {
+  /** Amount physically given to client */
+  amountGived: number
+  /** Commission charged on loan grant */
+  comissionAmount: number
+  /** Date when loan was signed (ISO string or Date) */
+  signDate: Date | string
+  /** List of payments made on this loan */
+  payments: CancelLoanPayment[]
+}
+
+/**
+ * Result of canceling a loan
+ */
+export interface CancelLoanResult {
+  /** Amount to restore to account */
+  amountToRestore: number
+  /** Whether there are payments that won't be refunded */
+  hasUnaffectedPayments: boolean
+  /** Number of payments not refunded */
+  unaffectedPaymentsCount: number
+  /** Total amount of payments not refunded */
+  unaffectedPaymentsAmount: number
+  /** Whether first payment (same day) was deducted */
+  firstPaymentDeducted: boolean
+  /** Amount of first payment deducted (if any) */
+  firstPaymentAmount: number
+}
+
+// ============================================================================
 // LOAN ENGINE CLASS
 // ============================================================================
 
@@ -403,6 +449,139 @@ export class LoanEngine {
     if (pendingAmount <= 0.01) return 'FINISHED'
     if (badDebtDate) return 'BAD_DEBT'
     return 'ACTIVE'
+  }
+
+  // ==========================================================================
+  // LOAN CANCELLATION
+  // ==========================================================================
+
+  /**
+   * Calculate cancellation result for a loan
+   *
+   * BUSINESS RULES:
+   * 1. Base restore amount = amountGived + comissionAmount
+   * 2. If there's exactly 1 payment AND it was made on the same day as signDate:
+   *    - It's considered a "first payment" (advance payment)
+   *    - This payment IS refunded (deducted from restore amount)
+   * 3. If there are 2+ payments OR payment is from a different day:
+   *    - These payments are NOT refunded
+   *    - Admin must manually adjust if needed
+   *    - Alert is shown to user
+   *
+   * DATABASE CHANGES (to be done by caller):
+   * 1. DELETE all Payment records for this loan
+   * 2. DELETE all Transaction records for payments
+   * 3. DELETE Transaction records for loan (LOAN_GRANTED, LOAN_GRANTED_COMISSION)
+   * 4. INSERT Transaction (INCOME: LOAN_CANCELLED_RESTORE)
+   * 5. UPDATE Account balance (add amountToRestore)
+   * 6. If renewal: UPDATE previous loan (renewedDate = null)
+   * 7. DELETE Loan record
+   *
+   * @param input - Cancellation input data
+   * @returns Cancellation calculation result
+   *
+   * @example
+   * // Loan with no payments
+   * const result = LoanEngine.cancelLoan({
+   *   amountGived: 3000,
+   *   comissionAmount: 50,
+   *   signDate: '2024-01-15',
+   *   payments: []
+   * })
+   * // Result: { amountToRestore: 3050, hasUnaffectedPayments: false, ... }
+   *
+   * @example
+   * // Loan with first payment same day (advance payment)
+   * const result = LoanEngine.cancelLoan({
+   *   amountGived: 3000,
+   *   comissionAmount: 50,
+   *   signDate: '2024-01-15',
+   *   payments: [{ amount: 300, receivedAt: '2024-01-15' }]
+   * })
+   * // Result: { amountToRestore: 2750, firstPaymentDeducted: true, ... }
+   *
+   * @example
+   * // Loan with payments from other days
+   * const result = LoanEngine.cancelLoan({
+   *   amountGived: 3000,
+   *   comissionAmount: 50,
+   *   signDate: '2024-01-15',
+   *   payments: [
+   *     { amount: 300, receivedAt: '2024-01-22' },
+   *     { amount: 300, receivedAt: '2024-01-29' }
+   *   ]
+   * })
+   * // Result: { amountToRestore: 3050, hasUnaffectedPayments: true, unaffectedPaymentsCount: 2, ... }
+   */
+  static cancelLoan(input: CancelLoanInput): CancelLoanResult {
+    const amountGived = new Decimal(input.amountGived)
+    const comissionAmount = new Decimal(input.comissionAmount || 0)
+
+    // Base amount to restore
+    let amountToRestore = amountGived.plus(comissionAmount)
+
+    // Normalize sign date to YYYY-MM-DD string
+    const signDate = new Date(input.signDate)
+    const signDateStr = LoanEngine.toDateString(signDate)
+
+    // Initialize result values
+    let hasUnaffectedPayments = false
+    let unaffectedPaymentsCount = 0
+    let unaffectedPaymentsAmount = new Decimal(0)
+    let firstPaymentDeducted = false
+    let firstPaymentAmount = new Decimal(0)
+
+    const payments = input.payments || []
+
+    if (payments.length === 1) {
+      // Single payment - check if it's from the same day (first payment)
+      const paymentDate = new Date(payments[0].receivedAt)
+      const paymentDateStr = LoanEngine.toDateString(paymentDate)
+
+      if (signDateStr === paymentDateStr) {
+        // First payment (advance) - deduct from restore amount
+        firstPaymentDeducted = true
+        firstPaymentAmount = new Decimal(payments[0].amount)
+        amountToRestore = amountToRestore.minus(firstPaymentAmount)
+
+        // Ensure we don't restore negative amount
+        if (amountToRestore.isNegative()) {
+          amountToRestore = new Decimal(0)
+        }
+      } else {
+        // Payment from different day - not refunded
+        hasUnaffectedPayments = true
+        unaffectedPaymentsCount = 1
+        unaffectedPaymentsAmount = new Decimal(payments[0].amount)
+      }
+    } else if (payments.length > 1) {
+      // Multiple payments - none are refunded
+      hasUnaffectedPayments = true
+      unaffectedPaymentsCount = payments.length
+
+      for (const payment of payments) {
+        unaffectedPaymentsAmount = unaffectedPaymentsAmount.plus(
+          new Decimal(payment.amount)
+        )
+      }
+    }
+
+    return {
+      amountToRestore: amountToRestore.toDecimalPlaces(2).toNumber(),
+      hasUnaffectedPayments,
+      unaffectedPaymentsCount,
+      unaffectedPaymentsAmount: unaffectedPaymentsAmount.toDecimalPlaces(2).toNumber(),
+      firstPaymentDeducted,
+      firstPaymentAmount: firstPaymentAmount.toDecimalPlaces(2).toNumber(),
+    }
+  }
+
+  /**
+   * Convert a Date to YYYY-MM-DD string for comparison
+   * @private
+   */
+  private static toDateString(date: Date): string {
+    return date.toISOString().split('T')[0]
   }
 }
 

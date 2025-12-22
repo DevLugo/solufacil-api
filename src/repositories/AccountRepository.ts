@@ -8,24 +8,21 @@ import { Decimal } from 'decimal.js'
  * IMPORTANTE: POLÍTICA DE BALANCE DE CUENTAS
  * ===============================================================
  *
- * El campo `amount` de las cuentas representa el balance calculado
- * a partir de las transacciones. NUNCA debe modificarse directamente.
+ * El campo `amount` representa el balance actual de la cuenta.
+ * Se actualiza incrementalmente con cada transacción.
  *
- * En lugar de modificar `amount` manualmente:
- * 1. Crear la transacción correspondiente (INCOME, EXPENSE, TRANSFER)
- * 2. Llamar a `recalculateAndUpdateBalance()` para actualizar el balance
+ * Métodos para actualizar balance:
+ * - `addToBalance(id, amount)`: Suma al balance (para INCOME, TRANSFER entrante)
+ * - `subtractFromBalance(id, amount)`: Resta del balance (para EXPENSE, TRANSFER saliente)
  *
  * Flujo correcto:
  * ```typescript
- * // Después de crear/editar/eliminar una transacción:
- * await accountRepository.recalculateAndUpdateBalance(accountId, tx)
- * ```
+ * // Después de crear una transacción EXPENSE:
+ * await accountRepository.subtractFromBalance(accountId, amount, tx)
  *
- * Tipos de transacciones y su efecto en el balance:
- * - INCOME (sourceAccount=cuenta): +amount (dinero ENTRA)
- * - EXPENSE (sourceAccount=cuenta): -amount (dinero SALE)
- * - TRANSFER (destinationAccount=cuenta): +amount (dinero ENTRA)
- * - TRANSFER (sourceAccount=cuenta): -amount (dinero SALE)
+ * // Después de crear una transacción INCOME:
+ * await accountRepository.addToBalance(accountId, amount, tx)
+ * ```
  *
  * ===============================================================
  */
@@ -107,103 +104,55 @@ export class AccountRepository {
   }
 
   /**
-   * Calcula el balance de una cuenta basándose en las transacciones.
-   *
-   * Lógica:
-   * - INCOME (sourceAccount=this): Dinero que ENTRA a la cuenta (+)
-   * - EXPENSE (sourceAccount=this): Dinero que SALE de la cuenta (-)
-   * - TRANSFER (destinationAccount=this): Dinero que ENTRA desde otra cuenta (+)
-   * - TRANSFER (sourceAccount=this, type!=INCOME): Dinero que SALE hacia otra cuenta (-)
+   * Obtiene el balance actual de la cuenta (campo `amount` almacenado).
    */
-  async calculateBalance(id: string, tx?: Prisma.TransactionClient): Promise<Decimal> {
-    const client = tx || this.prisma
-
-    // INCOME: dinero que entra a esta cuenta
-    const incomes = await client.transaction.aggregate({
-      where: {
-        sourceAccount: id,
-        type: 'INCOME',
-      },
-      _sum: { amount: true },
-    })
-
-    // EXPENSE: dinero que sale de esta cuenta (gastos, préstamos otorgados, comisiones)
-    const expenses = await client.transaction.aggregate({
-      where: {
-        sourceAccount: id,
-        type: 'EXPENSE',
-      },
-      _sum: { amount: true },
-    })
-
-    // TRANSFER entrante: dinero que llega desde otra cuenta
-    const transfersIn = await client.transaction.aggregate({
-      where: {
-        destinationAccount: id,
-        type: 'TRANSFER',
-      },
-      _sum: { amount: true },
-    })
-
-    // TRANSFER saliente: dinero que se envía a otra cuenta
-    const transfersOut = await client.transaction.aggregate({
-      where: {
-        sourceAccount: id,
-        type: 'TRANSFER',
-      },
-      _sum: { amount: true },
-    })
-
-    const incomeAmount = new Decimal(incomes._sum.amount?.toString() || '0')
-    const expenseAmount = new Decimal(expenses._sum.amount?.toString() || '0')
-    const transferInAmount = new Decimal(transfersIn._sum.amount?.toString() || '0')
-    const transferOutAmount = new Decimal(transfersOut._sum.amount?.toString() || '0')
-
-    // Balance = ingresos + transferencias entrantes - gastos - transferencias salientes
-    return incomeAmount.plus(transferInAmount).minus(expenseAmount).minus(transferOutAmount)
+  async getBalance(id: string): Promise<Decimal> {
+    const account = await this.prisma.account.findUnique({ where: { id } })
+    return new Decimal(account?.amount?.toString() || '0')
   }
 
   /**
-   * Recalcula el balance de una cuenta desde las transacciones y actualiza el campo amount.
-   * Este es el método centralizado que debe llamarse después de cualquier operación de transacción.
+   * Suma un monto al balance de la cuenta.
+   * Usar para: INCOME, TRANSFER entrante
    */
-  async recalculateAndUpdateBalance(id: string, tx?: Prisma.TransactionClient): Promise<Decimal> {
+  async addToBalance(id: string, amount: Decimal, tx?: Prisma.TransactionClient): Promise<Decimal> {
     const client = tx || this.prisma
 
-    // Get detailed breakdown for debugging
-    const incomes = await client.transaction.aggregate({
-      where: { sourceAccount: id, type: 'INCOME' },
-      _sum: { amount: true },
-      _count: true,
-    })
-    const expenses = await client.transaction.aggregate({
-      where: { sourceAccount: id, type: 'EXPENSE' },
-      _sum: { amount: true },
-      _count: true,
-    })
-
-    console.log('[AccountRepository] Balance breakdown for account:', id, {
-      incomes: { count: incomes._count, sum: incomes._sum.amount?.toString() || '0' },
-      expenses: { count: expenses._count, sum: expenses._sum.amount?.toString() || '0' },
-    })
-
-    const newBalance = await this.calculateBalance(id, tx)
-
-    // Get current balance before update
-    const currentAccount = await client.account.findUnique({ where: { id } })
-    const oldBalance = currentAccount?.amount?.toString() || '0'
-
-    console.log('[AccountRepository] recalculateAndUpdateBalance:', {
-      accountId: id,
-      oldBalance,
-      newBalance: newBalance.toString(),
-    })
-
-    await client.account.update({
+    const account = await client.account.update({
       where: { id },
-      data: { amount: newBalance },
+      data: {
+        amount: { increment: amount },
+      },
     })
 
-    return newBalance
+    return new Decimal(account.amount.toString())
+  }
+
+  /**
+   * Resta un monto del balance de la cuenta.
+   * Usar para: EXPENSE, TRANSFER saliente
+   */
+  async subtractFromBalance(id: string, amount: Decimal, tx?: Prisma.TransactionClient): Promise<Decimal> {
+    const client = tx || this.prisma
+
+    const account = await client.account.update({
+      where: { id },
+      data: {
+        amount: { decrement: amount },
+      },
+    })
+
+    return new Decimal(account.amount.toString())
+  }
+
+  /**
+   * @deprecated Use addToBalance or subtractFromBalance instead.
+   * Este método se mantiene temporalmente para compatibilidad pero NO debe usarse.
+   */
+  async recalculateAndUpdateBalance(id: string, tx?: Prisma.TransactionClient): Promise<Decimal> {
+    console.warn('[AccountRepository] DEPRECATED: recalculateAndUpdateBalance called. Use addToBalance/subtractFromBalance instead.')
+    const client = tx || this.prisma
+    const account = await client.account.findUnique({ where: { id } })
+    return new Decimal(account?.amount?.toString() || '0')
   }
 }

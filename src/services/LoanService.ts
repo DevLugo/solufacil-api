@@ -9,7 +9,7 @@ import { AccountRepository } from '../repositories/AccountRepository'
 import { TransactionRepository } from '../repositories/TransactionRepository'
 import { PaymentRepository } from '../repositories/PaymentRepository'
 import { PersonalDataRepository } from '../repositories/PersonalDataRepository'
-import { calculateLoanMetrics, createLoanSnapshot, calculatePaymentProfit, calculateProfitHeredado } from '@solufacil/business-logic'
+import { calculateLoanMetrics, createLoanSnapshot, calculatePaymentProfit, calculateProfitHeredado, LoanEngine } from '@solufacil/business-logic'
 import { generateClientCode } from '@solufacil/shared'
 import { getWeekStartDate, getWeekEndDate } from '../utils/weekUtils'
 
@@ -390,10 +390,12 @@ export class LoanService {
       })
     }
 
-    // Calcular el total a deducir de la cuenta
+    // Calcular el total a deducir de la cuenta (amountGived + comisión de cada préstamo)
     let totalAmountToDeduct = new Decimal(0)
     for (const loanInput of input.loans) {
-      totalAmountToDeduct = totalAmountToDeduct.plus(new Decimal(loanInput.amountGived))
+      const amountGived = new Decimal(loanInput.amountGived)
+      const comission = loanInput.comissionAmount ? new Decimal(loanInput.comissionAmount) : new Decimal(0)
+      totalAmountToDeduct = totalAmountToDeduct.plus(amountGived).plus(comission)
     }
 
     // Verificar que la cuenta existe y tiene fondos suficientes
@@ -515,7 +517,9 @@ export class LoanService {
 
         // 5. Manejar profit pendiente si es renovación
         let pendingProfit = new Decimal(0)
+        console.log('[LoanService] createLoansInBatch - loanInput.previousLoanId:', loanInput.previousLoanId)
         if (loanInput.previousLoanId) {
+          console.log('[LoanService] Processing renewal for previousLoanId:', loanInput.previousLoanId)
           const previousLoan = await tx.loan.findUnique({
             where: { id: loanInput.previousLoanId },
             include: { renewedBy: true },
@@ -545,14 +549,17 @@ export class LoanService {
           )
           pendingProfit = profitHeredado
 
-          // Marcar préstamo anterior como RENOVATED
-          await tx.loan.update({
+          // Marcar préstamo anterior como RENOVATED y cerrado
+          console.log('[LoanService] Updating previous loan to RENOVATED:', loanInput.previousLoanId)
+          const updatedPreviousLoan = await tx.loan.update({
             where: { id: loanInput.previousLoanId },
             data: {
               status: 'RENOVATED',
               renewedDate: input.signDate,
+              finishedDate: input.signDate,
             },
           })
+          console.log('[LoanService] Previous loan updated:', updatedPreviousLoan.id, 'status:', updatedPreviousLoan.status)
         }
 
         // 6. Crear el préstamo
@@ -621,6 +628,28 @@ export class LoanService {
           sourceAccount: input.sourceAccountId,
           type: 'EXPENSE'
         })
+
+        // 7.1. Crear transacción EXPENSE por la comisión de otorgamiento
+        if (comissionAmount.greaterThan(0)) {
+          const comissionTransaction = await tx.transaction.create({
+            data: {
+              amount: comissionAmount,
+              date: input.signDate,
+              type: 'EXPENSE',
+              expenseSource: 'LOAN_GRANTED_COMISSION',
+              sourceAccount: input.sourceAccountId,
+              loan: loan.id,
+              lead: input.leadId,
+              route: routeId,
+            },
+          })
+          console.log('[LoanService] Created EXPENSE transaction for comission:', {
+            id: comissionTransaction.id,
+            amount: comissionAmount.toString(),
+            sourceAccount: input.sourceAccountId,
+            type: 'EXPENSE'
+          })
+        }
 
         // 8. Crear primer pago si se especificó
         if (loanInput.firstPayment) {
@@ -705,8 +734,8 @@ export class LoanService {
         createdLoans.push(loan)
       }
 
-      // 9. Recalcular balance de la cuenta origen desde las transacciones
-      await this.accountRepository.recalculateAndUpdateBalance(input.sourceAccountId, tx)
+      // 9. Restar el monto total de la cuenta origen
+      await this.accountRepository.subtractFromBalance(input.sourceAccountId, totalAmountToDeduct, tx)
 
       return createdLoans
     })
@@ -956,13 +985,38 @@ export class LoanService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const amountGived = new Decimal(loan.amountGived.toString())
-
-      // 1. Eliminar pagos y sus transacciones si existen
+      // 1. Obtener pagos del préstamo con su método de pago
       const payments = await tx.loanPayment.findMany({
         where: { loan: loanId },
       })
 
+      // 2. Calcular totales por tipo de pago
+      let totalCashPayments = new Decimal(0)
+      let totalBankPayments = new Decimal(0)
+      let totalPaymentComissions = new Decimal(0)
+
+      for (const payment of payments) {
+        const paymentAmount = new Decimal(payment.amount.toString())
+        const paymentComission = new Decimal(payment.comission?.toString() || '0')
+
+        if (payment.paymentMethod === 'MONEY_TRANSFER') {
+          totalBankPayments = totalBankPayments.plus(paymentAmount)
+        } else {
+          totalCashPayments = totalCashPayments.plus(paymentAmount)
+        }
+        totalPaymentComissions = totalPaymentComissions.plus(paymentComission)
+      }
+
+      // 3. Calcular monto a restaurar a cuenta de ruta
+      // = amountGived + loanGrantedComission - cashPayments + paymentComissions
+      const amountGived = new Decimal(loan.amountGived.toString())
+      const loanGrantedComission = new Decimal(loan.comissionAmount?.toString() || '0')
+      const totalToRestoreToRouteAccount = amountGived
+        .plus(loanGrantedComission)
+        .minus(totalCashPayments)
+        .plus(totalPaymentComissions)
+
+      // 4. Eliminar pagos y sus transacciones
       for (const payment of payments) {
         await tx.transaction.deleteMany({
           where: { loanPayment: payment.id },
@@ -972,43 +1026,96 @@ export class LoanService {
         })
       }
 
-      // 2. Eliminar transacciones del préstamo (EXPENSE de LOAN_GRANTED, etc.)
+      // 5. Eliminar transacciones del préstamo (EXPENSE de LOAN_GRANTED, etc.)
       await tx.transaction.deleteMany({
         where: { loan: loanId },
       })
 
-      // 3. Crear transacción de restauración (INCOME) - sin relación al loan para que no se elimine
-      await tx.transaction.create({
-        data: {
-          amount: amountGived,
-          date: new Date(),
-          type: 'INCOME',
-          incomeSource: 'LOAN_CANCELLED_RESTORE',
-          sourceAccount: accountId,
-          // No se asocia al loan porque ya está cancelado
-          lead: loan.lead || undefined,
-          route: loan.snapshotRouteId || undefined,
-        },
-      })
+      // 6. Crear transacción de restauración para cuenta de ruta (INCOME)
+      if (!totalToRestoreToRouteAccount.isZero()) {
+        await tx.transaction.create({
+          data: {
+            amount: totalToRestoreToRouteAccount.abs(),
+            date: new Date(),
+            type: totalToRestoreToRouteAccount.isPositive() ? 'INCOME' : 'EXPENSE',
+            incomeSource: totalToRestoreToRouteAccount.isPositive() ? 'LOAN_CANCELLED_RESTORE' : undefined,
+            expenseSource: totalToRestoreToRouteAccount.isNegative() ? 'LOAN_CANCELLED_ADJUSTMENT' : undefined,
+            sourceAccount: accountId,
+            lead: loan.lead || undefined,
+            route: loan.snapshotRouteId || undefined,
+          },
+        })
+      }
 
-      // 4. Recalcular balance desde las transacciones
-      await this.accountRepository.recalculateAndUpdateBalance(accountId, tx)
+      // 7. Restaurar/ajustar el balance de la cuenta de ruta
+      if (totalToRestoreToRouteAccount.isPositive()) {
+        await this.accountRepository.addToBalance(accountId, totalToRestoreToRouteAccount, tx)
+      } else if (totalToRestoreToRouteAccount.isNegative()) {
+        await this.accountRepository.subtractFromBalance(accountId, totalToRestoreToRouteAccount.abs(), tx)
+      }
 
-      // 5. Marcar préstamo como CANCELLED
-      return tx.loan.update({
-        where: { id: loanId },
-        data: {
-          status: 'CANCELLED',
-        },
-        include: {
-          borrowerRelation: {
-            include: {
-              personalDataRelation: true,
+      // 8. Si hay pagos bancarios, revertir del banco
+      if (totalBankPayments.greaterThan(0)) {
+        // Buscar cuenta de banco de la ruta
+        const bankAccount = await tx.account.findFirst({
+          where: {
+            type: 'BANK',
+            routes: {
+              some: { id: loan.snapshotRouteId || undefined },
             },
           },
-          loantypeRelation: true,
-        },
+        })
+
+        if (bankAccount) {
+          await tx.transaction.create({
+            data: {
+              amount: totalBankPayments,
+              date: new Date(),
+              type: 'EXPENSE',
+              expenseSource: 'LOAN_CANCELLED_BANK_REVERSAL',
+              sourceAccount: bankAccount.id,
+              lead: loan.lead || undefined,
+              route: loan.snapshotRouteId || undefined,
+            },
+          })
+          await this.accountRepository.subtractFromBalance(bankAccount.id, totalBankPayments, tx)
+        }
+      }
+
+      // 9. Si es renovación, reactivar el préstamo anterior
+      if (loan.previousLoan) {
+        await tx.loan.update({
+          where: { id: loan.previousLoan },
+          data: {
+            status: 'ACTIVE',
+            renewedDate: null,
+            finishedDate: null,
+          },
+        })
+      }
+
+      // 10. Eliminar el préstamo
+      await tx.loan.update({
+        where: { id: loanId },
+        data: { collaterals: { set: [] } },
       })
+
+      await tx.loan.delete({
+        where: { id: loanId },
+      })
+
+      // Retornar información detallada
+      return {
+        success: true,
+        deletedLoanId: loanId,
+        restoredAmount: totalToRestoreToRouteAccount.toString(),
+        accountId,
+        // Nuevos campos para mostrar en el dialog
+        paymentsDeleted: payments.length,
+        totalCashPayments: totalCashPayments.toString(),
+        totalBankPayments: totalBankPayments.toString(),
+        totalPaymentComissions: totalPaymentComissions.toString(),
+      }
     })
   }
 

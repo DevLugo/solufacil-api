@@ -175,8 +175,9 @@ export class PaymentService {
         data: updateData,
       })
 
-      // Recalcular balance de la cuenta
-      await this.accountRepository.recalculateAndUpdateBalance(leadAccount.id, tx)
+      // Actualizar balance: sumar pago, restar comisión
+      const netPaymentAmount = paymentAmount.minus(comission)
+      await this.accountRepository.addToBalance(leadAccount.id, netPaymentAmount, tx)
 
       return payment
     })
@@ -359,13 +360,13 @@ export class PaymentService {
         bankAmountChange = bankAmountChange.plus(bankPaidAmount)
       }
 
-      // 6. Recalcular balances de cuentas desde transacciones
-      if (cashAccount) {
-        await this.accountRepository.recalculateAndUpdateBalance(cashAccount.id, tx)
+      // 6. Actualizar balances de cuentas con los montos acumulados
+      if (cashAccount && !cashAmountChange.isZero()) {
+        await this.accountRepository.addToBalance(cashAccount.id, cashAmountChange, tx)
       }
 
-      if (bankAccount) {
-        await this.accountRepository.recalculateAndUpdateBalance(bankAccount.id, tx)
+      if (bankAccount && !bankAmountChange.isZero()) {
+        await this.accountRepository.addToBalance(bankAccount.id, bankAmountChange, tx)
       }
 
       return leadPaymentReceived
@@ -526,9 +527,12 @@ export class PaymentService {
         }
       }
 
-      // Recalcular balance de la cuenta del lead
-      const leadAccount = await this.getLeadAccount(loan.lead || '', tx)
-      await this.accountRepository.recalculateAndUpdateBalance(leadAccount.id, tx)
+      // Ajustar balance: amountDiff (INCOME) - comissionDiff (EXPENSE)
+      const netBalanceChange = amountDiff.minus(comissionDiff)
+      if (!netBalanceChange.isZero()) {
+        const leadAccount = await this.getLeadAccount(loan.lead || '', tx)
+        await this.accountRepository.addToBalance(leadAccount.id, netBalanceChange, tx)
+      }
 
       return updatedPayment
     })
@@ -573,9 +577,10 @@ export class PaymentService {
         },
       })
 
-      // Recalcular balance de la cuenta del lead
+      // Revertir balance: restar el pago (INCOME), sumar la comisión (EXPENSE)
+      const netRevert = comission.minus(amount)
       const leadAccount = await this.getLeadAccount(loan.lead || '', tx)
-      await this.accountRepository.recalculateAndUpdateBalance(leadAccount.id, tx)
+      await this.accountRepository.addToBalance(leadAccount.id, netRevert, tx)
 
       return deletedPayment
     })
@@ -936,13 +941,21 @@ export class PaymentService {
         )
       }
 
-      // 5. Recalcular balances de cuentas desde transacciones (al final, después de todas las modificaciones)
-      if (cashAccount) {
-        await this.accountRepository.recalculateAndUpdateBalance(cashAccount.id, tx)
+      // 5. Calcular y aplicar cambios netos de balance
+      // El viejo efecto del transfer también hay que revertirlo
+      const oldBankPaidAmount = new Decimal(existingRecord.bankPaidAmount.toString())
+      oldCashChange = oldCashChange.minus(oldBankPaidAmount)
+      oldBankChange = oldBankChange.plus(oldBankPaidAmount)
+
+      const netCashChange = newCashChange.minus(oldCashChange)
+      const netBankChange = newBankChange.minus(oldBankChange)
+
+      if (cashAccount && !netCashChange.isZero()) {
+        await this.accountRepository.addToBalance(cashAccount.id, netCashChange, tx)
       }
 
-      if (bankAccount) {
-        await this.accountRepository.recalculateAndUpdateBalance(bankAccount.id, tx)
+      if (bankAccount && !netBankChange.isZero()) {
+        await this.accountRepository.addToBalance(bankAccount.id, netBankChange, tx)
       }
 
       // Actualizar el registro LeadPaymentReceived

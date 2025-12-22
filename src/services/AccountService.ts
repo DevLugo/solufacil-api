@@ -57,6 +57,6 @@ export class AccountService {
   }
 
   async getAccountBalance(id: string): Promise<Decimal> {
-    return this.accountRepository.calculateBalance(id)
+    return this.accountRepository.getBalance(id)
   }
 }
