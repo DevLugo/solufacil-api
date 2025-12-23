@@ -81,7 +81,12 @@ export class PaymentService {
     }
 
     const paymentAmount = new Decimal(input.amount)
-    const comission = input.comission ? new Decimal(input.comission) : new Decimal(0)
+    // Use commission from input, otherwise default to loantype's loanPaymentComission
+    const comission = input.comission !== undefined
+      ? new Decimal(input.comission)
+      : loan.loantypeRelation?.loanPaymentComission
+        ? new Decimal(loan.loantypeRelation.loanPaymentComission.toString())
+        : new Decimal(0)
 
     // Calcular profit del pago
     const totalProfit = new Decimal(loan.profitAmount.toString())
@@ -242,7 +247,12 @@ export class PaymentService {
         if (!loan) continue
 
         const paymentAmount = new Decimal(paymentInput.amount)
-        const comissionAmount = paymentInput.comission ? new Decimal(paymentInput.comission) : new Decimal(0)
+        // Use commission from input, otherwise default to loantype's loanPaymentComission
+        const comissionAmount = paymentInput.comission !== undefined
+          ? new Decimal(paymentInput.comission)
+          : loan.loantypeRelation?.loanPaymentComission
+            ? new Decimal(loan.loantypeRelation.loanPaymentComission.toString())
+            : new Decimal(0)
 
         // Calcular profit y return to capital
         const totalProfit = new Decimal(loan.profitAmount.toString())
@@ -358,6 +368,27 @@ export class PaymentService {
         // Ajustar el cambio: restar de efectivo, sumar a banco
         cashAmountChange = cashAmountChange.minus(bankPaidAmount)
         bankAmountChange = bankAmountChange.plus(bankPaidAmount)
+      }
+
+      // 5.5 Si hay falco, crear transacción FALCO_LOSS y descontar del balance
+      if (falcoAmount.greaterThan(0) && cashAccount) {
+        // Crear transacción de pérdida por falco (EXPENSE que reduce el balance)
+        await this.transactionRepository.create(
+          {
+            amount: falcoAmount,
+            date: paymentDate,
+            type: 'EXPENSE',
+            expenseSource: 'FALCO_LOSS',
+            description: `Pérdida por falco - ${leadPaymentReceived.id}`,
+            sourceAccountId: cashAccount.id,
+            leadId: input.leadId,
+            routeId,
+            leadPaymentReceivedId: leadPaymentReceived.id,
+          },
+          tx
+        )
+        // Descontar el falco del balance de efectivo
+        cashAmountChange = cashAmountChange.minus(falcoAmount)
       }
 
       // 6. Actualizar balances de cuentas con los montos acumulados
@@ -814,6 +845,13 @@ export class PaymentService {
             const loan = await this.loanRepository.findById(paymentInput.loanId)
             if (!loan) continue
 
+            // Recalculate commission using loantype's default if not provided
+            const actualCommission = paymentInput.comission !== undefined
+              ? new Decimal(paymentInput.comission)
+              : loan.loantypeRelation?.loanPaymentComission
+                ? new Decimal(loan.loantypeRelation.loanPaymentComission.toString())
+                : new Decimal(0)
+
             const isTransfer = paymentInput.paymentMethod === 'MONEY_TRANSFER'
             const destinationAccountId = isTransfer ? bankAccount?.id : cashAccount?.id
 
@@ -832,7 +870,7 @@ export class PaymentService {
             const payment = await this.paymentRepository.create(
               {
                 amount: paymentAmount,
-                comission: paymentComission,
+                comission: actualCommission,
                 receivedAt: new Date(),
                 paymentMethod: paymentInput.paymentMethod,
                 type: 'PAYMENT',
@@ -864,10 +902,10 @@ export class PaymentService {
             }
 
             // Crear transacción EXPENSE por comisión si aplica
-            if (paymentComission.greaterThan(0) && cashAccount) {
+            if (actualCommission.greaterThan(0) && cashAccount) {
               await this.transactionRepository.create(
                 {
-                  amount: paymentComission,
+                  amount: actualCommission,
                   date: new Date(),
                   type: 'EXPENSE',
                   expenseSource: 'LOAN_PAYMENT_COMISSION',
@@ -886,7 +924,7 @@ export class PaymentService {
             } else {
               newCashChange = newCashChange.plus(paymentAmount)
             }
-            newCashChange = newCashChange.minus(paymentComission)
+            newCashChange = newCashChange.minus(actualCommission)
 
             // Actualizar métricas del préstamo
             const currentTotalPaid = new Decimal(loan.totalPaid.toString())
@@ -898,7 +936,7 @@ export class PaymentService {
               data: {
                 totalPaid: currentTotalPaid.plus(paymentAmount),
                 pendingAmountStored: updatedPending.isNegative() ? new Decimal(0) : updatedPending,
-                comissionAmount: { increment: paymentComission },
+                comissionAmount: { increment: actualCommission },
                 ...(updatedPending.lessThanOrEqualTo(0) && {
                   status: 'FINISHED',
                   finishedDate: new Date(),
@@ -971,6 +1009,127 @@ export class PaymentService {
         },
         tx
       )
+    })
+  }
+
+  async createFalcoCompensatoryPayment(input: {
+    leadPaymentReceivedId: string
+    amount: string
+  }) {
+    const compensationAmount = new Decimal(input.amount)
+
+    if (compensationAmount.lessThanOrEqualTo(0)) {
+      throw new GraphQLError('Compensation amount must be positive', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      })
+    }
+
+    // Get the LeadPaymentReceived record
+    const leadPaymentReceived = await this.prisma.leadPaymentReceived.findUnique({
+      where: { id: input.leadPaymentReceivedId },
+      include: {
+        falcoCompensatoryPayments: true,
+        leadRelation: {
+          include: {
+            routes: {
+              include: {
+                accounts: {
+                  where: { type: 'EMPLOYEE_CASH_FUND' },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+
+    if (!leadPaymentReceived) {
+      throw new GraphQLError('LeadPaymentReceived not found', {
+        extensions: { code: 'NOT_FOUND' },
+      })
+    }
+
+    // Calculate total already compensated
+    const totalCompensated = leadPaymentReceived.falcoCompensatoryPayments.reduce(
+      (sum, payment) => sum.plus(new Decimal(payment.amount.toString())),
+      new Decimal(0)
+    )
+
+    const originalFalcoAmount = new Decimal(leadPaymentReceived.falcoAmount.toString())
+    const remainingFalco = originalFalcoAmount.minus(totalCompensated)
+
+    // Validate that compensation doesn't exceed remaining falco
+    if (compensationAmount.greaterThan(remainingFalco)) {
+      throw new GraphQLError(
+        `Compensation amount (${compensationAmount}) exceeds remaining falco (${remainingFalco})`,
+        { extensions: { code: 'BAD_USER_INPUT' } }
+      )
+    }
+
+    // Get the cash account for the lead
+    const cashAccount = leadPaymentReceived.leadRelation?.routes?.[0]?.accounts?.[0]
+    const routeId = leadPaymentReceived.leadRelation?.routes?.[0]?.id
+
+    return this.prisma.$transaction(async (tx) => {
+      // 1. Create the FalcoCompensatoryPayment record
+      const falcoCompensatoryPayment = await tx.falcoCompensatoryPayment.create({
+        data: {
+          amount: compensationAmount,
+          leadPaymentReceived: input.leadPaymentReceivedId,
+        },
+      })
+
+      // 2. Find and update the FALCO_LOSS transaction
+      const falcoLossTransaction = await tx.transaction.findFirst({
+        where: {
+          leadPaymentReceived: input.leadPaymentReceivedId,
+          type: 'EXPENSE',
+          expenseSource: 'FALCO_LOSS',
+        },
+      })
+
+      if (falcoLossTransaction) {
+        const newCompensatedTotal = totalCompensated.plus(compensationAmount)
+        const newLossAmount = originalFalcoAmount.minus(newCompensatedTotal)
+
+        // Update the transaction amount and description
+        const isFullyCompensated = newLossAmount.lessThanOrEqualTo(0)
+
+        await tx.transaction.update({
+          where: { id: falcoLossTransaction.id },
+          data: {
+            amount: isFullyCompensated ? new Decimal(0) : newLossAmount,
+            description: isFullyCompensated
+              ? `Pérdida por falco - COMPLETAMENTE COMPENSADO`
+              : `Pérdida por falco - PARCIALMENTE COMPENSADO (${newCompensatedTotal} de ${originalFalcoAmount})`,
+          },
+        })
+      }
+
+      // 3. Return money to the cash account (compensated amount)
+      if (cashAccount) {
+        await this.accountRepository.addToBalance(cashAccount.id, compensationAmount, tx)
+      }
+
+      // 4. Create an INCOME transaction for the compensation
+      if (cashAccount && routeId) {
+        await this.transactionRepository.create(
+          {
+            amount: compensationAmount,
+            date: new Date(),
+            type: 'INCOME',
+            incomeSource: 'FALCO_COMPENSATORY',
+            description: `Compensación de falco - ${input.leadPaymentReceivedId}`,
+            sourceAccountId: cashAccount.id,
+            leadId: leadPaymentReceived.lead,
+            routeId,
+            leadPaymentReceivedId: input.leadPaymentReceivedId,
+          },
+          tx
+        )
+      }
+
+      return falcoCompensatoryPayment
     })
   }
 }

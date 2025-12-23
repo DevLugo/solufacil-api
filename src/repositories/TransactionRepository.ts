@@ -163,6 +163,7 @@ export class TransactionRepository {
       type: TransactionType
       incomeSource?: string
       expenseSource?: string
+      description?: string
       profitAmount?: Decimal
       returnToCapital?: Decimal
       sourceAccountId?: string
@@ -188,6 +189,7 @@ export class TransactionRepository {
         type: data.type,
         incomeSource: data.incomeSource,
         expenseSource: data.expenseSource,
+        description: data.description,
         profitAmount: data.profitAmount,
         returnToCapital: data.returnToCapital,
         sourceAccount,

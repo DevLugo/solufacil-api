@@ -343,6 +343,15 @@ type LeadPaymentReceived {
   lead: Employee!
   agent: Employee!
   payments: [LoanPayment!]!
+  falcoCompensatoryPayments: [FalcoCompensatoryPayment!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type FalcoCompensatoryPayment {
+  id: ID!
+  amount: Decimal!
+  leadPaymentReceived: LeadPaymentReceived!
   createdAt: DateTime!
   updatedAt: DateTime!
 }
@@ -585,6 +594,9 @@ type PeriodComparison {
 }
 
 type PortfolioSummary {
+  "Clientes activos al INICIO del período (solo para reportes mensuales)"
+  clientesActivosInicio: Int
+  "Clientes activos al FINAL del período"
   totalClientesActivos: Int!
   clientesAlCorriente: Int!
   clientesEnCV: Int!
@@ -765,10 +777,13 @@ type MonthlyFinancialData {
   cashGasolina: Decimal!
   totalGasolina: Decimal!
   badDebtAmount: Decimal!
+  badDebtCapital: Decimal!
+  badDebtProfit: Decimal!
   # Ingresos
   incomes: Decimal!
   # Resultados
   operationalProfit: Decimal!
+  operationalProfitCapitalOnly: Decimal!
   profitPercentage: Decimal!
   gainPerPayment: Decimal!
   # Semanas
@@ -880,6 +895,9 @@ type Query {
   loanPayments(loanId: ID!, limit: Int, offset: Int): [LoanPayment!]! @auth
   loanPaymentsByLeadAndDate(leadId: ID!, startDate: DateTime!, endDate: DateTime!): [LoanPayment!]! @auth
   leadPaymentReceivedByLeadAndDate(leadId: ID!, startDate: DateTime!, endDate: DateTime!): LeadPaymentReceived @auth
+
+  # Falcos Pendientes (LeadPaymentReceived with falcoAmount > 0)
+  falcosPendientes(routeId: ID, leadId: ID): [LeadPaymentReceived!]! @auth
 
   # Transactions
   transactions(
@@ -1214,6 +1232,11 @@ input UpdatePaymentForLeadInput {
   isDeleted: Boolean
 }
 
+input CreateFalcoCompensatoryPaymentInput {
+  leadPaymentReceivedId: ID!
+  amount: Decimal!
+}
+
 input CreateAccountInput {
   name: String!
   type: AccountType!
@@ -1429,6 +1452,9 @@ type Mutation {
   deleteLoanPayment(id: ID!): LoanPayment! @auth
   createLeadPaymentReceived(input: CreateLeadPaymentReceivedInput!): LeadPaymentReceived! @auth
   updateLeadPaymentReceived(id: ID!, input: UpdateLeadPaymentReceivedInput!): LeadPaymentReceived! @auth
+
+  # Falco Compensatory Payments
+  createFalcoCompensatoryPayment(input: CreateFalcoCompensatoryPaymentInput!): FalcoCompensatoryPayment! @auth
 
   # Accounts
   createAccount(input: CreateAccountInput!): Account! @requireRole(roles: [ADMIN])

@@ -139,6 +139,55 @@ export const paymentResolvers = {
 
       return result
     },
+
+    falcosPendientes: async (
+      _parent: unknown,
+      args: { routeId?: string; leadId?: string },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      // Build the where clause to find LeadPaymentReceived with falcoAmount > 0
+      // and calculate remaining falco (falcoAmount - sum of compensatory payments)
+      const results = await context.prisma.leadPaymentReceived.findMany({
+        where: {
+          falcoAmount: {
+            gt: 0,
+          },
+          ...(args.leadId && { lead: args.leadId }),
+          ...(args.routeId && {
+            leadRelation: {
+              routes: {
+                some: {
+                  id: args.routeId,
+                },
+              },
+            },
+          }),
+        },
+        include: {
+          falcoCompensatoryPayments: true,
+          leadRelation: {
+            include: {
+              personalDataRelation: true,
+            },
+          },
+        },
+        orderBy: {
+          createdAt: 'desc',
+        },
+      })
+
+      // Filter to only return those with remaining falco balance
+      return results.filter((lpr) => {
+        const compensatedAmount = lpr.falcoCompensatoryPayments.reduce(
+          (sum, payment) => sum + parseFloat(payment.amount.toString()),
+          0
+        )
+        const remainingFalco = parseFloat(lpr.falcoAmount.toString()) - compensatedAmount
+        return remainingFalco > 0
+      })
+    },
   },
 
   Mutation: {
@@ -245,6 +294,22 @@ export const paymentResolvers = {
       const paymentService = new PaymentService(context.prisma)
       return paymentService.updateLeadPaymentReceived(args.id, args.input)
     },
+
+    createFalcoCompensatoryPayment: async (
+      _parent: unknown,
+      args: {
+        input: {
+          leadPaymentReceivedId: string
+          amount: string
+        }
+      },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      const paymentService = new PaymentService(context.prisma)
+      return paymentService.createFalcoCompensatoryPayment(args.input)
+    },
   },
 
   LoanPayment: {
@@ -294,6 +359,25 @@ export const paymentResolvers = {
     payments: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {
       return context.prisma.loanPayment.findMany({
         where: { leadPaymentReceived: parent.id },
+      })
+    },
+
+    falcoCompensatoryPayments: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {
+      return context.prisma.falcoCompensatoryPayment.findMany({
+        where: { leadPaymentReceived: parent.id },
+        orderBy: { createdAt: 'desc' },
+      })
+    },
+  },
+
+  FalcoCompensatoryPayment: {
+    leadPaymentReceived: async (
+      parent: { leadPaymentReceived: string },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      return context.prisma.leadPaymentReceived.findUnique({
+        where: { id: parent.leadPaymentReceived },
       })
     },
   },

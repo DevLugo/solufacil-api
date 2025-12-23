@@ -434,6 +434,17 @@ export class LoanService {
     return this.prisma.$transaction(async (tx) => {
       const createdLoans: any[] = []
 
+      // Track first payments for LeadPaymentReceived
+      const firstPaymentsCreated: {
+        paymentId: string
+        amount: Decimal
+        commission: Decimal
+        paymentMethod: 'CASH' | 'MONEY_TRANSFER'
+      }[] = []
+
+      // Track net balance effect from first payments (amount - commission)
+      let totalFirstPaymentNetEffect = new Decimal(0)
+
       for (const loanInput of input.loans) {
         // 1. Obtener o crear el borrower
         let borrowerId = loanInput.borrowerId
@@ -654,9 +665,12 @@ export class LoanService {
         // 8. Crear primer pago si se especificó
         if (loanInput.firstPayment) {
           const paymentAmount = new Decimal(loanInput.firstPayment.amount)
-          const comissionAmount = loanInput.firstPayment.comission
+          // Use commission from input, otherwise default to loantype's loanPaymentComission
+          const firstPaymentComission = loanInput.firstPayment.comission !== undefined
             ? new Decimal(loanInput.firstPayment.comission)
-            : new Decimal(0)
+            : loantype.loanPaymentComission
+              ? new Decimal(loantype.loanPaymentComission.toString())
+              : new Decimal(0)
 
           // Calcular profit del pago
           const { profitAmount, returnToCapital } = calculatePaymentProfit(
@@ -666,16 +680,34 @@ export class LoanService {
             false
           )
 
-          // Crear el pago
+          // Crear el pago (sin leadPaymentReceivedId todavía)
           const payment = await tx.loanPayment.create({
             data: {
               amount: paymentAmount,
-              comission: comissionAmount,
+              comission: firstPaymentComission,
               receivedAt: input.signDate,
               paymentMethod: loanInput.firstPayment.paymentMethod,
               type: 'PAYMENT',
               loan: loan.id,
             },
+          })
+
+          // Track this payment for LeadPaymentReceived
+          firstPaymentsCreated.push({
+            paymentId: payment.id,
+            amount: paymentAmount,
+            commission: firstPaymentComission,
+            paymentMethod: loanInput.firstPayment.paymentMethod,
+          })
+
+          // Track net balance effect (payment adds to balance, commission subtracts)
+          totalFirstPaymentNetEffect = totalFirstPaymentNetEffect.plus(paymentAmount).minus(firstPaymentComission)
+          console.log('[LoanService] First payment tracked:', {
+            loanId: loan.id,
+            paymentAmount: paymentAmount.toString(),
+            commission: firstPaymentComission.toString(),
+            netEffect: paymentAmount.minus(firstPaymentComission).toString(),
+            totalNetEffectSoFar: totalFirstPaymentNetEffect.toString(),
           })
 
           // Crear transacción INCOME por el pago
@@ -700,10 +732,10 @@ export class LoanService {
           })
 
           // Crear transacción EXPENSE por comisión si aplica
-          if (comissionAmount.greaterThan(0)) {
+          if (firstPaymentComission.greaterThan(0)) {
             await tx.transaction.create({
               data: {
-                amount: comissionAmount,
+                amount: firstPaymentComission,
                 date: input.signDate,
                 type: 'EXPENSE',
                 expenseSource: 'LOAN_PAYMENT_COMISSION',
@@ -715,14 +747,14 @@ export class LoanService {
             })
           }
 
-          // Actualizar métricas del préstamo
+          // Actualizar métricas del préstamo (payment commissions tracked separately)
           const updatedPending = metrics.totalDebtAcquired.minus(paymentAmount)
           await tx.loan.update({
             where: { id: loan.id },
             data: {
               totalPaid: paymentAmount,
               pendingAmountStored: updatedPending.isNegative() ? new Decimal(0) : updatedPending,
-              comissionAmount,
+              comissionAmount: comissionAmount.plus(firstPaymentComission),
               ...(updatedPending.lessThanOrEqualTo(0) && {
                 status: 'FINISHED',
                 finishedDate: input.signDate,
@@ -734,8 +766,128 @@ export class LoanService {
         createdLoans.push(loan)
       }
 
-      // 9. Restar el monto total de la cuenta origen
+      // 9. Crear o actualizar LeadPaymentReceived si hubo primeros pagos
+      if (firstPaymentsCreated.length > 0) {
+        // Calculate totals
+        let totalCashPaid = new Decimal(0)
+        let totalBankPaid = new Decimal(0)
+        let totalAmount = new Decimal(0)
+
+        for (const fp of firstPaymentsCreated) {
+          totalAmount = totalAmount.plus(fp.amount)
+          if (fp.paymentMethod === 'CASH') {
+            totalCashPaid = totalCashPaid.plus(fp.amount)
+          } else {
+            totalBankPaid = totalBankPaid.plus(fp.amount)
+          }
+        }
+
+        // Check if there's already a LeadPaymentReceived for this day
+        const paymentDate = new Date(input.signDate)
+        const startOfDay = new Date(paymentDate)
+        startOfDay.setHours(0, 0, 0, 0)
+        const endOfDay = new Date(paymentDate)
+        endOfDay.setHours(23, 59, 59, 999)
+
+        const existingLPR = await tx.leadPaymentReceived.findFirst({
+          where: {
+            lead: input.leadId,
+            createdAt: {
+              gte: startOfDay,
+              lte: endOfDay,
+            },
+          },
+        })
+
+        let leadPaymentReceivedId: string
+
+        if (existingLPR) {
+          // Update existing LeadPaymentReceived
+          console.log('[LoanService] Existing LeadPaymentReceived found, updating...', {
+            existingLPRId: existingLPR.id,
+            existingPaidAmount: existingLPR.paidAmount?.toString(),
+            addingTotalAmount: totalAmount.toString(),
+            addingCashPaid: totalCashPaid.toString(),
+            addingBankPaid: totalBankPaid.toString(),
+          })
+          const existingPaidAmount = new Decimal(existingLPR.paidAmount?.toString() || '0')
+          const existingCashPaid = new Decimal(existingLPR.cashPaidAmount?.toString() || '0')
+          const existingBankPaid = new Decimal(existingLPR.bankPaidAmount?.toString() || '0')
+          const existingExpected = new Decimal(existingLPR.expectedAmount?.toString() || '0')
+
+          await tx.leadPaymentReceived.update({
+            where: { id: existingLPR.id },
+            data: {
+              paidAmount: existingPaidAmount.plus(totalAmount),
+              cashPaidAmount: existingCashPaid.plus(totalCashPaid),
+              bankPaidAmount: existingBankPaid.plus(totalBankPaid),
+              expectedAmount: existingExpected.plus(totalAmount),
+            },
+          })
+          leadPaymentReceivedId = existingLPR.id
+        } else {
+          // Create new LeadPaymentReceived
+          const newLPR = await tx.leadPaymentReceived.create({
+            data: {
+              expectedAmount: totalAmount,
+              paidAmount: totalAmount,
+              cashPaidAmount: totalCashPaid,
+              bankPaidAmount: totalBankPaid,
+              paymentStatus: 'COMPLETE',
+              lead: input.leadId,
+              agent: input.leadId,
+            },
+          })
+          leadPaymentReceivedId = newLPR.id
+        }
+
+        // Link all first payments to the LeadPaymentReceived
+        for (const fp of firstPaymentsCreated) {
+          await tx.loanPayment.update({
+            where: { id: fp.paymentId },
+            data: { leadPaymentReceived: leadPaymentReceivedId },
+          })
+        }
+
+        // Update transactions to link to LeadPaymentReceived
+        await tx.transaction.updateMany({
+          where: {
+            loanPayment: { in: firstPaymentsCreated.map((fp) => fp.paymentId) },
+          },
+          data: { leadPaymentReceived: leadPaymentReceivedId },
+        })
+      }
+
+      // 10. Restar el monto total de la cuenta origen
+      const accountBefore = await tx.account.findUnique({ where: { id: input.sourceAccountId } })
+      console.log('[LoanService] ====== BALANCE ANTES ======')
+      console.log('[LoanService] Balance inicial:', accountBefore?.amount?.toString())
+      console.log('[LoanService] Subtracting from balance:', {
+        totalAmountToDeduct: totalAmountToDeduct.toString(),
+        accountId: input.sourceAccountId,
+      })
       await this.accountRepository.subtractFromBalance(input.sourceAccountId, totalAmountToDeduct, tx)
+
+      // 11. Ajustar balance por primeros pagos (el pago suma, la comisión resta)
+      console.log('[LoanService] Final first payment balance adjustment:', {
+        totalFirstPaymentNetEffect: totalFirstPaymentNetEffect.toString(),
+        isZero: totalFirstPaymentNetEffect.isZero(),
+        accountId: input.sourceAccountId,
+      })
+      if (!totalFirstPaymentNetEffect.isZero()) {
+        await this.accountRepository.addToBalance(input.sourceAccountId, totalFirstPaymentNetEffect, tx)
+        console.log('[LoanService] Balance adjusted by:', totalFirstPaymentNetEffect.toString())
+      }
+
+      const accountAfter = await tx.account.findUnique({ where: { id: input.sourceAccountId } })
+      console.log('[LoanService] ====== BALANCE DESPUÉS ======')
+      console.log('[LoanService] Balance final:', accountAfter?.amount?.toString())
+      console.log('[LoanService] Resumen:')
+      console.log('[LoanService]   - Inicial:', accountBefore?.amount?.toString())
+      console.log('[LoanService]   - Restado (créditos + comisiones):', totalAmountToDeduct.toString())
+      console.log('[LoanService]   - Sumado (primeros pagos neto):', totalFirstPaymentNetEffect.toString())
+      console.log('[LoanService]   - Esperado:', new Decimal(accountBefore?.amount?.toString() || '0').minus(totalAmountToDeduct).plus(totalFirstPaymentNetEffect).toString())
+      console.log('[LoanService]   - Final:', accountAfter?.amount?.toString())
 
       return createdLoans
     })

@@ -161,11 +161,53 @@ export type BorrowerSearchResult = {
   personalData: PersonalData;
 };
 
+export type BulkDateMigrationInput = {
+  endCreatedAt: Scalars['DateTime']['input'];
+  newBusinessDate: Scalars['DateTime']['input'];
+  routeId?: InputMaybe<Scalars['ID']['input']>;
+  startCreatedAt: Scalars['DateTime']['input'];
+};
+
+export type BulkDateMigrationPreview = {
+  __typename?: 'BulkDateMigrationPreview';
+  loanPaymentsCount: Scalars['Int']['output'];
+  loansCount: Scalars['Int']['output'];
+  totalRecords: Scalars['Int']['output'];
+  transactionsCount: Scalars['Int']['output'];
+};
+
+export type BulkDateMigrationResult = {
+  __typename?: 'BulkDateMigrationResult';
+  loanPaymentsUpdated: Scalars['Int']['output'];
+  loansUpdated: Scalars['Int']['output'];
+  message: Scalars['String']['output'];
+  success: Scalars['Boolean']['output'];
+  totalUpdated: Scalars['Int']['output'];
+  transactionsUpdated: Scalars['Int']['output'];
+};
+
 export enum CvStatus {
   AlCorriente = 'AL_CORRIENTE',
   EnCv = 'EN_CV',
   Excluido = 'EXCLUIDO'
 }
+
+export type CancelLoanResult = {
+  __typename?: 'CancelLoanResult';
+  accountId: Scalars['ID']['output'];
+  deletedLoanId: Scalars['ID']['output'];
+  /** Cantidad de pagos eliminados */
+  paymentsDeleted: Scalars['Int']['output'];
+  /** Monto neto restaurado a la cuenta de ruta */
+  restoredAmount: Scalars['Decimal']['output'];
+  success: Scalars['Boolean']['output'];
+  /** Total de pagos por transferencia eliminados */
+  totalBankPayments: Scalars['Decimal']['output'];
+  /** Total de pagos en efectivo eliminados */
+  totalCashPayments: Scalars['Decimal']['output'];
+  /** Total de comisiones de pago revertidas */
+  totalPaymentComissions: Scalars['Decimal']['output'];
+};
 
 export type CleanupLoanPreview = {
   __typename?: 'CleanupLoanPreview';
@@ -733,6 +775,10 @@ export type Loan = {
   amountGived: Scalars['Decimal']['output'];
   badDebtDate?: Maybe<Scalars['DateTime']['output']>;
   borrower: Borrower;
+  /** Deuda pendiente calculada: totalDebtAcquired - calculatedTotalPaid */
+  calculatedPendingAmount: Scalars['Decimal']['output'];
+  /** Total pagado calculado desde la tabla de pagos (más preciso que totalPaid almacenado) */
+  calculatedTotalPaid: Scalars['Decimal']['output'];
   collaterals: Array<PersonalData>;
   comissionAmount: Scalars['Decimal']['output'];
   createdAt: Scalars['DateTime']['output'];
@@ -969,6 +1015,8 @@ export type MonthlyFinancialData = {
   activeWeeks: Scalars['Int']['output'];
   availableCash: Scalars['Decimal']['output'];
   badDebtAmount: Scalars['Decimal']['output'];
+  badDebtCapital: Scalars['Decimal']['output'];
+  badDebtProfit: Scalars['Decimal']['output'];
   capitalReturn: Scalars['Decimal']['output'];
   carteraActiva: Scalars['Int']['output'];
   carteraMuerta: Scalars['Decimal']['output'];
@@ -984,6 +1032,7 @@ export type MonthlyFinancialData = {
   nominaInterna: Scalars['Decimal']['output'];
   operationalCashUsed: Scalars['Decimal']['output'];
   operationalProfit: Scalars['Decimal']['output'];
+  operationalProfitCapitalOnly: Scalars['Decimal']['output'];
   paymentsCount: Scalars['Int']['output'];
   profitPercentage: Scalars['Decimal']['output'];
   profitReturn: Scalars['Decimal']['output'];
@@ -1013,7 +1062,7 @@ export type Mutation = {
   __typename?: 'Mutation';
   activateTelegramUser: TelegramUser;
   cancelLoan: Loan;
-  cancelLoanWithAccountRestore: Loan;
+  cancelLoanWithAccountRestore: CancelLoanResult;
   changePassword: Scalars['Boolean']['output'];
   createAccount: Account;
   createBorrower: Borrower;
@@ -1040,6 +1089,7 @@ export type Mutation = {
   deleteUser: Scalars['Boolean']['output'];
   distributeMoney: BatchTransferResult;
   drainRoutes: BatchTransferResult;
+  executeBulkDateMigration: BulkDateMigrationResult;
   executeReportManually: ReportExecutionResult;
   finishLoan: Loan;
   generatePortfolioReportPDF: PdfGenerationResult;
@@ -1223,6 +1273,11 @@ export type MutationDistributeMoneyArgs = {
 
 export type MutationDrainRoutesArgs = {
   input: DrainRoutesInput;
+};
+
+
+export type MutationExecuteBulkDateMigrationArgs = {
+  input: BulkDateMigrationInput;
 };
 
 
@@ -1606,6 +1661,7 @@ export type Query = {
   portfolioCleanups: Array<PortfolioCleanup>;
   portfolioReportMonthly: PortfolioReport;
   portfolioReportWeekly: PortfolioReport;
+  previewBulkDateMigration: BulkDateMigrationPreview;
   previewPortfolioCleanup: CleanupPreview;
   recoveredDeadDebt: RecoveredDeadDebtResult;
   reportConfig?: Maybe<ReportConfig>;
@@ -1873,6 +1929,11 @@ export type QueryPortfolioReportWeeklyArgs = {
   filters?: InputMaybe<PortfolioFiltersInput>;
   weekNumber: Scalars['Int']['input'];
   year: Scalars['Int']['input'];
+};
+
+
+export type QueryPreviewBulkDateMigrationArgs = {
+  input: BulkDateMigrationInput;
 };
 
 
@@ -2192,7 +2253,7 @@ export type Transaction = {
   profitAmount?: Maybe<Scalars['Decimal']['output']>;
   returnToCapital?: Maybe<Scalars['Decimal']['output']>;
   route?: Maybe<Route>;
-  sourceAccount: Account;
+  sourceAccount?: Maybe<Account>;
   type: TransactionType;
   updatedAt: Scalars['DateTime']['output'];
 };
@@ -2514,7 +2575,11 @@ export type ResolversTypes = ResolversObject<{
   Boolean: ResolverTypeWrapper<Scalars['Boolean']['output']>;
   Borrower: ResolverTypeWrapper<Borrower>;
   BorrowerSearchResult: ResolverTypeWrapper<BorrowerSearchResult>;
+  BulkDateMigrationInput: BulkDateMigrationInput;
+  BulkDateMigrationPreview: ResolverTypeWrapper<BulkDateMigrationPreview>;
+  BulkDateMigrationResult: ResolverTypeWrapper<BulkDateMigrationResult>;
   CVStatus: CvStatus;
+  CancelLoanResult: ResolverTypeWrapper<CancelLoanResult>;
   CleanupLoanPreview: ResolverTypeWrapper<CleanupLoanPreview>;
   CleanupPreview: ResolverTypeWrapper<CleanupPreview>;
   ClientAddressInfo: ResolverTypeWrapper<ClientAddressInfo>;
@@ -2691,6 +2756,10 @@ export type ResolversParentTypes = ResolversObject<{
   Boolean: Scalars['Boolean']['output'];
   Borrower: Borrower;
   BorrowerSearchResult: BorrowerSearchResult;
+  BulkDateMigrationInput: BulkDateMigrationInput;
+  BulkDateMigrationPreview: BulkDateMigrationPreview;
+  BulkDateMigrationResult: BulkDateMigrationResult;
+  CancelLoanResult: CancelLoanResult;
   CleanupLoanPreview: CleanupLoanPreview;
   CleanupPreview: CleanupPreview;
   ClientAddressInfo: ClientAddressInfo;
@@ -2976,6 +3045,36 @@ export type BorrowerSearchResultResolvers<ContextType = GraphQLContext, ParentTy
   locationName?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   pendingDebtAmount?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   personalData?: Resolver<ResolversTypes['PersonalData'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type BulkDateMigrationPreviewResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BulkDateMigrationPreview'] = ResolversParentTypes['BulkDateMigrationPreview']> = ResolversObject<{
+  loanPaymentsCount?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  loansCount?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  totalRecords?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  transactionsCount?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type BulkDateMigrationResultResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BulkDateMigrationResult'] = ResolversParentTypes['BulkDateMigrationResult']> = ResolversObject<{
+  loanPaymentsUpdated?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  loansUpdated?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  message?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  success?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
+  totalUpdated?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  transactionsUpdated?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type CancelLoanResultResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['CancelLoanResult'] = ResolversParentTypes['CancelLoanResult']> = ResolversObject<{
+  accountId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  deletedLoanId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  paymentsDeleted?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  restoredAmount?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
+  success?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
+  totalBankPayments?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
+  totalCashPayments?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
+  totalPaymentComissions?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
 }>;
 
@@ -3326,6 +3425,8 @@ export type LoanResolvers<ContextType = GraphQLContext, ParentType extends Resol
   amountGived?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   badDebtDate?: Resolver<Maybe<ResolversTypes['DateTime']>, ParentType, ContextType>;
   borrower?: Resolver<ResolversTypes['Borrower'], ParentType, ContextType>;
+  calculatedPendingAmount?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
+  calculatedTotalPaid?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   collaterals?: Resolver<Array<ResolversTypes['PersonalData']>, ParentType, ContextType>;
   comissionAmount?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   createdAt?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
@@ -3548,6 +3649,8 @@ export type MonthlyFinancialDataResolvers<ContextType = GraphQLContext, ParentTy
   activeWeeks?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
   availableCash?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   badDebtAmount?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
+  badDebtCapital?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
+  badDebtProfit?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   capitalReturn?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   carteraActiva?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
   carteraMuerta?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
@@ -3563,6 +3666,7 @@ export type MonthlyFinancialDataResolvers<ContextType = GraphQLContext, ParentTy
   nominaInterna?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   operationalCashUsed?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   operationalProfit?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
+  operationalProfitCapitalOnly?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   paymentsCount?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
   profitPercentage?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   profitReturn?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
@@ -3592,7 +3696,7 @@ export type MunicipalityResolvers<ContextType = GraphQLContext, ParentType exten
 export type MutationResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['Mutation'] = ResolversParentTypes['Mutation']> = ResolversObject<{
   activateTelegramUser?: Resolver<ResolversTypes['TelegramUser'], ParentType, ContextType, RequireFields<MutationActivateTelegramUserArgs, 'id'>>;
   cancelLoan?: Resolver<ResolversTypes['Loan'], ParentType, ContextType, RequireFields<MutationCancelLoanArgs, 'id'>>;
-  cancelLoanWithAccountRestore?: Resolver<ResolversTypes['Loan'], ParentType, ContextType, RequireFields<MutationCancelLoanWithAccountRestoreArgs, 'accountId' | 'id'>>;
+  cancelLoanWithAccountRestore?: Resolver<ResolversTypes['CancelLoanResult'], ParentType, ContextType, RequireFields<MutationCancelLoanWithAccountRestoreArgs, 'accountId' | 'id'>>;
   changePassword?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationChangePasswordArgs, 'newPassword' | 'oldPassword'>>;
   createAccount?: Resolver<ResolversTypes['Account'], ParentType, ContextType, RequireFields<MutationCreateAccountArgs, 'input'>>;
   createBorrower?: Resolver<ResolversTypes['Borrower'], ParentType, ContextType, RequireFields<MutationCreateBorrowerArgs, 'input'>>;
@@ -3619,6 +3723,7 @@ export type MutationResolvers<ContextType = GraphQLContext, ParentType extends R
   deleteUser?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationDeleteUserArgs, 'id'>>;
   distributeMoney?: Resolver<ResolversTypes['BatchTransferResult'], ParentType, ContextType, RequireFields<MutationDistributeMoneyArgs, 'input'>>;
   drainRoutes?: Resolver<ResolversTypes['BatchTransferResult'], ParentType, ContextType, RequireFields<MutationDrainRoutesArgs, 'input'>>;
+  executeBulkDateMigration?: Resolver<ResolversTypes['BulkDateMigrationResult'], ParentType, ContextType, RequireFields<MutationExecuteBulkDateMigrationArgs, 'input'>>;
   executeReportManually?: Resolver<ResolversTypes['ReportExecutionResult'], ParentType, ContextType, RequireFields<MutationExecuteReportManuallyArgs, 'reportConfigId'>>;
   finishLoan?: Resolver<ResolversTypes['Loan'], ParentType, ContextType, RequireFields<MutationFinishLoanArgs, 'loanId'>>;
   generatePortfolioReportPDF?: Resolver<ResolversTypes['PDFGenerationResult'], ParentType, ContextType, RequireFields<MutationGeneratePortfolioReportPdfArgs, 'periodType' | 'year'>>;
@@ -3803,6 +3908,7 @@ export type QueryResolvers<ContextType = GraphQLContext, ParentType extends Reso
   portfolioCleanups?: Resolver<Array<ResolversTypes['PortfolioCleanup']>, ParentType, ContextType, Partial<QueryPortfolioCleanupsArgs>>;
   portfolioReportMonthly?: Resolver<ResolversTypes['PortfolioReport'], ParentType, ContextType, RequireFields<QueryPortfolioReportMonthlyArgs, 'month' | 'year'>>;
   portfolioReportWeekly?: Resolver<ResolversTypes['PortfolioReport'], ParentType, ContextType, RequireFields<QueryPortfolioReportWeeklyArgs, 'weekNumber' | 'year'>>;
+  previewBulkDateMigration?: Resolver<ResolversTypes['BulkDateMigrationPreview'], ParentType, ContextType, RequireFields<QueryPreviewBulkDateMigrationArgs, 'input'>>;
   previewPortfolioCleanup?: Resolver<ResolversTypes['CleanupPreview'], ParentType, ContextType, RequireFields<QueryPreviewPortfolioCleanupArgs, 'maxSignDate'>>;
   recoveredDeadDebt?: Resolver<ResolversTypes['RecoveredDeadDebtResult'], ParentType, ContextType, RequireFields<QueryRecoveredDeadDebtArgs, 'month' | 'year'>>;
   reportConfig?: Resolver<Maybe<ResolversTypes['ReportConfig']>, ParentType, ContextType, RequireFields<QueryReportConfigArgs, 'id'>>;
@@ -3993,7 +4099,7 @@ export type TransactionResolvers<ContextType = GraphQLContext, ParentType extend
   profitAmount?: Resolver<Maybe<ResolversTypes['Decimal']>, ParentType, ContextType>;
   returnToCapital?: Resolver<Maybe<ResolversTypes['Decimal']>, ParentType, ContextType>;
   route?: Resolver<Maybe<ResolversTypes['Route']>, ParentType, ContextType>;
-  sourceAccount?: Resolver<ResolversTypes['Account'], ParentType, ContextType>;
+  sourceAccount?: Resolver<Maybe<ResolversTypes['Account']>, ParentType, ContextType>;
   type?: Resolver<ResolversTypes['TransactionType'], ParentType, ContextType>;
   updatedAt?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
   __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
@@ -4077,6 +4183,9 @@ export type Resolvers<ContextType = GraphQLContext> = ResolversObject<{
   BatchTransferResult?: BatchTransferResultResolvers<ContextType>;
   Borrower?: BorrowerResolvers<ContextType>;
   BorrowerSearchResult?: BorrowerSearchResultResolvers<ContextType>;
+  BulkDateMigrationPreview?: BulkDateMigrationPreviewResolvers<ContextType>;
+  BulkDateMigrationResult?: BulkDateMigrationResultResolvers<ContextType>;
+  CancelLoanResult?: CancelLoanResultResolvers<ContextType>;
   CleanupLoanPreview?: CleanupLoanPreviewResolvers<ContextType>;
   CleanupPreview?: CleanupPreviewResolvers<ContextType>;
   ClientAddressInfo?: ClientAddressInfoResolvers<ContextType>;

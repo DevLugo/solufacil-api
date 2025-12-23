@@ -114,7 +114,7 @@ function getForeignKeyColumns(tableName: string): Record<string, string> {
     Location: { municipality: 'Municipality', route: 'Route' },
     PortfolioCleanup: { route: 'Route', executedBy: 'User' },
     LeadPaymentReceived: { lead: 'Employee', agent: 'Employee' },
-    Loan: { borrower: 'Borrower', loantype: 'Loantype', grantor: 'Employee', lead: 'Employee', excludedByCleanup: 'PortfolioCleanup' },
+    Loan: { borrower: 'Borrower', loantype: 'Loantype', grantor: 'Employee', lead: 'Employee', excludedByCleanup: 'PortfolioCleanup', previousLoan: 'Loan', snapshotRouteId: 'Route' },
     LoanPayment: { loan: 'Loan', leadPaymentReceived: 'LeadPaymentReceived' },
     DocumentPhoto: { personalData: 'PersonalData', loan: 'Loan', uploadedBy: 'User' },
     CommissionPayment: { loan: 'Loan', employee: 'Employee' },
@@ -182,25 +182,38 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
         FROM "${src}"."TelegramUser" t`
 
     case 'Phone':
+      // Verificar que personalData exista en destino para evitar FK errors
       return `INSERT INTO "${tgt}"."Phone" (id, number, "personalData", "createdAt", "updatedAt")
-        SELECT id, COALESCE(number, ''), "personalData", "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."Phone" WHERE "personalData" IS NOT NULL`
+        SELECT p.id, COALESCE(p.number, ''), p."personalData", p."createdAt", COALESCE(p."updatedAt", p."createdAt", NOW())
+        FROM "${src}"."Phone" p
+        WHERE p."personalData" IS NOT NULL
+          AND EXISTS (SELECT 1 FROM "${tgt}"."PersonalData" WHERE id = p."personalData")`
 
     case 'Address':
+      // Verificar que location y personalData existan en destino para evitar FK errors
       return `INSERT INTO "${tgt}"."Address" (id, street, "exteriorNumber", "interiorNumber", "postalCode", "references", location, "personalData", "createdAt", "updatedAt")
-        SELECT id, COALESCE(street, ''), COALESCE("exteriorNumber", ''), COALESCE("interiorNumber", ''), COALESCE("postalCode", ''), COALESCE("references", ''), location, "personalData", NOW(), NOW()
-        FROM "${src}"."Address" WHERE location IS NOT NULL AND "personalData" IS NOT NULL`
+        SELECT a.id, COALESCE(a.street, ''), COALESCE(a."exteriorNumber", ''), COALESCE(a."interiorNumber", ''), COALESCE(a."postalCode", ''), COALESCE(a."references", ''), a.location, a."personalData", NOW(), NOW()
+        FROM "${src}"."Address" a
+        WHERE a.location IS NOT NULL AND a."personalData" IS NOT NULL
+          AND EXISTS (SELECT 1 FROM "${tgt}"."Location" WHERE id = a.location)
+          AND EXISTS (SELECT 1 FROM "${tgt}"."PersonalData" WHERE id = a."personalData")`
 
     case 'Employee':
+      // Verificar que personalData exista en destino para evitar FK errors
       return `INSERT INTO "${tgt}"."Employee" (id, "oldId", type, "personalData", "user", "createdAt", "updatedAt")
         SELECT e.id, e."oldId", e.type::text::"${tgt}"."EmployeeType", e."personalData",
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."User" WHERE id = e."user") THEN e."user" ELSE NULL END, NOW(), NOW()
-        FROM "${src}"."Employee" e WHERE e."personalData" IS NOT NULL`
+        FROM "${src}"."Employee" e
+        WHERE e."personalData" IS NOT NULL
+          AND EXISTS (SELECT 1 FROM "${tgt}"."PersonalData" WHERE id = e."personalData")`
 
     case 'Borrower':
+      // Verificar que personalData exista en destino para evitar FK errors
       return `INSERT INTO "${tgt}"."Borrower" (id, "loanFinishedCount", "personalData", "createdAt", "updatedAt")
-        SELECT id, "loanFinishedCount", "personalData", "createdAt", COALESCE("updatedAt", "createdAt", NOW())
-        FROM "${src}"."Borrower"`
+        SELECT b.id, b."loanFinishedCount", b."personalData", b."createdAt", COALESCE(b."updatedAt", b."createdAt", NOW())
+        FROM "${src}"."Borrower" b
+        WHERE b."personalData" IS NOT NULL
+          AND EXISTS (SELECT 1 FROM "${tgt}"."PersonalData" WHERE id = b."personalData")`
 
     case 'Loantype':
       return `INSERT INTO "${tgt}"."Loantype" (id, name, "weekDuration", rate, "loanPaymentComission", "loanGrantedComission", "createdAt", "updatedAt")
@@ -223,6 +236,9 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
         WHERE lpr.lead IS NOT NULL AND EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = lpr.lead)`
 
     case 'Loan':
+      // NOTA: previousLoan se inserta como NULL inicialmente, luego se actualiza en un segundo paso
+      // Esto evita problemas de FK ya que el préstamo referenciado podría no existir aún
+      // También verificamos que borrower y loantype EXISTAN en destino para evitar FK errors
       return `INSERT INTO "${tgt}"."Loan" (id, "oldId", "requestedAmount", "amountGived", "signDate", "finishedDate", "renewedDate", "badDebtDate", "isDeceased", "profitAmount", "totalDebtAcquired", "expectedWeeklyPayment", "totalPaid", "pendingAmountStored", "comissionAmount", status, borrower, loantype, grantor, lead, "snapshotLeadId", "snapshotLeadAssignedAt", "snapshotRouteId", "snapshotRouteName", "previousLoan", "excludedByCleanup", "createdAt", "updatedAt")
         SELECT l.id, l."oldId", COALESCE(l."requestedAmount", 0), COALESCE(l."amountGived", 0), l."signDate", l."finishedDate", l."renewedDate", l."badDebtDate", COALESCE(l."isDeceased", false), COALESCE(l."profitAmount", 0), COALESCE(l."totalDebtAcquired", 0), COALESCE(l."expectedWeeklyPayment", 0), COALESCE(l."totalPaid", 0), COALESCE(l."pendingAmountStored", 0), COALESCE(l."comissionAmount", 0), l.status::text::"${tgt}"."LoanStatus", l.borrower, l.loantype,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = l.grantor) THEN l.grantor ELSE NULL END,
@@ -232,7 +248,19 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
           COALESCE(l."snapshotRouteName", ''), NULL,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."PortfolioCleanup" WHERE id = l."excludedByCleanup") THEN l."excludedByCleanup" ELSE NULL END,
           l."createdAt", COALESCE(l."updatedAt", l."createdAt", NOW())
-        FROM "${src}"."Loan" l WHERE l.borrower IS NOT NULL AND l.loantype IS NOT NULL`
+        FROM "${src}"."Loan" l
+        WHERE l.borrower IS NOT NULL
+          AND l.loantype IS NOT NULL
+          AND EXISTS (SELECT 1 FROM "${tgt}"."Borrower" WHERE id = l.borrower)
+          AND EXISTS (SELECT 1 FROM "${tgt}"."Loantype" WHERE id = l.loantype);
+
+        -- Segundo paso: Actualizar previousLoan ahora que todos los préstamos existen
+        UPDATE "${tgt}"."Loan" tgt
+        SET "previousLoan" = src."previousLoan"
+        FROM "${src}"."Loan" src
+        WHERE tgt.id = src.id
+          AND src."previousLoan" IS NOT NULL
+          AND EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = src."previousLoan")`
 
     case 'LoanPayment':
       return `INSERT INTO "${tgt}"."LoanPayment" (id, amount, comission, "receivedAt", "paymentMethod", type, "oldLoanId", loan, "leadPaymentReceived", "createdAt", "updatedAt")
@@ -348,13 +376,38 @@ function transformRow(tableName: string, row: Record<string, any>, fkSets: Recor
   // Helper to check if value is effectively null
   const isNullish = (val: any) => val === null || val === undefined || val === 'null' || val === ''
 
-  // Table-specific filters
+  // Table-specific filters - verificar que FK requeridas existan en destino
   switch (tableName) {
-    case 'Phone': if (!row.personalData) return null; break
-    case 'Address': if (!row.location || !row.personalData) return null; break
-    case 'Employee': if (!row.personalData) return null; break
-    case 'Loan': if (!row.borrower || !row.loantype) return null; break
-    case 'LoanPayment': if (!row.loan) return null; break
+    case 'Phone':
+      if (!row.personalData) return null
+      if (fkSets.personalData && !fkSets.personalData.has(row.personalData)) return null
+      break
+    case 'Address':
+      if (!row.location || !row.personalData) return null
+      if (fkSets.location && !fkSets.location.has(row.location)) return null
+      if (fkSets.personalData && !fkSets.personalData.has(row.personalData)) return null
+      break
+    case 'Employee':
+      if (!row.personalData) return null
+      if (fkSets.personalData && !fkSets.personalData.has(row.personalData)) return null
+      break
+    case 'Borrower':
+      if (!row.personalData) return null
+      if (fkSets.personalData && !fkSets.personalData.has(row.personalData)) return null
+      break
+    case 'Loan':
+      if (!row.borrower || !row.loantype) return null
+      // Verificar que borrower y loantype existan en destino (FK requeridas)
+      if (fkSets.borrower && !fkSets.borrower.has(row.borrower)) return null
+      if (fkSets.loantype && !fkSets.loantype.has(row.loantype)) return null
+      // IMPORTANTE: previousLoan se setea a NULL para evitar unique constraint errors
+      // Se actualiza en un segundo paso después de insertar todos los loans
+      result.previousLoan = null
+      break
+    case 'LoanPayment':
+      if (!row.loan) return null
+      if (fkSets.loan && !fkSets.loan.has(row.loan)) return null
+      break
     // DocumentPhoto: uploadedBy handled with COALESCE in query (uses first User as default)
     case 'Transaction':
       if (!row.date) return null
@@ -513,6 +566,40 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
       process.stdout.write(`\r   ${tableName}... ${Math.min(offset, sourceCount)}/${sourceCount}`)
     }
 
+    // Segundo paso para Loan: actualizar previousLoan ahora que todos los loans existen
+    if (tableName === 'Loan') {
+      process.stdout.write(`\r   ${tableName}... actualizando previousLoan...`)
+      try {
+        // Get all loans with previousLoan in source
+        const loansWithPrevious = await sourceClient.query(`
+          SELECT id, "previousLoan" FROM "${SOURCE_SCHEMA}"."Loan"
+          WHERE "previousLoan" IS NOT NULL
+        `)
+
+        // Get existing loan IDs in target
+        const targetLoanIds = await getExistingIds(targetClient, TARGET_SCHEMA, 'Loan')
+
+        let updateCount = 0
+        for (const row of loansWithPrevious.rows) {
+          // Only update if both loan and previousLoan exist in target
+          if (targetLoanIds.has(row.id) && targetLoanIds.has(row.previousLoan)) {
+            try {
+              await targetClient.query(
+                `UPDATE "${TARGET_SCHEMA}"."Loan" SET "previousLoan" = $1 WHERE id = $2`,
+                [row.previousLoan, row.id]
+              )
+              updateCount++
+            } catch {
+              // Ignore errors - previousLoan might already be set or constraint issue
+            }
+          }
+        }
+        process.stdout.write(`\r   ${tableName}... ${updateCount} previousLoan actualizados`)
+      } catch (err) {
+        console.error(`\n   ⚠️  Error actualizando previousLoan: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
     const targetCountResult = await targetClient.query(`SELECT COUNT(*)::int as count FROM "${TARGET_SCHEMA}"."${tableName}"`)
     const result: MigrationResult = { table: tableName, sourceCount, targetCount: targetCountResult.rows[0].count, success: true }
 
@@ -628,6 +715,89 @@ async function migrateEmployeeRoutes(): Promise<MigrationResult> {
 }
 
 // ============================================================================
+// DIAGNOSTICS
+// ============================================================================
+
+async function runDiagnostics(): Promise<void> {
+  if (!SAME_DATABASE) {
+    console.log('⚠️  Diagnósticos solo disponibles en modo Same-DB\n')
+    return
+  }
+
+  console.log('🔍 Analizando integridad de datos en origen...\n')
+  const client = await sourcePool.connect()
+  const src = SOURCE_SCHEMA
+
+  try {
+    // Después de migrar PersonalData, verificar cuántos Borrowers se saltarán
+    const borrowerOrphans = await client.query(`
+      SELECT COUNT(*) as count FROM "${src}"."Borrower" b
+      WHERE b."personalData" IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM "${src}"."PersonalData" WHERE id = b."personalData")
+    `)
+    if (borrowerOrphans.rows[0].count > 0) {
+      console.log(`   ⚠️  Borrowers con personalData huérfano: ${borrowerOrphans.rows[0].count}`)
+    }
+
+    // Loans con borrower huérfano
+    const loanOrphanBorrower = await client.query(`
+      SELECT COUNT(*) as count FROM "${src}"."Loan" l
+      WHERE l.borrower IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM "${src}"."Borrower" WHERE id = l.borrower)
+    `)
+    if (loanOrphanBorrower.rows[0].count > 0) {
+      console.log(`   ⚠️  Loans con borrower huérfano: ${loanOrphanBorrower.rows[0].count}`)
+    }
+
+    // Loans con loantype huérfano
+    const loanOrphanType = await client.query(`
+      SELECT COUNT(*) as count FROM "${src}"."Loan" l
+      WHERE l.loantype IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM "${src}"."Loantype" WHERE id = l.loantype)
+    `)
+    if (loanOrphanType.rows[0].count > 0) {
+      console.log(`   ⚠️  Loans con loantype huérfano: ${loanOrphanType.rows[0].count}`)
+    }
+
+    // Loans con borrower→personalData huérfano (cascada)
+    const loanCascadeOrphan = await client.query(`
+      SELECT COUNT(*) as count FROM "${src}"."Loan" l
+      JOIN "${src}"."Borrower" b ON l.borrower = b.id
+      WHERE b."personalData" IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM "${src}"."PersonalData" WHERE id = b."personalData")
+    `)
+    if (loanCascadeOrphan.rows[0].count > 0) {
+      console.log(`   ⚠️  Loans afectados por cascada (borrower→personalData huérfano): ${loanCascadeOrphan.rows[0].count}`)
+    }
+
+    // Total de loans que se saltarán
+    const totalSkipped = await client.query(`
+      SELECT COUNT(*) as count FROM "${src}"."Loan" l
+      WHERE l.borrower IS NULL
+         OR l.loantype IS NULL
+         OR NOT EXISTS (SELECT 1 FROM "${src}"."Borrower" WHERE id = l.borrower)
+         OR NOT EXISTS (SELECT 1 FROM "${src}"."Loantype" WHERE id = l.loantype)
+         OR EXISTS (
+           SELECT 1 FROM "${src}"."Borrower" b
+           WHERE b.id = l.borrower
+             AND b."personalData" IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM "${src}"."PersonalData" WHERE id = b."personalData")
+         )
+    `)
+    console.log(`\n   📊 Total de Loans que se omitirán: ${totalSkipped.rows[0].count}`)
+
+    const totalLoans = await client.query(`SELECT COUNT(*) as count FROM "${src}"."Loan"`)
+    console.log(`   📊 Total de Loans en origen: ${totalLoans.rows[0].count}`)
+    console.log(`   📊 Loans que se migrarán: ${totalLoans.rows[0].count - totalSkipped.rows[0].count}\n`)
+
+  } catch (error) {
+    console.log(`   ❌ Error en diagnóstico: ${error instanceof Error ? error.message : String(error)}\n`)
+  } finally {
+    client.release()
+  }
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -734,12 +904,14 @@ async function main() {
 
   if (DRY_RUN) {
     await countSourceRecords()
+    await runDiagnostics()
     console.log('\n⚠️  Modo DRY-RUN: No se ejecutaron cambios.\n')
     await sourcePool.end()
     if (!SAME_DATABASE) await targetPool.end()
     return
   }
 
+  await runDiagnostics()
   await cleanTargetSchema()
 
   const results: MigrationResult[] = []

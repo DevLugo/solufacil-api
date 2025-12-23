@@ -67,7 +67,7 @@ export type ExclusionReason = 'BAD_DEBT' | 'CLEANUP' | 'NOT_ACTIVE'
  */
 export interface LoanForPortfolio {
   id: string
-  /** Monto pendiente */
+  /** Monto pendiente (almacenado en DB) */
   pendingAmountStored: number
   /** Fecha de firma del préstamo */
   signDate: Date
@@ -79,10 +79,28 @@ export interface LoanForPortfolio {
   badDebtDate: Date | null
   /** ID de exclusión por limpieza (null si no excluido) */
   excludedByCleanup: string | null
+  /** Fecha de cleanup (para verificación por fecha) */
+  cleanupDate?: Date | null
   /** ID del préstamo anterior (null si es primer préstamo) */
   previousLoan: string | null
   /** Status del préstamo (usado como fallback para renovaciones) */
   status?: string
+  /** Monto solicitado (para calcular deuda total) */
+  requestedAmount?: number
+  /** Tasa de interés del loantype (para calcular deuda total) */
+  rate?: number
+  /** Total pagado hasta la fecha (para calcular monto pendiente real) */
+  totalPaid?: number
+}
+
+/**
+ * Información de renovación de un préstamo
+ */
+export interface LoanRenewalInfo {
+  /** ID del préstamo que renueva */
+  id: string
+  /** Fecha de firma del préstamo que renueva */
+  signDate: Date
 }
 
 /**
@@ -162,7 +180,9 @@ export interface PeriodComparison {
  * Resumen global del reporte
  */
 export interface PortfolioSummary {
-  /** Total de clientes activos */
+  /** Clientes activos al INICIO del período (solo para reportes mensuales) */
+  clientesActivosInicio?: number
+  /** Total de clientes activos (al final del período) */
   totalClientesActivos: number
   /** Clientes al corriente (activos y no en CV) */
   clientesAlCorriente: number

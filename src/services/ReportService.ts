@@ -817,6 +817,8 @@ export class ReportService {
         carteraVencida: 0,
         renovados: 0,
         badDebtAmount: new Decimal(0),
+        badDebtCapital: new Decimal(0),
+        badDebtProfit: new Decimal(0),
         totalIncomingCash: new Decimal(0),
         capitalReturn: new Decimal(0),
         profitReturn: new Decimal(0),
@@ -832,6 +834,7 @@ export class ReportService {
         gainPerPayment: new Decimal(0),
         operationalProfit: new Decimal(0),
         profitPercentage: new Decimal(0),
+        operationalProfitCapitalOnly: new Decimal(0),
         carteraMuerta: new Decimal(0),
         nominaInterna: new Decimal(0),
         salarioExterno: new Decimal(0),
@@ -1031,6 +1034,7 @@ export class ReportService {
       let overdueLoans = 0
       let renewedLoans = 0
       let badDebtAmount = new Decimal(0)
+      let badDebtCapital = new Decimal(0)
       let carteraMuertaTotal = new Decimal(0)
 
       for (const loan of loanMetrics) {
@@ -1049,13 +1053,20 @@ export class ReportService {
         if (loan.badDebtDate) {
           if (loan.badDebtDate >= monthStart && loan.badDebtDate <= monthEnd) {
             let totalPaid = 0
+            let gananciaCobradaEnBadDebt = 0
             for (const payment of loan.paymentsByDate) {
               if (payment.date <= loan.badDebtDate) {
                 totalPaid += payment.amount
+                // Proporción de ganancia cobrada en cada pago
+                gananciaCobradaEnBadDebt += payment.amount * (loan.profitAmount / loan.totalToPay)
               } else break
             }
             const pendingDebt = Math.max(0, loan.totalToPay - totalPaid)
+            const gananciaPendiente = Math.max(0, loan.profitAmount - gananciaCobradaEnBadDebt)
+            const capitalPendiente = Math.max(0, pendingDebt - gananciaPendiente)
+
             badDebtAmount = badDebtAmount.plus(pendingDebt)
+            badDebtCapital = badDebtCapital.plus(capitalPendiente)
           }
 
           if (loan.badDebtDate <= monthEnd) {
@@ -1084,6 +1095,8 @@ export class ReportService {
       monthlyData[monthKey].carteraMuerta = carteraMuertaTotal
       monthlyData[monthKey].renovados = renewedLoans
       monthlyData[monthKey].badDebtAmount = badDebtAmount
+      monthlyData[monthKey].badDebtCapital = badDebtCapital
+      monthlyData[monthKey].badDebtProfit = badDebtAmount.minus(badDebtCapital)
 
       // Calculate active weeks info
       const weeksInfo = this.getActiveWeeksInfo(year, month)
@@ -1100,6 +1113,10 @@ export class ReportService {
       data.gainPerPayment = data.paymentsCount > 0
         ? data.operationalProfit.dividedBy(data.paymentsCount)
         : new Decimal(0)
+
+      // Calculate operational profit considering only capital (not profit) from bad debt
+      const uiExpensesTotalCapitalOnly = data.generalExpenses.plus(data.nomina).plus(data.comissions).plus(data.badDebtCapital).plus(data.travelExpenses)
+      data.operationalProfitCapitalOnly = uiGainsTotal.minus(uiExpensesTotalCapitalOnly)
 
       // Calculate weekly averages
       const activeWeeks = weeksInfo.activeWeeks
@@ -1156,9 +1173,12 @@ export class ReportService {
         tokaGasolina: data.tokaGasolina,
         cashGasolina: data.cashGasolina,
         totalGasolina: data.totalGasolina,
-        badDebtAmount: data.badDebtAmount,
+        badDebtAmount: data.badDebtAmount || new Decimal(0),
+        badDebtCapital: data.badDebtCapital || new Decimal(0),
+        badDebtProfit: data.badDebtProfit || new Decimal(0),
         incomes: data.incomes,
         operationalProfit: data.operationalProfit,
+        operationalProfitCapitalOnly: data.operationalProfitCapitalOnly || data.operationalProfit,
         profitPercentage: data.profitPercentage,
         gainPerPayment: data.gainPerPayment,
         activeWeeks: data.activeWeeks,
