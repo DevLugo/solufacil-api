@@ -840,18 +840,51 @@ export class PaymentService {
                   },
                 })
 
-                // Actualizar transacción de comisión si existe
-                if (!comissionDiff.isZero()) {
-                  await tx.transaction.updateMany({
+                // Handle commission transaction
+                if (paymentComission.isZero() && !oldComission.isZero()) {
+                  // Commission became 0 - DELETE the commission transaction
+                  console.log('[PaymentService] Deleting commission transaction (commission became 0)')
+                  await tx.transaction.deleteMany({
                     where: {
                       loanPayment: paymentInput.paymentId,
                       type: 'EXPENSE',
                       expenseSource: 'LOAN_PAYMENT_COMISSION',
                     },
-                    data: {
-                      amount: paymentComission,
-                    },
                   })
+                } else if (!comissionDiff.isZero()) {
+                  // Commission changed but is not 0 - update it
+                  if (oldComission.isZero() && paymentComission.greaterThan(0)) {
+                    // Commission was 0 and now has a value - create new transaction
+                    console.log('[PaymentService] Creating new commission transaction')
+                    if (cashAccount) {
+                      await this.transactionRepository.create(
+                        {
+                          amount: paymentComission,
+                          date: new Date(),
+                          type: 'EXPENSE',
+                          expenseSource: 'LOAN_PAYMENT_COMISSION',
+                          sourceAccountId: cashAccount.id,
+                          loanPaymentId: paymentInput.paymentId,
+                          leadId: existingRecord.lead,
+                          routeId,
+                        },
+                        tx
+                      )
+                    }
+                  } else {
+                    // Just update the existing commission transaction
+                    console.log('[PaymentService] Updating commission transaction to:', paymentComission.toString())
+                    await tx.transaction.updateMany({
+                      where: {
+                        loanPayment: paymentInput.paymentId,
+                        type: 'EXPENSE',
+                        expenseSource: 'LOAN_PAYMENT_COMISSION',
+                      },
+                      data: {
+                        amount: paymentComission,
+                      },
+                    })
+                  }
                 }
 
                 // Actualizar métricas del préstamo si cambió el monto
