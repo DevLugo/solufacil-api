@@ -1451,7 +1451,7 @@ type Mutation {
   updateLoanPayment(id: ID!, input: UpdateLoanPaymentInput!): LoanPayment! @auth
   deleteLoanPayment(id: ID!): LoanPayment! @auth
   createLeadPaymentReceived(input: CreateLeadPaymentReceivedInput!): LeadPaymentReceived! @auth
-  updateLeadPaymentReceived(id: ID!, input: UpdateLeadPaymentReceivedInput!): LeadPaymentReceived! @auth
+  updateLeadPaymentReceived(id: ID!, input: UpdateLeadPaymentReceivedInput!): LeadPaymentReceived @auth
 
   # Falco Compensatory Payments
   createFalcoCompensatoryPayment(input: CreateFalcoCompensatoryPaymentInput!): FalcoCompensatoryPayment! @auth

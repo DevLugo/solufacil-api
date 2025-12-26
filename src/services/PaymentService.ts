@@ -689,8 +689,24 @@ export class PaymentService {
       const processedPaymentIds = new Set<string>()
 
       // Primero, calcular oldCashChange SOLO de los pagos que vienen en el input
+      console.log('[PaymentService] ====== BALANCE CALCULATION START ======')
+      console.log('[PaymentService] LeadPaymentReceived ID:', id)
+      console.log('[PaymentService] Total payments in input:', input.payments?.length || 0)
+      console.log('[PaymentService] Existing payments in record:', existingRecord.payments.length)
+      console.log('[PaymentService] Input bankPaidAmount:', bankPaidAmount.toString())
+      console.log('[PaymentService] Existing bankPaidAmount:', existingRecord.bankPaidAmount.toString())
+
       if (input.payments) {
         for (const paymentInput of input.payments) {
+          console.log('[PaymentService] Input payment:', {
+            paymentId: paymentInput.paymentId,
+            loanId: paymentInput.loanId,
+            inputAmount: paymentInput.amount,
+            inputComission: paymentInput.comission,
+            inputMethod: paymentInput.paymentMethod,
+            isDeleted: paymentInput.isDeleted,
+          })
+
           if (paymentInput.paymentId) {
             const existingPayment = existingPaymentsMap.get(paymentInput.paymentId)
             if (existingPayment) {
@@ -698,16 +714,34 @@ export class PaymentService {
               const oldComission = new Decimal(existingPayment.comission.toString())
               const wasTransfer = existingPayment.paymentMethod === 'MONEY_TRANSFER'
 
+              console.log('[PaymentService] Existing payment from DB:', {
+                paymentId: paymentInput.paymentId,
+                dbAmount: oldAmount.toString(),
+                dbComission: oldComission.toString(),
+                dbMethod: existingPayment.paymentMethod,
+              })
+
               if (wasTransfer) {
                 oldBankChange = oldBankChange.plus(oldAmount)
+                console.log('[PaymentService]   -> Added to oldBankChange:', oldAmount.toString())
               } else {
                 oldCashChange = oldCashChange.plus(oldAmount)
+                console.log('[PaymentService]   -> Added to oldCashChange:', oldAmount.toString())
               }
               oldCashChange = oldCashChange.minus(oldComission)
+              console.log('[PaymentService]   -> Subtracted commission from oldCashChange:', oldComission.toString())
+              console.log('[PaymentService]   -> Current oldCashChange:', oldCashChange.toString())
+              console.log('[PaymentService]   -> Current oldBankChange:', oldBankChange.toString())
+            } else {
+              console.log('[PaymentService] WARNING: Payment ID not found in existingPaymentsMap:', paymentInput.paymentId)
             }
           }
         }
       }
+
+      console.log('[PaymentService] After processing all input payments:')
+      console.log('[PaymentService]   oldCashChange (before transfer adj):', oldCashChange.toString())
+      console.log('[PaymentService]   oldBankChange (before transfer adj):', oldBankChange.toString())
 
       // Procesar cada pago en el input
       if (input.payments) {
@@ -731,6 +765,9 @@ export class PaymentService {
               processedPaymentIds.add(paymentInput.paymentId)
 
               if (paymentInput.isDeleted) {
+                console.log('[PaymentService] DELETING payment:', paymentInput.paymentId)
+                console.log('[PaymentService]   -> NOT adding to newCashChange/newBankChange (deleted)')
+
                 // Eliminar el pago
                 await tx.transaction.deleteMany({
                   where: { loanPayment: paymentInput.paymentId },
@@ -831,13 +868,19 @@ export class PaymentService {
                 }
 
                 // Acumular nuevos cambios
+                console.log('[PaymentService] UPDATING payment:', paymentInput.paymentId)
                 if (isTransfer) {
                   newBankChange = newBankChange.plus(paymentAmount)
+                  console.log('[PaymentService]   -> Added to newBankChange:', paymentAmount.toString())
                 } else {
                   newCashChange = newCashChange.plus(paymentAmount)
+                  console.log('[PaymentService]   -> Added to newCashChange:', paymentAmount.toString())
                 }
                 // Comisión siempre afecta efectivo
                 newCashChange = newCashChange.minus(paymentComission)
+                console.log('[PaymentService]   -> Subtracted commission from newCashChange:', paymentComission.toString())
+                console.log('[PaymentService]   -> Current newCashChange:', newCashChange.toString())
+                console.log('[PaymentService]   -> Current newBankChange:', newBankChange.toString())
               }
             }
           } else if (!paymentInput.isDeleted && paymentAmount.greaterThan(0)) {
@@ -919,12 +962,18 @@ export class PaymentService {
             }
 
             // Acumular nuevos cambios
+            console.log('[PaymentService] CREATING new payment for loan:', paymentInput.loanId)
             if (isTransfer) {
               newBankChange = newBankChange.plus(paymentAmount)
+              console.log('[PaymentService]   -> Added to newBankChange:', paymentAmount.toString())
             } else {
               newCashChange = newCashChange.plus(paymentAmount)
+              console.log('[PaymentService]   -> Added to newCashChange:', paymentAmount.toString())
             }
             newCashChange = newCashChange.minus(actualCommission)
+            console.log('[PaymentService]   -> Subtracted commission from newCashChange:', actualCommission.toString())
+            console.log('[PaymentService]   -> Current newCashChange:', newCashChange.toString())
+            console.log('[PaymentService]   -> Current newBankChange:', newBankChange.toString())
 
             // Actualizar métricas del préstamo
             const currentTotalPaid = new Decimal(loan.totalPaid.toString())
@@ -947,10 +996,19 @@ export class PaymentService {
         }
       }
 
+      console.log('[PaymentService] After processing all payments:')
+      console.log('[PaymentService]   newCashChange (before transfer adj):', newCashChange.toString())
+      console.log('[PaymentService]   newBankChange (before transfer adj):', newBankChange.toString())
+
       // 3.1 Agregar el efecto del bankPaidAmount (transferencia de efectivo a banco)
       if (bankPaidAmount.greaterThan(0)) {
+        console.log('[PaymentService] Adjusting for new bankPaidAmount:', bankPaidAmount.toString())
         newCashChange = newCashChange.minus(bankPaidAmount)
         newBankChange = newBankChange.plus(bankPaidAmount)
+        console.log('[PaymentService]   newCashChange after transfer:', newCashChange.toString())
+        console.log('[PaymentService]   newBankChange after transfer:', newBankChange.toString())
+      } else {
+        console.log('[PaymentService] No new bankPaidAmount to adjust (0 or not provided)')
       }
 
       // 4. Manejar transacción de transferencia (bankPaidAmount)
@@ -982,18 +1040,82 @@ export class PaymentService {
       // 5. Calcular y aplicar cambios netos de balance
       // El viejo efecto del transfer también hay que revertirlo
       const oldBankPaidAmount = new Decimal(existingRecord.bankPaidAmount.toString())
+
+      console.log('[PaymentService] ====== FINAL BALANCE CALCULATION ======')
+      console.log('[PaymentService] BEFORE oldBankPaidAmount adjustment:')
+      console.log('[PaymentService]   oldCashChange:', oldCashChange.toString())
+      console.log('[PaymentService]   oldBankChange:', oldBankChange.toString())
+      console.log('[PaymentService]   newCashChange:', newCashChange.toString())
+      console.log('[PaymentService]   newBankChange:', newBankChange.toString())
+      console.log('[PaymentService]   oldBankPaidAmount (from existing record):', oldBankPaidAmount.toString())
+      console.log('[PaymentService]   newBankPaidAmount (from input):', bankPaidAmount.toString())
+
+      console.log('[PaymentService] Adjusting old values for old transfer:')
+      console.log('[PaymentService]   oldCashChange = oldCashChange - oldBankPaidAmount')
+      console.log('[PaymentService]   oldCashChange = ' + oldCashChange.toString() + ' - ' + oldBankPaidAmount.toString())
       oldCashChange = oldCashChange.minus(oldBankPaidAmount)
+      console.log('[PaymentService]   oldCashChange after adjustment:', oldCashChange.toString())
+
+      console.log('[PaymentService]   oldBankChange = oldBankChange + oldBankPaidAmount')
+      console.log('[PaymentService]   oldBankChange = ' + oldBankChange.toString() + ' + ' + oldBankPaidAmount.toString())
       oldBankChange = oldBankChange.plus(oldBankPaidAmount)
+      console.log('[PaymentService]   oldBankChange after adjustment:', oldBankChange.toString())
 
       const netCashChange = newCashChange.minus(oldCashChange)
       const netBankChange = newBankChange.minus(oldBankChange)
 
+      console.log('[PaymentService] NET CHANGE CALCULATION:')
+      console.log('[PaymentService]   netCashChange = newCashChange - oldCashChange')
+      console.log('[PaymentService]   netCashChange = ' + newCashChange.toString() + ' - ' + oldCashChange.toString() + ' = ' + netCashChange.toString())
+      console.log('[PaymentService]   netBankChange = newBankChange - oldBankChange')
+      console.log('[PaymentService]   netBankChange = ' + newBankChange.toString() + ' - ' + oldBankChange.toString() + ' = ' + netBankChange.toString())
+      console.log('[PaymentService] EXPECTED: If deleting all payments, netCashChange should be NEGATIVE')
+
+      // Log balance BEFORE adjustment
+      const cashBalanceBefore = cashAccount ? await tx.account.findUnique({ where: { id: cashAccount.id } }) : null
+      console.log('[PaymentService] Cash balance BEFORE adjustment:', cashBalanceBefore?.amount?.toString())
+
       if (cashAccount && !netCashChange.isZero()) {
+        console.log('[PaymentService] Adjusting cash balance by:', netCashChange.toString())
         await this.accountRepository.addToBalance(cashAccount.id, netCashChange, tx)
       }
 
       if (bankAccount && !netBankChange.isZero()) {
+        console.log('[PaymentService] Adjusting bank balance by:', netBankChange.toString())
         await this.accountRepository.addToBalance(bankAccount.id, netBankChange, tx)
+      }
+
+      // Log balance AFTER adjustment
+      const cashBalanceAfter = cashAccount ? await tx.account.findUnique({ where: { id: cashAccount.id } }) : null
+      console.log('[PaymentService] Cash balance AFTER adjustment:', cashBalanceAfter?.amount?.toString())
+
+      // Verificar si quedan pagos después de las eliminaciones
+      const remainingPayments = await tx.loanPayment.count({
+        where: { leadPaymentReceived: id },
+      })
+
+      console.log('[PaymentService] ====== SUMMARY ======')
+      console.log('[PaymentService] Remaining payments after operation:', remainingPayments)
+      console.log('[PaymentService] Final netCashChange applied:', netCashChange.toString())
+      console.log('[PaymentService] Final netBankChange applied:', netBankChange.toString())
+      console.log('[PaymentService] Cash balance changed from', cashBalanceBefore?.amount?.toString(), 'to', cashBalanceAfter?.amount?.toString())
+      console.log('[PaymentService] ====== END BALANCE CALCULATION ======')
+
+      // Si no quedan pagos, eliminar el LeadPaymentReceived y transacciones restantes
+      if (remainingPayments === 0) {
+        console.log('[PaymentService] No remaining payments, deleting LeadPaymentReceived and related transactions')
+
+        // Eliminar cualquier transacción restante vinculada al LeadPaymentReceived
+        await tx.transaction.deleteMany({
+          where: { leadPaymentReceived: id },
+        })
+
+        // Eliminar el LeadPaymentReceived
+        await tx.leadPaymentReceived.delete({
+          where: { id },
+        })
+
+        return null // Indicar que fue eliminado
       }
 
       // Actualizar el registro LeadPaymentReceived

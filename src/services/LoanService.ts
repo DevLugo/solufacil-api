@@ -747,14 +747,17 @@ export class LoanService {
             })
           }
 
-          // Actualizar métricas del préstamo (payment commissions tracked separately)
+          // Actualizar métricas del préstamo
+          // NOTA: NO sumamos firstPaymentComission a comissionAmount porque ya está en el registro del pago (loanPayment.comission)
+          // Si lo sumáramos aquí, se contaría dos veces al cancelar el préstamo (una vez en loan.comissionAmount y otra en payment.comission)
           const updatedPending = metrics.totalDebtAcquired.minus(paymentAmount)
           await tx.loan.update({
             where: { id: loan.id },
             data: {
               totalPaid: paymentAmount,
               pendingAmountStored: updatedPending.isNegative() ? new Decimal(0) : updatedPending,
-              comissionAmount: comissionAmount.plus(firstPaymentComission),
+              // comissionAmount solo incluye la comisión de otorgamiento, no la del primer pago
+              // La comisión del primer pago está en loanPayment.comission
               ...(updatedPending.lessThanOrEqualTo(0) && {
                 status: 'FINISHED',
                 finishedDate: input.signDate,
@@ -1137,10 +1140,17 @@ export class LoanService {
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // 0. Obtener balance inicial para logging
+      const accountBefore = await tx.account.findUnique({ where: { id: accountId } })
+      console.log('[LoanService] ====== CANCEL LOAN - INICIO ======')
+      console.log('[LoanService] Balance inicial:', accountBefore?.amount?.toString())
+      console.log('[LoanService] Loan ID:', loanId)
+
       // 1. Obtener pagos del préstamo con su método de pago
       const payments = await tx.loanPayment.findMany({
         where: { loan: loanId },
       })
+      console.log('[LoanService] Pagos encontrados:', payments.length)
 
       // 2. Calcular totales por tipo de pago
       let totalCashPayments = new Decimal(0)
@@ -1150,6 +1160,12 @@ export class LoanService {
       for (const payment of payments) {
         const paymentAmount = new Decimal(payment.amount.toString())
         const paymentComission = new Decimal(payment.comission?.toString() || '0')
+        console.log('[LoanService] Pago:', {
+          id: payment.id,
+          amount: paymentAmount.toString(),
+          comission: paymentComission.toString(),
+          method: payment.paymentMethod,
+        })
 
         if (payment.paymentMethod === 'MONEY_TRANSFER') {
           totalBankPayments = totalBankPayments.plus(paymentAmount)
@@ -1161,12 +1177,24 @@ export class LoanService {
 
       // 3. Calcular monto a restaurar a cuenta de ruta
       // = amountGived + loanGrantedComission - cashPayments + paymentComissions
+      // NOTA: loanGrantedComission es solo la comisión de otorgamiento (NO incluye comisiones de pagos)
+      // Las comisiones de pagos ya están en totalPaymentComissions (obtenidas de loanPayment.comission)
       const amountGived = new Decimal(loan.amountGived.toString())
       const loanGrantedComission = new Decimal(loan.comissionAmount?.toString() || '0')
+      console.log('[LoanService] Cálculo de restauración:')
+      console.log('[LoanService]   - amountGived:', amountGived.toString())
+      console.log('[LoanService]   - loanGrantedComission (del loan):', loanGrantedComission.toString())
+      console.log('[LoanService]   - totalCashPayments:', totalCashPayments.toString())
+      console.log('[LoanService]   - totalBankPayments:', totalBankPayments.toString())
+      console.log('[LoanService]   - totalPaymentComissions:', totalPaymentComissions.toString())
+
       const totalToRestoreToRouteAccount = amountGived
         .plus(loanGrantedComission)
         .minus(totalCashPayments)
         .plus(totalPaymentComissions)
+      console.log('[LoanService]   - totalToRestore:', totalToRestoreToRouteAccount.toString())
+      console.log('[LoanService]   - Fórmula: amountGived + loanGrantedComission - cashPayments + paymentComissions')
+      console.log('[LoanService]   - Cálculo:', `${amountGived} + ${loanGrantedComission} - ${totalCashPayments} + ${totalPaymentComissions} = ${totalToRestoreToRouteAccount}`)
 
       // 4. Eliminar pagos y sus transacciones
       for (const payment of payments) {
@@ -1201,10 +1229,16 @@ export class LoanService {
 
       // 7. Restaurar/ajustar el balance de la cuenta de ruta
       if (totalToRestoreToRouteAccount.isPositive()) {
+        console.log('[LoanService] Restaurando al balance:', totalToRestoreToRouteAccount.toString())
         await this.accountRepository.addToBalance(accountId, totalToRestoreToRouteAccount, tx)
       } else if (totalToRestoreToRouteAccount.isNegative()) {
+        console.log('[LoanService] Restando del balance:', totalToRestoreToRouteAccount.abs().toString())
         await this.accountRepository.subtractFromBalance(accountId, totalToRestoreToRouteAccount.abs(), tx)
       }
+
+      // Log balance después de restaurar
+      const accountAfterRestore = await tx.account.findUnique({ where: { id: accountId } })
+      console.log('[LoanService] Balance después de restaurar:', accountAfterRestore?.amount?.toString())
 
       // 8. Si hay pagos bancarios, revertir del banco
       if (totalBankPayments.greaterThan(0)) {
@@ -1255,6 +1289,16 @@ export class LoanService {
       await tx.loan.delete({
         where: { id: loanId },
       })
+
+      // Log balance final
+      const accountFinal = await tx.account.findUnique({ where: { id: accountId } })
+      console.log('[LoanService] ====== CANCEL LOAN - FIN ======')
+      console.log('[LoanService] Balance final:', accountFinal?.amount?.toString())
+      console.log('[LoanService] Resumen:')
+      console.log('[LoanService]   - Balance inicial:', accountBefore?.amount?.toString())
+      console.log('[LoanService]   - Monto restaurado:', totalToRestoreToRouteAccount.toString())
+      console.log('[LoanService]   - Balance final:', accountFinal?.amount?.toString())
+      console.log('[LoanService]   - Diferencia real:', new Decimal(accountFinal?.amount?.toString() || '0').minus(new Decimal(accountBefore?.amount?.toString() || '0')).toString())
 
       // Retornar información detallada
       return {
