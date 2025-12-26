@@ -1,6 +1,7 @@
 import type { GraphQLContext } from '@solufacil/graphql-schema'
 import type { TransactionType } from '@solufacil/database'
 import { TransactionService } from '../services/TransactionService'
+import { TransactionSummaryService } from '../services/TransactionSummaryService'
 import { authenticateUser } from '../middleware/auth'
 
 export const transactionResolvers = {
@@ -45,6 +46,68 @@ export const transactionResolvers = {
           hasPreviousPage: (args.offset ?? 0) > 0,
           startCursor: edges[0]?.cursor || null,
           endCursor: edges[edges.length - 1]?.cursor || null,
+        },
+      }
+    },
+
+    transactionsSummaryByLocation: async (
+      _parent: unknown,
+      args: {
+        routeId: string
+        startDate: Date
+        endDate: Date
+      },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      const summaryService = new TransactionSummaryService(context.prisma)
+      const result = await summaryService.getSummaryByLocation(
+        args.routeId,
+        args.startDate,
+        args.endDate
+      )
+
+      // Convert Decimal to string for GraphQL
+      return {
+        localities: result.localities.map((loc) => ({
+          ...loc,
+          totalPayments: loc.totalPayments.toString(),
+          cashPayments: loc.cashPayments.toString(),
+          bankPayments: loc.bankPayments.toString(),
+          totalPaymentCommissions: loc.totalPaymentCommissions.toString(),
+          totalLoansGrantedCommissions: loc.totalLoansGrantedCommissions.toString(),
+          totalCommissions: loc.totalCommissions.toString(),
+          totalExpenses: loc.totalExpenses.toString(),
+          totalLoansGranted: loc.totalLoansGranted.toString(),
+          balanceEfectivo: loc.balanceEfectivo.toString(),
+          balanceBanco: loc.balanceBanco.toString(),
+          balance: loc.balance.toString(),
+          payments: loc.payments.map((p) => ({
+            ...p,
+            amount: p.amount.toString(),
+            commission: p.commission.toString(),
+          })),
+          expenses: loc.expenses.map((e) => ({
+            ...e,
+            amount: e.amount.toString(),
+          })),
+          loansGranted: loc.loansGranted.map((l) => ({
+            ...l,
+            amount: l.amount.toString(),
+          })),
+        })),
+        executiveSummary: {
+          ...result.executiveSummary,
+          totalPaymentsReceived: result.executiveSummary.totalPaymentsReceived.toString(),
+          totalCashPayments: result.executiveSummary.totalCashPayments.toString(),
+          totalBankPayments: result.executiveSummary.totalBankPayments.toString(),
+          totalPaymentCommissions: result.executiveSummary.totalPaymentCommissions.toString(),
+          totalLoansGrantedCommissions: result.executiveSummary.totalLoansGrantedCommissions.toString(),
+          totalCommissions: result.executiveSummary.totalCommissions.toString(),
+          totalExpenses: result.executiveSummary.totalExpenses.toString(),
+          totalLoansGranted: result.executiveSummary.totalLoansGranted.toString(),
+          netBalance: result.executiveSummary.netBalance.toString(),
         },
       }
     },

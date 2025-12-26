@@ -150,6 +150,7 @@ export class LoanService {
 
   async findMany(options?: {
     status?: LoanStatus
+    statuses?: LoanStatus[]
     routeId?: string
     leadId?: string
     locationId?: string

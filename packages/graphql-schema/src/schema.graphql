@@ -873,6 +873,8 @@ type Query {
   loan(id: ID!): Loan @auth
   loans(
     status: LoanStatus
+    """Filter by multiple statuses (takes precedence over status if provided)"""
+    statuses: [LoanStatus!]
     routeId: ID
     leadId: ID
     locationId: ID
@@ -1084,6 +1086,13 @@ type Query {
 
   # Bulk Date Migration
   previewBulkDateMigration(input: BulkDateMigrationInput!): BulkDateMigrationPreview! @requireRole(roles: [ADMIN, CAPTURA])
+
+  # Transaction Summary (Summary Tab)
+  transactionsSummaryByLocation(
+    routeId: ID!
+    startDate: DateTime!
+    endDate: DateTime!
+  ): TransactionSummaryResponse! @auth
 }
 
 # Input Types
@@ -1945,4 +1954,105 @@ input UpdateTelegramUserInput {
   isActive: Boolean
   isInRecipientsList: Boolean
   notes: String
+}
+
+# ========================================
+# TRANSACTION SUMMARY TYPES (Summary Tab)
+# ========================================
+
+"""
+Individual payment summary in a locality
+"""
+type TransactionPaymentSummary {
+  id: ID!
+  borrowerName: String!
+  amount: Decimal!
+  commission: Decimal!
+  paymentMethod: PaymentMethod!
+  date: DateTime!
+}
+
+"""
+Individual expense summary in a locality
+"""
+type TransactionExpenseSummary {
+  id: ID!
+  source: String!
+  sourceLabel: String!
+  amount: Decimal!
+  date: DateTime!
+}
+
+"""
+Individual loan granted summary in a locality
+"""
+type TransactionLoanGrantedSummary {
+  id: ID!
+  borrowerName: String!
+  amount: Decimal!
+  date: DateTime!
+}
+
+"""
+Locality transaction summary - all calculations done server-side
+"""
+type TransactionLocalitySummary {
+  locationKey: String!
+  localityName: String!
+  leaderName: String!
+  leaderId: String!
+  # Payments
+  payments: [TransactionPaymentSummary!]!
+  totalPayments: Decimal!
+  cashPayments: Decimal!
+  bankPayments: Decimal!
+  paymentCount: Int!
+  # Commissions breakdown
+  # Comisiones por cobrar abonos (pago a líder por cobranza)
+  totalPaymentCommissions: Decimal!
+  # Comisiones por otorgar préstamos (pago a líder por colocación)
+  totalLoansGrantedCommissions: Decimal!
+  # Total de comisiones (suma de ambos tipos)
+  totalCommissions: Decimal!
+  # Expenses (excluding automatic ones)
+  expenses: [TransactionExpenseSummary!]!
+  totalExpenses: Decimal!
+  # Loans granted
+  loansGranted: [TransactionLoanGrantedSummary!]!
+  totalLoansGranted: Decimal!
+  loansGrantedCount: Int!
+  # Calculated balances
+  # balanceEfectivo = cashPayments - totalCommissions - totalLoansGranted - totalExpenses
+  balanceEfectivo: Decimal!
+  # balanceBanco = bankPayments
+  balanceBanco: Decimal!
+  # balance = balanceEfectivo + balanceBanco (total)
+  balance: Decimal!
+}
+
+"""
+Executive summary for all localities
+"""
+type TransactionExecutiveSummary {
+  totalPaymentsReceived: Decimal!
+  totalCashPayments: Decimal!
+  totalBankPayments: Decimal!
+  # Commissions breakdown
+  totalPaymentCommissions: Decimal!
+  totalLoansGrantedCommissions: Decimal!
+  totalCommissions: Decimal!
+  totalExpenses: Decimal!
+  totalLoansGranted: Decimal!
+  paymentCount: Int!
+  expenseCount: Int!
+  loansGrantedCount: Int!
+  netBalance: Decimal!
+}
+
+"""
+Full transaction summary response
+"""
+type TransactionSummaryResponse {
+  localities: [TransactionLocalitySummary!]!
+  executiveSummary: TransactionExecutiveSummary!
 }

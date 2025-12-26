@@ -22,6 +22,7 @@ export const loanResolvers = {
       _parent: unknown,
       args: {
         status?: LoanStatus
+        statuses?: LoanStatus[]
         routeId?: string
         leadId?: string
         locationId?: string
@@ -38,6 +39,7 @@ export const loanResolvers = {
       const loanService = new LoanService(context.prisma)
       const { loans, totalCount } = await loanService.findMany({
         status: args.status ?? undefined,
+        statuses: args.statuses ?? undefined,
         routeId: args.routeId ?? undefined,
         leadId: args.leadId ?? undefined,
         locationId: args.locationId ?? undefined,
