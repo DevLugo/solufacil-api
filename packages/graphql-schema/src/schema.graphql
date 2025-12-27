@@ -224,6 +224,7 @@ type Transaction {
   type: TransactionType!
   incomeSource: String
   expenseSource: String
+  description: String
   profitAmount: Decimal
   returnToCapital: Decimal
   loan: Loan
@@ -897,6 +898,7 @@ type Query {
   loanPayments(loanId: ID!, limit: Int, offset: Int): [LoanPayment!]! @auth
   loanPaymentsByLeadAndDate(leadId: ID!, startDate: DateTime!, endDate: DateTime!): [LoanPayment!]! @auth
   leadPaymentReceivedByLeadAndDate(leadId: ID!, startDate: DateTime!, endDate: DateTime!): LeadPaymentReceived @auth
+  leadPaymentReceivedById(id: ID!): LeadPaymentReceived @auth
 
   # Falcos Pendientes (LeadPaymentReceived with falcoAmount > 0)
   falcosPendientes(routeId: ID, leadId: ID): [LeadPaymentReceived!]! @auth
@@ -1229,6 +1231,7 @@ input UpdateLeadPaymentReceivedInput {
   cashPaidAmount: Decimal
   bankPaidAmount: Decimal
   falcoAmount: Decimal
+  distributionOnlyChange: Boolean
   payments: [UpdatePaymentForLeadInput!]
 }
 
@@ -1264,6 +1267,7 @@ input CreateTransactionInput {
   type: TransactionType!
   incomeSource: String
   expenseSource: String
+  description: String
   sourceAccountId: ID
   destinationAccountId: ID
   loanId: ID
@@ -2006,6 +2010,11 @@ type TransactionLocalitySummary {
   totalPayments: Decimal!
   cashPayments: Decimal!
   bankPayments: Decimal!
+  # Breakdown of bank payments:
+  # - bankPaymentsFromClients: Pagos que clientes hicieron por transferencia
+  bankPaymentsFromClients: Decimal!
+  # - leaderCashToBank: Efectivo que el líder transfirió al banco
+  leaderCashToBank: Decimal!
   paymentCount: Int!
   # Commissions breakdown
   # Comisiones por cobrar abonos (pago a líder por cobranza)

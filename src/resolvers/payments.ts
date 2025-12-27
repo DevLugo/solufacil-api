@@ -140,6 +140,21 @@ export const paymentResolvers = {
       return result
     },
 
+    leadPaymentReceivedById: async (
+      _parent: unknown,
+      args: { id: string },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      const result = await context.prisma.leadPaymentReceived.findUnique({
+        where: { id: args.id },
+        include: { payments: true },
+      })
+
+      return result
+    },
+
     falcosPendientes: async (
       _parent: unknown,
       args: { routeId?: string; leadId?: string },

@@ -64,6 +64,11 @@ interface LocalitySummary {
   totalPayments: Decimal
   cashPayments: Decimal
   bankPayments: Decimal
+  // Breakdown of bank payments:
+  // - bankPaymentsFromClients: Pagos que clientes hicieron por transferencia (BANK_LOAN_PAYMENT)
+  // - leaderCashToBank: Efectivo que el líder transfirió al banco (TRANSFER)
+  bankPaymentsFromClients: Decimal
+  leaderCashToBank: Decimal
   // Comisiones por pagos de abonos (lo que se paga al líder por cobrar)
   totalPaymentCommissions: Decimal
   // Comisiones por otorgar préstamos (lo que se paga al líder por colocar)
@@ -149,55 +154,14 @@ export class TransactionSummaryService {
             },
           },
         },
+        // Include account relations to know destination type
+        sourceAccountRelation: true,
+        destinationAccountRelation: true,
       },
       orderBy: {
         date: 'asc',
       },
     })
-
-    // Fetch LeadPaymentReceived records for the date range
-    // This contains the actual cash/bank distribution decided by the leader
-    const leadPaymentRecords = await this.prisma.leadPaymentReceived.findMany({
-      where: {
-        leadRelation: {
-          routes: {
-            some: {
-              id: routeId,
-            },
-          },
-        },
-        createdAt: {
-          gte: startDate,
-          lte: endDate,
-        },
-      },
-      include: {
-        leadRelation: {
-          include: {
-            personalDataRelation: {
-              include: {
-                addresses: {
-                  include: {
-                    locationRelation: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    })
-
-    // Create a map of leadId -> cash/bank distribution
-    const leaderDistribution = new Map<string, { cashPaid: Decimal; bankPaid: Decimal }>()
-    for (const record of leadPaymentRecords) {
-      const leaderId = record.lead
-      const existing = leaderDistribution.get(leaderId) || { cashPaid: new Decimal(0), bankPaid: new Decimal(0) }
-      leaderDistribution.set(leaderId, {
-        cashPaid: existing.cashPaid.plus(new Decimal(record.cashPaidAmount?.toString() || '0')),
-        bankPaid: existing.bankPaid.plus(new Decimal(record.bankPaidAmount?.toString() || '0')),
-      })
-    }
 
     // Group transactions by locality
     const grouped: Record<string, LocalitySummary> = {}
@@ -220,6 +184,8 @@ export class TransactionSummaryService {
           totalPayments: new Decimal(0),
           cashPayments: new Decimal(0),
           bankPayments: new Decimal(0),
+          bankPaymentsFromClients: new Decimal(0),
+          leaderCashToBank: new Decimal(0),
           totalPaymentCommissions: new Decimal(0),
           totalLoansGrantedCommissions: new Decimal(0),
           totalCommissions: new Decimal(0),
@@ -259,10 +225,24 @@ export class TransactionSummaryService {
           loc.totalPayments = loc.totalPayments.plus(paymentAmount)
           // Commission is an EXPENSE, not income - track it separately (comisión por cobrar abonos)
           loc.totalPaymentCommissions = loc.totalPaymentCommissions.plus(commission)
-          // Note: cashPayments and bankPayments are set later from LeadPaymentReceived
-          // which reflects how the leader actually distributed the money
           loc.paymentCount++
+
+          // Track cash/bank distribution based on incomeSource
+          // CASH_LOAN_PAYMENT → goes to cash account initially
+          // BANK_LOAN_PAYMENT → goes directly to bank account (from client transfer)
+          if (tx.incomeSource === 'CASH_LOAN_PAYMENT') {
+            loc.cashPayments = loc.cashPayments.plus(paymentAmount)
+          } else if (tx.incomeSource === 'BANK_LOAN_PAYMENT') {
+            loc.bankPayments = loc.bankPayments.plus(paymentAmount)
+            loc.bankPaymentsFromClients = loc.bankPaymentsFromClients.plus(paymentAmount)
+          }
         }
+      } else if (tx.type === 'TRANSFER') {
+        // TRANSFER transactions represent cash that the leader moved to the bank
+        // This reduces cashPayments and increases bankPayments
+        loc.cashPayments = loc.cashPayments.minus(amount)
+        loc.bankPayments = loc.bankPayments.plus(amount)
+        loc.leaderCashToBank = loc.leaderCashToBank.plus(amount)
       } else if (tx.type === 'EXPENSE') {
         // Check if it's a loan granted commission (comisión por otorgar préstamo)
         if (tx.expenseSource === 'LOAN_GRANTED_COMISSION') {
@@ -302,18 +282,6 @@ export class TransactionSummaryService {
         // Note: LOAN_PAYMENT_COMISSION is excluded as it's already tracked via loanPaymentRelation.comission
         // LOAN_GRANTED_COMISSION is now explicitly tracked in totalLoansGrantedCommissions
       }
-    }
-
-    // Set cashPayments and bankPayments from LeadPaymentReceived
-    // This reflects how the leader actually distributed the collected money
-    // (not how clients paid, but how the leader reported/delivered it)
-    for (const loc of Object.values(grouped)) {
-      const distribution = leaderDistribution.get(loc.leaderId)
-      if (distribution) {
-        loc.cashPayments = distribution.cashPaid
-        loc.bankPayments = distribution.bankPaid
-      }
-      // If no LeadPaymentReceived exists, cashPayments and bankPayments remain 0
     }
 
     // Calculate balances for each locality
