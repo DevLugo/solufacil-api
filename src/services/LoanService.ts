@@ -786,19 +786,18 @@ export class LoanService {
           }
         }
 
-        // Check if there's already a LeadPaymentReceived for this day
-        const paymentDate = new Date(input.signDate)
-        const startOfDay = new Date(paymentDate)
-        startOfDay.setHours(0, 0, 0, 0)
-        const endOfDay = new Date(paymentDate)
-        endOfDay.setHours(23, 59, 59, 999)
+        // Search for existing LPR from the same day and lead to reuse
+        const today = new Date()
+        today.setHours(0, 0, 0, 0)
+        const tomorrow = new Date(today)
+        tomorrow.setDate(tomorrow.getDate() + 1)
 
         const existingLPR = await tx.leadPaymentReceived.findFirst({
           where: {
             lead: input.leadId,
             createdAt: {
-              gte: startOfDay,
-              lte: endOfDay,
+              gte: today,
+              lt: tomorrow,
             },
           },
         })
@@ -806,31 +805,36 @@ export class LoanService {
         let leadPaymentReceivedId: string
 
         if (existingLPR) {
-          // Update existing LeadPaymentReceived
-          console.log('[LoanService] Existing LeadPaymentReceived found, updating...', {
-            existingLPRId: existingLPR.id,
-            existingPaidAmount: existingLPR.paidAmount?.toString(),
-            addingTotalAmount: totalAmount.toString(),
+          // Update existing LPR by ADDING the new amounts
+          console.log('[LoanService] Updating existing LeadPaymentReceived:', {
+            existingId: existingLPR.id,
+            existingPaidAmount: existingLPR.paidAmount.toString(),
+            existingCashPaidAmount: existingLPR.cashPaidAmount.toString(),
+            existingBankPaidAmount: existingLPR.bankPaidAmount?.toString() || '0',
+            addingAmount: totalAmount.toString(),
             addingCashPaid: totalCashPaid.toString(),
             addingBankPaid: totalBankPaid.toString(),
           })
-          const existingPaidAmount = new Decimal(existingLPR.paidAmount?.toString() || '0')
-          const existingCashPaid = new Decimal(existingLPR.cashPaidAmount?.toString() || '0')
-          const existingBankPaid = new Decimal(existingLPR.bankPaidAmount?.toString() || '0')
-          const existingExpected = new Decimal(existingLPR.expectedAmount?.toString() || '0')
 
           await tx.leadPaymentReceived.update({
             where: { id: existingLPR.id },
             data: {
-              paidAmount: existingPaidAmount.plus(totalAmount),
-              cashPaidAmount: existingCashPaid.plus(totalCashPaid),
-              bankPaidAmount: existingBankPaid.plus(totalBankPaid),
-              expectedAmount: existingExpected.plus(totalAmount),
+              expectedAmount: { increment: totalAmount },
+              paidAmount: { increment: totalAmount },
+              cashPaidAmount: { increment: totalCashPaid },
+              bankPaidAmount: { increment: totalBankPaid },
             },
           })
           leadPaymentReceivedId = existingLPR.id
         } else {
-          // Create new LeadPaymentReceived
+          // Create new LPR if none exists for today
+          console.log('[LoanService] Creating new LeadPaymentReceived for first payments:', {
+            totalAmount: totalAmount.toString(),
+            totalCashPaid: totalCashPaid.toString(),
+            totalBankPaid: totalBankPaid.toString(),
+            paymentsCount: firstPaymentsCreated.length,
+          })
+
           const newLPR = await tx.leadPaymentReceived.create({
             data: {
               expectedAmount: totalAmount,
@@ -864,8 +868,11 @@ export class LoanService {
 
       // 10. Restar el monto total de la cuenta origen
       const accountBefore = await tx.account.findUnique({ where: { id: input.sourceAccountId } })
-      console.log('[LoanService] ====== BALANCE ANTES ======')
-      console.log('[LoanService] Balance inicial:', accountBefore?.amount?.toString())
+      console.log('\n[AUDIT] ========================================')
+      console.log('[AUDIT] OPERACIÓN: CREAR CRÉDITO(S)')
+      console.log('[AUDIT] ========================================')
+      console.log('[AUDIT] Cuenta:', input.sourceAccountId)
+      console.log('[AUDIT] Balance ANTES:', accountBefore?.amount?.toString())
       console.log('[LoanService] Subtracting from balance:', {
         totalAmountToDeduct: totalAmountToDeduct.toString(),
         accountId: input.sourceAccountId,
@@ -884,14 +891,19 @@ export class LoanService {
       }
 
       const accountAfter = await tx.account.findUnique({ where: { id: input.sourceAccountId } })
-      console.log('[LoanService] ====== BALANCE DESPUÉS ======')
-      console.log('[LoanService] Balance final:', accountAfter?.amount?.toString())
-      console.log('[LoanService] Resumen:')
-      console.log('[LoanService]   - Inicial:', accountBefore?.amount?.toString())
-      console.log('[LoanService]   - Restado (créditos + comisiones):', totalAmountToDeduct.toString())
-      console.log('[LoanService]   - Sumado (primeros pagos neto):', totalFirstPaymentNetEffect.toString())
-      console.log('[LoanService]   - Esperado:', new Decimal(accountBefore?.amount?.toString() || '0').minus(totalAmountToDeduct).plus(totalFirstPaymentNetEffect).toString())
-      console.log('[LoanService]   - Final:', accountAfter?.amount?.toString())
+      const expected = new Decimal(accountBefore?.amount?.toString() || '0').minus(totalAmountToDeduct).plus(totalFirstPaymentNetEffect)
+      const actual = new Decimal(accountAfter?.amount?.toString() || '0')
+      const diff = actual.minus(expected)
+      console.log('[AUDIT] Balance DESPUÉS:', accountAfter?.amount?.toString())
+      console.log('[AUDIT] ----------------------------------------')
+      console.log('[AUDIT] RESUMEN CREAR CRÉDITO:')
+      console.log('[AUDIT]   Inicial:        ', accountBefore?.amount?.toString())
+      console.log('[AUDIT]   - Créditos:     ', totalAmountToDeduct.toString())
+      console.log('[AUDIT]   + Pagos neto:   ', totalFirstPaymentNetEffect.toString())
+      console.log('[AUDIT]   = Esperado:     ', expected.toString())
+      console.log('[AUDIT]   = Actual:       ', actual.toString())
+      console.log('[AUDIT]   DIFERENCIA:     ', diff.toString(), diff.isZero() ? '✓ OK' : '⚠️ ERROR')
+      console.log('[AUDIT] ========================================\n')
 
       return createdLoans
     })
@@ -1197,11 +1209,81 @@ export class LoanService {
       console.log('[LoanService]   - Fórmula: amountGived + loanGrantedComission - cashPayments + paymentComissions')
       console.log('[LoanService]   - Cálculo:', `${amountGived} + ${loanGrantedComission} - ${totalCashPayments} + ${totalPaymentComissions} = ${totalToRestoreToRouteAccount}`)
 
-      // 4. Eliminar pagos y sus transacciones
+      // 4. Eliminar pagos y sus transacciones, y actualizar LeadPaymentReceived
       for (const payment of payments) {
+        // 4.1 Si el pago está asociado a un LeadPaymentReceived, actualizarlo
+        if (payment.leadPaymentReceived) {
+          const lpr = await tx.leadPaymentReceived.findUnique({
+            where: { id: payment.leadPaymentReceived },
+          })
+
+          if (lpr) {
+            const paymentAmount = new Decimal(payment.amount.toString())
+            const existingPaidAmount = new Decimal(lpr.paidAmount?.toString() || '0')
+            const existingExpected = new Decimal(lpr.expectedAmount?.toString() || '0')
+            const existingCashPaid = new Decimal(lpr.cashPaidAmount?.toString() || '0')
+            const existingBankPaid = new Decimal(lpr.bankPaidAmount?.toString() || '0')
+
+            const newPaidAmount = existingPaidAmount.minus(paymentAmount)
+            const newExpected = existingExpected.minus(paymentAmount)
+
+            console.log('[LoanService] Updating LeadPaymentReceived after payment deletion:', {
+              lprId: lpr.id,
+              paymentId: payment.id,
+              paymentAmount: paymentAmount.toString(),
+              paymentMethod: payment.paymentMethod,
+              oldPaidAmount: existingPaidAmount.toString(),
+              newPaidAmount: newPaidAmount.toString(),
+            })
+
+            if (payment.paymentMethod === 'CASH') {
+              await tx.leadPaymentReceived.update({
+                where: { id: lpr.id },
+                data: {
+                  paidAmount: newPaidAmount,
+                  expectedAmount: newExpected,
+                  cashPaidAmount: existingCashPaid.minus(paymentAmount),
+                },
+              })
+            } else {
+              // MONEY_TRANSFER
+              await tx.leadPaymentReceived.update({
+                where: { id: lpr.id },
+                data: {
+                  paidAmount: newPaidAmount,
+                  expectedAmount: newExpected,
+                  bankPaidAmount: existingBankPaid.minus(paymentAmount),
+                },
+              })
+            }
+
+            // Check if LPR has no more payments after this deletion
+            const remainingPaymentsCount = await tx.loanPayment.count({
+              where: {
+                leadPaymentReceived: lpr.id,
+                id: { not: payment.id }, // Exclude the one we're about to delete
+              },
+            })
+
+            if (remainingPaymentsCount === 0) {
+              console.log('[LoanService] LeadPaymentReceived has no remaining payments, deleting:', lpr.id)
+              // Delete transactions associated with this LPR (like TRANSFER transactions)
+              await tx.transaction.deleteMany({
+                where: { leadPaymentReceived: lpr.id },
+              })
+              await tx.leadPaymentReceived.delete({
+                where: { id: lpr.id },
+              })
+            }
+          }
+        }
+
+        // 4.2 Eliminar transacciones del pago
         await tx.transaction.deleteMany({
           where: { loanPayment: payment.id },
         })
+
+        // 4.3 Eliminar el pago
         await tx.loanPayment.delete({
           where: { id: payment.id },
         })

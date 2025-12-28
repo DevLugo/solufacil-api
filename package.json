@@ -11,6 +11,9 @@
     "deploy:full": "pnpm build && pnpm deploy:migrate && pnpm start",
     "lint": "eslint src/**/*.ts",
     "clean": "rm -rf dist node_modules packages/*/dist packages/*/node_modules",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:balance": "vitest run src/services/__tests__/*.balance.test.ts",
     "db:studio": "pnpm --filter @solufacil/database db:studio",
     "db:generate": "pnpm --filter @solufacil/database db:generate",
     "db:push": "pnpm --filter @solufacil/database db:push",
@@ -45,6 +48,7 @@
     "@types/node": "^20.11.16",
     "@types/pdfkit": "^0.17.4",
     "tsx": "^4.7.1",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^1.6.1"
   }
 }
