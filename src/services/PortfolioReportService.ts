@@ -678,6 +678,11 @@ export class PortfolioReportService {
           badDebtDate: l.badDebtDate,
           excludedByCleanup: l.excludedByCleanup,
           previousLoan: l.previousLoan,
+          // Campos necesarios para isLoanConsideredOnDate
+          status: l.status,
+          rate: l.rate,
+          requestedAmount: l.requestedAmount,
+          totalPaid: l.totalPaid,
         }))
 
         // Create payments map only for active loans
@@ -744,7 +749,7 @@ export class PortfolioReportService {
 
       // Calculate summary from weekly data
       // Find last completed week for summary values
-      const completedWeeksData = weeklyData.filter((_, idx) => this.isWeekCompleted(weeks[idx]))
+      const completedWeeksData = weeklyData.filter((w) => w.isCompleted)
       const lastCompletedWeekData = completedWeeksData.length > 0
         ? completedWeeksData[completedWeeksData.length - 1]
         : null
@@ -1126,6 +1131,10 @@ export class PortfolioReportService {
         excludedByCleanup: loan.excludedByCleanup,
         previousLoan: loan.previousLoan,
         status: loan.status,
+        // Campos necesarios para isLoanConsideredOnDate (cast para evitar error TS)
+        rate: (loan as any).rate ? new Decimal((loan as any).rate).toNumber() : null,
+        requestedAmount: (loan as any).requestedAmount ? new Decimal((loan as any).requestedAmount).toNumber() : null,
+        totalPaid: (loan as any).totalPaid ? new Decimal((loan as any).totalPaid).toNumber() : null,
         localityId: location?.id,
         localityName: location?.name,
         routeId,
@@ -1165,6 +1174,10 @@ export class PortfolioReportService {
         excludedByCleanup: loan.excludedByCleanup,
         previousLoan: loan.previousLoan,
         status: loan.status,
+        // Campos necesarios para isLoanConsideredOnDate (cast para evitar error TS)
+        rate: (loan as any).rate ? new Decimal((loan as any).rate).toNumber() : null,
+        requestedAmount: (loan as any).requestedAmount ? new Decimal((loan as any).requestedAmount).toNumber() : null,
+        totalPaid: (loan as any).totalPaid ? new Decimal((loan as any).totalPaid).toNumber() : null,
         localityId: location?.id,
         localityName: location?.name,
         routeId,
@@ -1696,7 +1709,7 @@ export class PortfolioReportService {
           clientesEnCV: prevStatus.enCV,
           balance: prevBalance.balance,
         },
-        cvChange: promedioCV - prevStatus.enCV,
+        cvChange: status.enCV - prevStatus.enCV,
         balanceChange: clientBalance.balance - prevBalance.balance,
       }
     }
@@ -1705,7 +1718,7 @@ export class PortfolioReportService {
       clientesActivosInicio,
       totalClientesActivos: status.totalActivos,
       clientesAlCorriente: status.alCorriente,
-      clientesEnCV: promedioCV, // Use average CV from completed weeks
+      clientesEnCV: status.enCV,
       promedioCV,
       semanasCompletadas,
       totalSemanas,
