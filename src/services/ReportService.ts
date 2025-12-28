@@ -724,31 +724,19 @@ export class ReportService {
     const yearStart = new Date(`${year}-01-01`)
     const yearEnd = new Date(`${year}-12-31T23:59:59.999Z`)
 
-    // Get all transactions for the year
-    // Use snapshotRouteId for historical data; if empty, use route relation
-    // Same logic as original keystone project
-    const transactions = await this.prisma.transaction.findMany({
+    // Get all account entries for the year
+    // Use snapshotRouteId for historical data
+    const entries = await this.prisma.accountEntry.findMany({
       where: {
-        date: { gte: yearStart, lte: yearEnd },
-        OR: [
-          // Historical transactions with snapshot
-          { snapshotRouteId: { in: routeIds } },
-          // Transactions without snapshot (empty string) -> use current route relation
-          {
-            AND: [
-              { snapshotRouteId: '' },
-              { routeRelation: { id: { in: routeIds } } }
-            ]
-          }
-        ]
+        entryDate: { gte: yearStart, lte: yearEnd },
+        snapshotRouteId: { in: routeIds },
       },
       select: {
         amount: true,
-        type: true,
-        date: true,
-        expenseSource: true,
-        incomeSource: true,
-        sourceAccount: true,
+        entryType: true,
+        sourceType: true,
+        entryDate: true,
+        accountId: true,
         profitAmount: true,
       }
     })
@@ -849,26 +837,27 @@ export class ReportService {
     }
 
 
-    // Process transactions
-    for (const transaction of transactions) {
-      const transactionDate = transaction.date ? new Date(transaction.date) : new Date()
-      const month = transactionDate.getMonth() + 1
+    // Process account entries
+    for (const entry of entries) {
+      const entryDate = entry.entryDate ? new Date(entry.entryDate) : new Date()
+      const month = entryDate.getMonth() + 1
       const monthKey = month.toString().padStart(2, '0')
 
-      const amount = new Decimal(transaction.amount?.toString() || '0')
+      const amount = new Decimal(entry.amount?.toString() || '0')
       const monthData = monthlyData[monthKey]
 
-      if (transaction.type === 'EXPENSE') {
-        if (transaction.expenseSource === 'GASOLINE') {
-          if (transaction.sourceAccount === tokaAccountId) {
+      if (entry.entryType === 'DEBIT') {
+        // DEBIT entries are expenses/outflows
+        if (entry.sourceType === 'GASOLINE' || entry.sourceType === 'GASOLINE_TOKA') {
+          if (entry.accountId === tokaAccountId) {
             monthData.tokaGasolina = monthData.tokaGasolina.plus(amount)
-          } else if (cashAccountIds.includes(transaction.sourceAccount || '')) {
+          } else if (cashAccountIds.includes(entry.accountId || '')) {
             monthData.cashGasolina = monthData.cashGasolina.plus(amount)
           }
           monthData.totalGasolina = monthData.totalGasolina.plus(amount)
           monthData.generalExpenses = monthData.generalExpenses.plus(amount)
         } else {
-          switch (transaction.expenseSource) {
+          switch (entry.sourceType) {
             case 'NOMINA_SALARY':
               monthData.nominaInterna = monthData.nominaInterna.plus(amount)
               monthData.nomina = monthData.nomina.plus(amount)
@@ -888,68 +877,107 @@ export class ReportService {
               monthData.travelExpenses = monthData.travelExpenses.plus(amount)
               monthData.operationalExpenses = monthData.operationalExpenses.plus(amount)
               break
-            case 'LOAN_PAYMENT_COMISSION':
-            case 'LOAN_GRANTED_COMISSION':
-            case 'LEAD_COMISSION':
+            case 'PAYMENT_COMMISSION':
+            case 'LOAN_GRANT_COMMISSION':
               monthData.comissions = monthData.comissions.plus(amount)
               monthData.operationalExpenses = monthData.operationalExpenses.plus(amount)
               break
-            case 'LOAN_GRANTED':
+            case 'LOAN_GRANT':
               monthData.loanDisbursements = monthData.loanDisbursements.plus(amount)
               break
+            case 'TRANSFER_OUT':
+              // Skip transfers - they don't affect operational metrics
+              break
+            // Otros gastos operativos (mapeados de legacy expenseSource)
+            case 'EMPLOYEE_EXPENSE':
+            case 'GENERAL_EXPENSE':
+            case 'CAR_PAYMENT':
+            case 'BANK_EXPENSE':
+            case 'OTHER_EXPENSE':
+              monthData.generalExpenses = monthData.generalExpenses.plus(amount)
+              monthData.operationalExpenses = monthData.operationalExpenses.plus(amount)
+              break
+            case 'BALANCE_ADJUSTMENT':
+              // BALANCE_ADJUSTMENT es solo para reconciliación, no afecta métricas operativas
+              break
             default:
+              // Solo para tipos no mapeados (no debería ocurrir)
               monthData.generalExpenses = monthData.generalExpenses.plus(amount)
               monthData.operationalExpenses = monthData.operationalExpenses.plus(amount)
               break
           }
         }
 
-        monthData.totalExpenses = monthData.totalExpenses.plus(amount)
-        monthData.totalCash = monthData.totalCash.minus(amount)
-        monthData.operationalCashUsed = monthData.operationalCashUsed.plus(amount)
+        // Skip transfers and BALANCE_ADJUSTMENT for total calculations
+        if (entry.sourceType !== 'TRANSFER_OUT' && entry.sourceType !== 'BALANCE_ADJUSTMENT') {
+          monthData.totalExpenses = monthData.totalExpenses.plus(amount)
+          monthData.totalCash = monthData.totalCash.minus(amount)
+          monthData.operationalCashUsed = monthData.operationalCashUsed.plus(amount)
 
-        if (transaction.expenseSource !== 'LOAN_GRANTED') {
-          monthData.totalInvestment = monthData.totalInvestment.plus(amount)
+          if (entry.sourceType !== 'LOAN_GRANT') {
+            monthData.totalInvestment = monthData.totalInvestment.plus(amount)
+          }
         }
-      } else if (transaction.type === 'INCOME') {
-        if (transaction.incomeSource === 'CASH_LOAN_PAYMENT' ||
-            transaction.incomeSource === 'BANK_LOAN_PAYMENT') {
+      } else if (entry.entryType === 'CREDIT') {
+        // CREDIT entries are incomes/inflows
+        if (entry.sourceType === 'LOAN_PAYMENT_CASH' ||
+            entry.sourceType === 'LOAN_PAYMENT_BANK') {
           monthData.totalIncomingCash = monthData.totalIncomingCash.plus(amount)
-          const profit = new Decimal(transaction.profitAmount?.toString() || '0')
+          const profit = new Decimal(entry.profitAmount?.toString() || '0')
           monthData.profitReturn = monthData.profitReturn.plus(profit)
           monthData.incomes = monthData.incomes.plus(profit)
           monthData.capitalReturn = monthData.capitalReturn.plus(amount.minus(profit))
           monthData.paymentsCount += 1
-        } else {
+        } else if (entry.sourceType === 'EXPENSE_REFUND') {
+          // Devoluciones reducen gastos operativos (ej: DEVOLUCION DE FIANZA)
+          monthData.generalExpenses = monthData.generalExpenses.minus(amount)
+          monthData.operationalExpenses = monthData.operationalExpenses.minus(amount)
+          monthData.totalCash = monthData.totalCash.plus(amount)
+        } else if (entry.sourceType === 'BALANCE_ADJUSTMENT') {
+          // BALANCE_ADJUSTMENT CREDIT es solo para reconciliación
+          // Solo afecta el balance de caja, no métricas operativas
+          monthData.totalCash = monthData.totalCash.plus(amount)
+        } else if (entry.sourceType !== 'TRANSFER_IN') {
+          // Skip transfers for income calculations
           monthData.incomes = monthData.incomes.plus(amount)
           monthData.totalIncomingCash = monthData.totalIncomingCash.plus(amount)
           monthData.profitReturn = monthData.profitReturn.plus(amount)
+          monthData.totalCash = monthData.totalCash.plus(amount)
+        } else {
+          // TRANSFER_IN - solo afecta caja
+          monthData.totalCash = monthData.totalCash.plus(amount)
         }
-        monthData.totalCash = monthData.totalCash.plus(amount)
       }
     }
 
     // Process weekly data for averages
-    for (const transaction of transactions) {
-      const transactionDate = transaction.date ? new Date(transaction.date) : new Date()
-      const month = transactionDate.getMonth() + 1
+    for (const entry of entries) {
+      const entryDate = entry.entryDate ? new Date(entry.entryDate) : new Date()
+      const month = entryDate.getMonth() + 1
       const monthKey = month.toString().padStart(2, '0')
 
-      if (!this.isDateInCompleteWeek(transactionDate, year, month)) continue
+      if (!this.isDateInCompleteWeek(entryDate, year, month)) continue
 
-      const amount = Number(transaction.amount || 0)
+      const amount = Number(entry.amount || 0)
       const weekData = weeklyData[monthKey]
 
-      if (transaction.type === 'EXPENSE') {
-        if (transaction.expenseSource !== 'LOAN_GRANTED') {
+      if (entry.entryType === 'DEBIT') {
+        // Skip LOAN_GRANT, transfers, and BALANCE_ADJUSTMENT for expense calculations
+        if (entry.sourceType !== 'LOAN_GRANT' &&
+            entry.sourceType !== 'TRANSFER_OUT' &&
+            entry.sourceType !== 'BALANCE_ADJUSTMENT') {
           weekData.expenses += amount
         }
-      } else if (transaction.type === 'INCOME') {
-        if (transaction.incomeSource === 'CASH_LOAN_PAYMENT' ||
-            transaction.incomeSource === 'BANK_LOAN_PAYMENT') {
-          const profit = Number(transaction.profitAmount || 0)
+      } else if (entry.entryType === 'CREDIT') {
+        // Skip transfers for income calculations
+        if (entry.sourceType === 'LOAN_PAYMENT_CASH' ||
+            entry.sourceType === 'LOAN_PAYMENT_BANK') {
+          const profit = Number(entry.profitAmount || 0)
           weekData.income += profit
-        } else {
+        } else if (entry.sourceType === 'EXPENSE_REFUND') {
+          // Devoluciones reducen gastos
+          weekData.expenses -= amount
+        } else if (entry.sourceType !== 'TRANSFER_IN' && entry.sourceType !== 'BALANCE_ADJUSTMENT') {
           weekData.income += amount
         }
       }

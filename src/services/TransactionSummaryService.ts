@@ -1,34 +1,73 @@
 import { Decimal } from 'decimal.js'
-import type { PrismaClient } from '@solufacil/database'
+import type { PrismaClient, SourceType } from '@solufacil/database'
 
 /**
- * Expense source labels in Spanish
+ * Source type labels in Spanish
  */
-const EXPENSE_SOURCE_LABELS: Record<string, string> = {
-  VIATIC: 'Viáticos',
+const SOURCE_TYPE_LABELS: Record<SourceType, string> = {
+  LOAN_GRANT: 'Préstamo otorgado',
+  LOAN_GRANT_COMMISSION: 'Comisión préstamo',
+  LOAN_CANCELLED_RESTORE: 'Préstamo cancelado',
+  LOAN_PAYMENT_CASH: 'Pago efectivo',
+  LOAN_PAYMENT_BANK: 'Pago banco',
+  PAYMENT_COMMISSION: 'Comisión abono',
+  TRANSFER_OUT: 'Transferencia saliente',
+  TRANSFER_IN: 'Transferencia entrante',
   GASOLINE: 'Gasolina',
-  ACCOMMODATION: 'Hospedaje',
+  GASOLINE_TOKA: 'Gasolina Toka',
   NOMINA_SALARY: 'Nómina',
   EXTERNAL_SALARY: 'Salario externo',
-  VEHICLE_MAINTENANCE: 'Mantenimiento vehículo',
-  LOAN_GRANTED: 'Préstamo otorgado',
-  LOAN_GRANTED_COMISSION: 'Comisión préstamo',
-  LOAN_PAYMENT_COMISSION: 'Comisión abono',
-  LEAD_COMISSION: 'Comisión líder',
-  LEAD_EXPENSE: 'Gasto líder',
-  OTHER: 'Otro',
+  VIATIC: 'Viáticos',
+  TRAVEL_EXPENSES: 'Gastos viaje',
+  FALCO_LOSS: 'Pérdida falco',
+  FALCO_COMPENSATORY: 'Compensación falco',
+  INITIAL_BALANCE: 'Balance inicial',
+  BALANCE_ADJUSTMENT: 'Ajuste balance',
+  // Nuevos tipos de gastos
+  EMPLOYEE_EXPENSE: 'Gasto empleado',
+  GENERAL_EXPENSE: 'Gasto general',
+  CAR_PAYMENT: 'Pago vehículo',
+  BANK_EXPENSE: 'Gasto bancario',
+  OTHER_EXPENSE: 'Otro gasto',
+  EXPENSE_REFUND: 'Devolución',
+  // Ingresos especiales
+  MONEY_INVESTMENT: 'Inversión',
+  MULTA: 'Multa',
 }
 
 /**
- * Expense sources that are automatically created by the system
- * These should NOT appear in the Gastos section (they are shown elsewhere)
+ * Source types that are automatic (not manual expenses)
  */
-const AUTOMATIC_EXPENSE_SOURCES = [
-  'LOAN_GRANTED', // Goes to "Colocado"
-  'LOAN_GRANTED_COMISSION', // Part of commissions
-  'LOAN_PAYMENT_COMISSION', // Part of commissions
-  'LOAN_CANCELLED_ADJUSTMENT', // System adjustments
-  'LOAN_CANCELLED_BANK_REVERSAL', // System reversals
+const AUTOMATIC_SOURCE_TYPES: SourceType[] = [
+  'LOAN_GRANT',
+  'LOAN_GRANT_COMMISSION',
+  'LOAN_CANCELLED_RESTORE',
+  'LOAN_PAYMENT_CASH',
+  'LOAN_PAYMENT_BANK',
+  'PAYMENT_COMMISSION',
+  'TRANSFER_OUT',
+  'TRANSFER_IN',
+  'INITIAL_BALANCE',
+  'BALANCE_ADJUSTMENT',
+]
+
+/**
+ * Manual expense source types (shown in Gastos section)
+ */
+const MANUAL_EXPENSE_TYPES: SourceType[] = [
+  'GASOLINE',
+  'GASOLINE_TOKA',
+  'NOMINA_SALARY',
+  'EXTERNAL_SALARY',
+  'VIATIC',
+  'TRAVEL_EXPENSES',
+  'FALCO_LOSS',
+  'FALCO_COMPENSATORY',
+  'EMPLOYEE_EXPENSE',
+  'GENERAL_EXPENSE',
+  'CAR_PAYMENT',
+  'BANK_EXPENSE',
+  'OTHER_EXPENSE',
 ]
 
 interface PaymentSummary {
@@ -64,16 +103,10 @@ interface LocalitySummary {
   totalPayments: Decimal
   cashPayments: Decimal
   bankPayments: Decimal
-  // Breakdown of bank payments:
-  // - bankPaymentsFromClients: Pagos que clientes hicieron por transferencia (BANK_LOAN_PAYMENT)
-  // - leaderCashToBank: Efectivo que el líder transfirió al banco (TRANSFER)
   bankPaymentsFromClients: Decimal
   leaderCashToBank: Decimal
-  // Comisiones por pagos de abonos (lo que se paga al líder por cobrar)
   totalPaymentCommissions: Decimal
-  // Comisiones por otorgar préstamos (lo que se paga al líder por colocar)
   totalLoansGrantedCommissions: Decimal
-  // Total de comisiones (suma de ambos tipos)
   totalCommissions: Decimal
   paymentCount: number
   expenses: ExpenseSummary[]
@@ -81,12 +114,8 @@ interface LocalitySummary {
   loansGranted: LoanGrantedSummary[]
   totalLoansGranted: Decimal
   loansGrantedCount: number
-  // Calculated balances
-  // balanceEfectivo = cashPayments - totalCommissions - totalLoansGranted - totalExpenses
   balanceEfectivo: Decimal
-  // balanceBanco = bankPayments (no expenses tracked separately for bank)
   balanceBanco: Decimal
-  // balance = balanceEfectivo + balanceBanco (total)
   balance: Decimal
 }
 
@@ -94,11 +123,8 @@ interface ExecutiveSummary {
   totalPaymentsReceived: Decimal
   totalCashPayments: Decimal
   totalBankPayments: Decimal
-  // Comisiones por pagos de abonos
   totalPaymentCommissions: Decimal
-  // Comisiones por otorgar préstamos
   totalLoansGrantedCommissions: Decimal
-  // Total de comisiones (suma de ambos tipos)
   totalCommissions: Decimal
   totalExpenses: Decimal
   totalLoansGranted: Decimal
@@ -121,27 +147,62 @@ export class TransactionSummaryService {
     startDate: Date,
     endDate: Date
   ): Promise<TransactionSummaryResponse> {
-    // Fetch all transactions for the route in the date range
-    const transactions = await this.prisma.transaction.findMany({
+    // Fetch all AccountEntry records for the route in the date range
+    const entries = await this.prisma.accountEntry.findMany({
       where: {
-        route: routeId,
-        date: {
+        snapshotRouteId: routeId,
+        entryDate: {
           gte: startDate,
           lte: endDate,
         },
       },
       include: {
-        loanRelation: {
+        loan: {
           include: {
             borrowerRelation: {
               include: {
                 personalDataRelation: true,
               },
             },
+            leadRelation: {
+              include: {
+                personalDataRelation: {
+                  include: {
+                    addresses: {
+                      include: {
+                        locationRelation: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
-        loanPaymentRelation: true,
-        leadRelation: {
+        loanPayment: {
+          include: {
+            loanRelation: {
+              include: {
+                borrowerRelation: {
+                  include: {
+                    personalDataRelation: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        entryDate: 'asc',
+      },
+    })
+
+    // We need to get leader info - fetch separately for entries with snapshotLeadId
+    const leaderIds = [...new Set(entries.map(e => e.snapshotLeadId).filter(Boolean))]
+    const leaders = leaderIds.length > 0
+      ? await this.prisma.employee.findMany({
+          where: { id: { in: leaderIds } },
           include: {
             personalDataRelation: {
               include: {
@@ -153,24 +214,25 @@ export class TransactionSummaryService {
               },
             },
           },
-        },
-        // Include account relations to know destination type
-        sourceAccountRelation: true,
-        destinationAccountRelation: true,
-      },
-      orderBy: {
-        date: 'asc',
-      },
-    })
+        })
+      : []
 
-    // Group transactions by locality
+    const leaderMap = new Map(leaders.map(l => [l.id, l]))
+
+    // Group entries by locality
     const grouped: Record<string, LocalitySummary> = {}
 
-    for (const tx of transactions) {
-      const locationAddress = tx.leadRelation?.personalDataRelation?.addresses?.[0]
+    for (const entry of entries) {
+      // Get leader info from the entry's loan or from the snapshotLeadId
+      const leaderId = entry.snapshotLeadId ||
+        entry.loan?.lead ||
+        entry.loanPayment?.loanRelation?.lead || ''
+
+      const leader = leaderMap.get(leaderId) || entry.loan?.leadRelation
+
+      const locationAddress = leader?.personalDataRelation?.addresses?.[0]
       const localityName = locationAddress?.locationRelation?.name || 'Sin localidad'
-      const leaderName = tx.leadRelation?.personalDataRelation?.fullName || 'Sin líder'
-      const leaderId = tx.lead || ''
+      const leaderName = leader?.personalDataRelation?.fullName || 'Sin líder'
       const locationKey = `${localityName}|${leaderName}`
 
       // Initialize locality if not exists
@@ -202,96 +264,114 @@ export class TransactionSummaryService {
       }
 
       const loc = grouped[locationKey]
-      const amount = new Decimal(tx.amount.toString())
+      const amount = new Decimal(entry.amount.toString())
 
-      // Process based on transaction type
-      if (tx.type === 'INCOME') {
-        // Check if it's a loan payment (abono)
-        if (tx.loanPaymentRelation && tx.incomeSource?.includes('LOAN_PAYMENT')) {
-          const paymentAmount = new Decimal(tx.loanPaymentRelation.amount.toString())
-          const commission = new Decimal(tx.loanPaymentRelation.comission?.toString() || '0')
+      // Process based on sourceType
+      switch (entry.sourceType) {
+        case 'LOAN_PAYMENT_CASH':
+        case 'LOAN_PAYMENT_BANK': {
+          // It's a loan payment
+          const loanPayment = entry.loanPayment
+          const paymentAmount = loanPayment
+            ? new Decimal(loanPayment.amount.toString())
+            : amount
+          const commission = loanPayment
+            ? new Decimal(loanPayment.comission?.toString() || '0')
+            : new Decimal(0)
+
+          const borrowerName = loanPayment?.loanRelation?.borrowerRelation?.personalDataRelation?.fullName ||
+            entry.loan?.borrowerRelation?.personalDataRelation?.fullName ||
+            'Sin nombre'
 
           const payment: PaymentSummary = {
-            id: tx.id,
-            borrowerName:
-              tx.loanRelation?.borrowerRelation?.personalDataRelation?.fullName || 'Sin nombre',
+            id: entry.id,
+            borrowerName,
             amount: paymentAmount,
             commission,
-            paymentMethod: tx.loanPaymentRelation.paymentMethod as 'CASH' | 'MONEY_TRANSFER',
-            date: tx.date,
+            paymentMethod: entry.sourceType === 'LOAN_PAYMENT_CASH' ? 'CASH' : 'MONEY_TRANSFER',
+            date: entry.entryDate,
           }
 
           loc.payments.push(payment)
           loc.totalPayments = loc.totalPayments.plus(paymentAmount)
-          // Commission is an EXPENSE, not income - track it separately (comisión por cobrar abonos)
-          loc.totalPaymentCommissions = loc.totalPaymentCommissions.plus(commission)
           loc.paymentCount++
 
-          // Track cash/bank distribution based on incomeSource
-          // CASH_LOAN_PAYMENT → goes to cash account initially
-          // BANK_LOAN_PAYMENT → goes directly to bank account (from client transfer)
-          if (tx.incomeSource === 'CASH_LOAN_PAYMENT') {
+          if (entry.sourceType === 'LOAN_PAYMENT_CASH') {
             loc.cashPayments = loc.cashPayments.plus(paymentAmount)
-          } else if (tx.incomeSource === 'BANK_LOAN_PAYMENT') {
+          } else {
             loc.bankPayments = loc.bankPayments.plus(paymentAmount)
             loc.bankPaymentsFromClients = loc.bankPaymentsFromClients.plus(paymentAmount)
           }
+          break
         }
-      } else if (tx.type === 'TRANSFER') {
-        // TRANSFER transactions represent cash that the leader moved to the bank
-        // This reduces cashPayments and increases bankPayments
-        loc.cashPayments = loc.cashPayments.minus(amount)
-        loc.bankPayments = loc.bankPayments.plus(amount)
-        loc.leaderCashToBank = loc.leaderCashToBank.plus(amount)
-      } else if (tx.type === 'EXPENSE') {
-        // Check if it's a loan granted commission (comisión por otorgar préstamo)
-        if (tx.expenseSource === 'LOAN_GRANTED_COMISSION') {
+
+        case 'PAYMENT_COMMISSION': {
+          // Commission expense for payment
+          loc.totalPaymentCommissions = loc.totalPaymentCommissions.plus(amount)
+          break
+        }
+
+        case 'LOAN_GRANT_COMMISSION': {
+          // Commission expense for granting loan
           loc.totalLoansGrantedCommissions = loc.totalLoansGrantedCommissions.plus(amount)
+          break
         }
-        // Check if it's a loan granted (Colocado)
-        else if (tx.expenseSource === 'LOAN_GRANTED') {
-          const loanAmount = tx.loanRelation?.amountGived
-            ? new Decimal(tx.loanRelation.amountGived.toString())
+
+        case 'LOAN_GRANT': {
+          // Loan granted
+          const loanAmount = entry.loan?.amountGived
+            ? new Decimal(entry.loan.amountGived.toString())
             : amount
 
           const loanGranted: LoanGrantedSummary = {
-            id: tx.id,
+            id: entry.id,
             borrowerName:
-              tx.loanRelation?.borrowerRelation?.personalDataRelation?.fullName || 'Sin nombre',
+              entry.loan?.borrowerRelation?.personalDataRelation?.fullName || 'Sin nombre',
             amount: loanAmount,
-            date: tx.date,
+            date: entry.entryDate,
           }
 
           loc.loansGranted.push(loanGranted)
           loc.totalLoansGranted = loc.totalLoansGranted.plus(loanAmount)
           loc.loansGrantedCount++
-        } else if (!AUTOMATIC_EXPENSE_SOURCES.includes(tx.expenseSource || '')) {
-          // Regular expense (exclude automatic system expenses)
-          const expense: ExpenseSummary = {
-            id: tx.id,
-            source: tx.expenseSource || 'OTHER',
-            sourceLabel:
-              EXPENSE_SOURCE_LABELS[tx.expenseSource || 'OTHER'] || tx.expenseSource || 'Otro',
-            amount,
-            date: tx.date,
-          }
-
-          loc.expenses.push(expense)
-          loc.totalExpenses = loc.totalExpenses.plus(amount)
+          break
         }
-        // Note: LOAN_PAYMENT_COMISSION is excluded as it's already tracked via loanPaymentRelation.comission
-        // LOAN_GRANTED_COMISSION is now explicitly tracked in totalLoansGrantedCommissions
+
+        case 'TRANSFER_OUT': {
+          // Cash transferred to bank (only count DEBIT side to avoid double counting)
+          loc.cashPayments = loc.cashPayments.minus(amount)
+          loc.bankPayments = loc.bankPayments.plus(amount)
+          loc.leaderCashToBank = loc.leaderCashToBank.plus(amount)
+          break
+        }
+
+        case 'TRANSFER_IN': {
+          // Skip - we already handled this via TRANSFER_OUT
+          break
+        }
+
+        default: {
+          // Check if it's a manual expense
+          if (MANUAL_EXPENSE_TYPES.includes(entry.sourceType) && entry.entryType === 'DEBIT') {
+            const expense: ExpenseSummary = {
+              id: entry.id,
+              source: entry.sourceType,
+              sourceLabel: SOURCE_TYPE_LABELS[entry.sourceType] || entry.sourceType,
+              amount,
+              date: entry.entryDate,
+            }
+
+            loc.expenses.push(expense)
+            loc.totalExpenses = loc.totalExpenses.plus(amount)
+          }
+          break
+        }
       }
     }
 
     // Calculate balances for each locality
-    // First, calculate total commissions (payment commissions + loan granted commissions)
-    // balanceEfectivo = cashPayments - totalCommissions - totalLoansGranted - totalExpenses
-    // balanceBanco = bankPayments (no separate expenses for bank)
-    // balance = balanceEfectivo + balanceBanco (total)
-    // Commissions are a cost/expense that reduces our cash balance (paid to leaders)
     for (const loc of Object.values(grouped)) {
-      // Total commissions = comisiones por abonos + comisiones por otorgar préstamos
+      // Total commissions = payment commissions + loan granted commissions
       loc.totalCommissions = loc.totalPaymentCommissions.plus(loc.totalLoansGrantedCommissions)
 
       loc.balanceEfectivo = loc.cashPayments

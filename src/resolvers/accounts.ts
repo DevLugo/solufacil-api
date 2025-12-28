@@ -100,5 +100,13 @@ export const accountResolvers = {
       const balance = await accountService.getAccountBalance(parent.id)
       return balance.toString()
     },
+
+    entries: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {
+      return context.prisma.accountEntry.findMany({
+        where: { accountId: parent.id },
+        orderBy: { entryDate: 'desc' },
+        take: 50,
+      })
+    },
   },
 }

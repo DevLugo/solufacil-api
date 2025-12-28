@@ -2,27 +2,39 @@ import type { PrismaClient, Account, AccountType, Prisma } from '@solufacil/data
 import { Decimal } from 'decimal.js'
 
 /**
- * AccountRepository - Gestión de cuentas y balances
+ * AccountRepository - Gestión de cuentas
  *
  * ===============================================================
- * IMPORTANTE: POLÍTICA DE BALANCE DE CUENTAS
+ * IMPORTANTE: NUEVA ARQUITECTURA DE BALANCE
  * ===============================================================
  *
- * El campo `amount` representa el balance actual de la cuenta.
- * Se actualiza incrementalmente con cada transacción.
+ * A partir de la migración a ledger-based balance, los métodos
+ * addToBalance() y subtractFromBalance() están DEPRECADOS.
  *
- * Métodos para actualizar balance:
- * - `addToBalance(id, amount)`: Suma al balance (para INCOME, TRANSFER entrante)
- * - `subtractFromBalance(id, amount)`: Resta del balance (para EXPENSE, TRANSFER saliente)
+ * Usar BalanceService.createEntry() en su lugar:
  *
- * Flujo correcto:
  * ```typescript
- * // Después de crear una transacción EXPENSE:
- * await accountRepository.subtractFromBalance(accountId, amount, tx)
+ * const balanceService = new BalanceService(prisma)
  *
- * // Después de crear una transacción INCOME:
- * await accountRepository.addToBalance(accountId, amount, tx)
+ * // Para sumar al balance (CREDIT):
+ * await balanceService.createEntry({
+ *   accountId,
+ *   entryType: 'CREDIT',
+ *   amount: 100,
+ *   sourceType: 'LOAN_PAYMENT_CASH',
+ * }, tx)
+ *
+ * // Para restar del balance (DEBIT):
+ * await balanceService.createEntry({
+ *   accountId,
+ *   entryType: 'DEBIT',
+ *   amount: 100,
+ *   sourceType: 'LOAN_GRANT',
+ * }, tx)
  * ```
+ *
+ * El campo Account.amount es un cache materializado que se actualiza
+ * automáticamente con cada AccountEntry creado.
  *
  * ===============================================================
  */
@@ -112,10 +124,16 @@ export class AccountRepository {
   }
 
   /**
-   * Suma un monto al balance de la cuenta.
-   * Usar para: INCOME, TRANSFER entrante
+   * @deprecated Use BalanceService.createEntry() with entryType='CREDIT' instead.
+   *
+   * Este método se mantiene para compatibilidad con código legacy
+   * (TransactionService.update/delete para transacciones antiguas).
+   *
+   * NO usar en código nuevo.
    */
   async addToBalance(id: string, amount: Decimal, tx?: Prisma.TransactionClient): Promise<Decimal> {
+    console.warn('[DEPRECATED] AccountRepository.addToBalance() - Use BalanceService.createEntry() instead')
+
     const client = tx || this.prisma
 
     const account = await client.account.update({
@@ -129,10 +147,16 @@ export class AccountRepository {
   }
 
   /**
-   * Resta un monto del balance de la cuenta.
-   * Usar para: EXPENSE, TRANSFER saliente
+   * @deprecated Use BalanceService.createEntry() with entryType='DEBIT' instead.
+   *
+   * Este método se mantiene para compatibilidad con código legacy
+   * (TransactionService.update/delete para transacciones antiguas).
+   *
+   * NO usar en código nuevo.
    */
   async subtractFromBalance(id: string, amount: Decimal, tx?: Prisma.TransactionClient): Promise<Decimal> {
+    console.warn('[DEPRECATED] AccountRepository.subtractFromBalance() - Use BalanceService.createEntry() instead')
+
     const client = tx || this.prisma
 
     const account = await client.account.update({

@@ -74,6 +74,32 @@ enum DistributionMode {
   VARIABLE
 }
 
+enum AccountEntryType {
+  DEBIT
+  CREDIT
+}
+
+enum SourceType {
+  LOAN_GRANT
+  LOAN_GRANT_COMMISSION
+  LOAN_CANCELLED_RESTORE
+  LOAN_PAYMENT_CASH
+  LOAN_PAYMENT_BANK
+  PAYMENT_COMMISSION
+  TRANSFER_OUT
+  TRANSFER_IN
+  GASOLINE
+  GASOLINE_TOKA
+  NOMINA_SALARY
+  EXTERNAL_SALARY
+  VIATIC
+  TRAVEL_EXPENSES
+  FALCO_LOSS
+  FALCO_COMPENSATORY
+  INITIAL_BALANCE
+  BALANCE_ADJUSTMENT
+}
+
 # Directives
 directive @auth on FIELD_DEFINITION | OBJECT
 directive @requireRole(roles: [UserRole!]!) on FIELD_DEFINITION | OBJECT
@@ -237,6 +263,35 @@ type Transaction {
   updatedAt: DateTime!
 }
 
+type AccountEntry {
+  id: ID!
+  amount: Decimal!
+  entryType: AccountEntryType!
+  sourceType: SourceType!
+  entryDate: DateTime!
+  description: String
+  profitAmount: Decimal
+  returnToCapital: Decimal
+  snapshotLeadId: String
+  snapshotRouteId: String
+  account: Account!
+  loan: Loan
+  loanPayment: LoanPayment
+  destinationAccount: Account
+  createdAt: DateTime!
+}
+
+type AccountEntryEdge {
+  node: AccountEntry!
+  cursor: String!
+}
+
+type AccountEntryConnection {
+  edges: [AccountEntryEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
 type Account {
   id: ID!
   name: String!
@@ -246,6 +301,7 @@ type Account {
   routes: [Route!]!
   transactionsSource: [Transaction!]!
   transactionsDestination: [Transaction!]!
+  entries: [AccountEntry!]!
   createdAt: DateTime!
   updatedAt: DateTime!
 }
@@ -913,6 +969,18 @@ type Query {
     limit: Int
     offset: Int
   ): TransactionConnection! @auth
+
+  # Account Entries (new ledger-based system)
+  accountEntries(
+    accountId: ID
+    routeId: ID
+    sourceType: SourceType
+    entryType: AccountEntryType
+    fromDate: DateTime
+    toDate: DateTime
+    limit: Int
+    offset: Int
+  ): AccountEntryConnection! @auth
 
   # Accounts
   account(id: ID!): Account @auth

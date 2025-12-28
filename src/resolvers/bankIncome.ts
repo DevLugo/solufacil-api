@@ -21,106 +21,129 @@ export const bankIncomeResolvers = {
       try {
         const { startDate, endDate, routeIds, onlyAbonos = false } = args
 
+        // Get bank account IDs
+        const bankAccounts = await context.prisma.account.findMany({
+          where: { type: 'BANK' },
+          select: { id: true },
+        })
+        const bankAccountIds = bankAccounts.map((a) => a.id)
+
+        // Build where conditions for AccountEntry
         const whereConditions: any = {
-          AND: [
-            {
-              date: {
-                gte: new Date(startDate),
-                lte: new Date(endDate),
-              },
-            },
-            {
-              route: {
-                in: routeIds,
-              },
-            },
-          ],
+          entryDate: {
+            gte: new Date(startDate),
+            lte: new Date(endDate),
+          },
+          snapshotRouteId: { in: routeIds },
         }
 
-        // Filter by transaction type
+        // Filter by entry type
         if (onlyAbonos) {
-          whereConditions.AND.push({
-            AND: [{ type: 'INCOME' }, { incomeSource: 'BANK_LOAN_PAYMENT' }],
-          })
+          // Only client payments to bank
+          whereConditions.sourceType = 'LOAN_PAYMENT_BANK'
+          whereConditions.entryType = 'CREDIT'
         } else {
-          whereConditions.AND.push({
-            OR: [
-              {
-                AND: [
-                  { type: 'TRANSFER' },
-                  { destinationAccountRelation: { type: 'BANK' } },
-                ],
-              },
-              {
-                AND: [
-                  { type: 'INCOME' },
-                  {
-                    OR: [
-                      { incomeSource: 'BANK_LOAN_PAYMENT' },
-                      { incomeSource: 'MONEY_INVESMENT' },
-                    ],
-                  },
-                ],
-              },
-            ],
-          })
+          // Bank payments and transfers to bank
+          whereConditions.OR = [
+            // Direct bank payments from clients
+            {
+              sourceType: 'LOAN_PAYMENT_BANK',
+              entryType: 'CREDIT',
+            },
+            // Transfers to bank
+            {
+              sourceType: 'TRANSFER_IN',
+              accountId: { in: bankAccountIds },
+            },
+          ]
         }
 
-        const transactions = await context.prisma.transaction.findMany({
+        const entries = await context.prisma.accountEntry.findMany({
           where: whereConditions,
           include: {
-            leadRelation: {
+            account: true,
+            loanPayment: {
               include: {
-                personalDataRelation: {
+                loanRelation: {
                   include: {
-                    addresses: {
+                    borrowerRelation: {
                       include: {
-                        locationRelation: true,
+                        personalDataRelation: true,
+                      },
+                    },
+                    leadRelation: {
+                      include: {
+                        personalDataRelation: {
+                          include: {
+                            addresses: {
+                              include: {
+                                locationRelation: true,
+                              },
+                            },
+                          },
+                        },
                       },
                     },
                   },
                 },
               },
             },
-            loanRelation: {
-              include: {
-                borrowerRelation: {
-                  include: {
-                    personalDataRelation: true,
-                  },
-                },
-              },
-            },
-            destinationAccountRelation: true,
           },
-          orderBy: { date: 'desc' },
+          orderBy: { entryDate: 'desc' },
         })
 
-        const processedTransactions = transactions.map((transaction) => {
-          const isClientPayment =
-            transaction.type === 'INCOME' &&
-            transaction.incomeSource === 'BANK_LOAN_PAYMENT'
-          const isLeaderPayment =
-            transaction.type === 'TRANSFER' &&
-            transaction.destinationAccountRelation?.type === 'BANK'
+        // Get leader info for entries with snapshotLeadId
+        const leaderIds = [...new Set(entries.map((e) => e.snapshotLeadId).filter(Boolean))]
+        const leaders =
+          leaderIds.length > 0
+            ? await context.prisma.employee.findMany({
+                where: { id: { in: leaderIds } },
+                include: {
+                  personalDataRelation: {
+                    include: {
+                      addresses: {
+                        include: {
+                          locationRelation: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              })
+            : []
+        const leaderMap = new Map(leaders.map((l) => [l.id, l]))
 
-          const employeeName =
-            transaction.leadRelation?.personalDataRelation?.fullName
-          const leaderLocality =
-            transaction.leadRelation?.personalDataRelation?.addresses?.[0]
-              ?.locationRelation?.name
+        const processedTransactions = entries.map((entry) => {
+          const isClientPayment = entry.sourceType === 'LOAN_PAYMENT_BANK'
+          const isLeaderPayment = entry.sourceType === 'TRANSFER_IN' && bankAccountIds.includes(entry.accountId)
+
+          // Get leader from snapshotLeadId or from loan relation
+          const leader =
+            leaderMap.get(entry.snapshotLeadId) ||
+            entry.loanPayment?.loanRelation?.leadRelation
+
+          const employeeName = leader?.personalDataRelation?.fullName
+          const leaderLocality = leader?.personalDataRelation?.addresses?.[0]?.locationRelation?.name
 
           const clientName =
-            transaction.loanRelation?.borrowerRelation?.personalDataRelation
-              ?.fullName
+            entry.loanPayment?.loanRelation?.borrowerRelation?.personalDataRelation?.fullName
+
+          // Map entry to transaction-like response for backwards compatibility
+          const transactionType = isClientPayment
+            ? 'INCOME'
+            : isLeaderPayment
+            ? 'TRANSFER'
+            : 'INCOME'
+
+          const incomeSource = isClientPayment ? 'BANK_LOAN_PAYMENT' : null
 
           return {
-            id: transaction.id,
-            amount: toDecimal(transaction.amount),
-            type: transaction.type,
-            incomeSource: transaction.incomeSource,
-            date: transaction.date?.toISOString() || new Date().toISOString(),
-            description: transaction.description,
+            id: entry.id,
+            amount: toDecimal(entry.amount),
+            type: transactionType,
+            incomeSource,
+            date: entry.entryDate?.toISOString() || new Date().toISOString(),
+            description: entry.description,
             locality: leaderLocality || null,
             employeeName: employeeName || null,
             leaderLocality: leaderLocality || null,

@@ -9,6 +9,7 @@ import { AccountRepository } from '../repositories/AccountRepository'
 import { TransactionRepository } from '../repositories/TransactionRepository'
 import { PaymentRepository } from '../repositories/PaymentRepository'
 import { PersonalDataRepository } from '../repositories/PersonalDataRepository'
+import { BalanceService } from './BalanceService'
 import { calculateLoanMetrics, createLoanSnapshot, calculatePaymentProfit, calculateProfitHeredado, LoanEngine } from '@solufacil/business-logic'
 import { generateClientCode } from '@solufacil/shared'
 import { getWeekStartDate, getWeekEndDate } from '../utils/weekUtils'
@@ -126,6 +127,7 @@ export class LoanService {
   private transactionRepository: TransactionRepository
   private paymentRepository: PaymentRepository
   private personalDataRepository: PersonalDataRepository
+  private balanceService: BalanceService
 
   constructor(private prisma: PrismaClient) {
     this.loanRepository = new LoanRepository(prisma)
@@ -136,6 +138,7 @@ export class LoanService {
     this.transactionRepository = new TransactionRepository(prisma)
     this.paymentRepository = new PaymentRepository(prisma)
     this.personalDataRepository = new PersonalDataRepository(prisma)
+    this.balanceService = new BalanceService(prisma)
   }
 
   async findById(id: string) {
@@ -433,6 +436,7 @@ export class LoanService {
 
     // Ejecutar todo en una transacción
     return this.prisma.$transaction(async (tx) => {
+      const balanceService = new BalanceService(tx as any)
       const createdLoans: any[] = []
 
       // Track first payments for LeadPaymentReceived
@@ -442,9 +446,6 @@ export class LoanService {
         commission: Decimal
         paymentMethod: 'CASH' | 'MONEY_TRANSFER'
       }[] = []
-
-      // Track net balance effect from first payments (amount - commission)
-      let totalFirstPaymentNetEffect = new Decimal(0)
 
       for (const loanInput of input.loans) {
         // 1. Obtener o crear el borrower
@@ -621,46 +622,30 @@ export class LoanService {
           },
         })
 
-        // 7. Crear transacción EXPENSE por el monto otorgado
-        const expenseTransaction = await tx.transaction.create({
-          data: {
-            amount: amountGived,
-            date: input.signDate,
-            type: 'EXPENSE',
-            expenseSource: 'LOAN_GRANTED',
-            sourceAccount: input.sourceAccountId,
-            loan: loan.id,
-            lead: input.leadId,
-            route: routeId,
-          },
-        })
-        console.log('[LoanService] Created EXPENSE transaction:', {
-          id: expenseTransaction.id,
-          amount: amountGived.toString(),
-          sourceAccount: input.sourceAccountId,
-          type: 'EXPENSE'
-        })
+        // 7. DEBIT: Monto otorgado del préstamo
+        await balanceService.createEntry({
+          accountId: input.sourceAccountId,
+          entryType: 'DEBIT',
+          amount: amountGived,
+          sourceType: 'LOAN_GRANT',
+          entryDate: input.signDate,
+          loanId: loan.id,
+          snapshotLeadId: input.leadId,
+          snapshotRouteId: routeId || '',
+        }, tx)
 
-        // 7.1. Crear transacción EXPENSE por la comisión de otorgamiento
+        // 7.1. DEBIT: Comisión de otorgamiento
         if (comissionAmount.greaterThan(0)) {
-          const comissionTransaction = await tx.transaction.create({
-            data: {
-              amount: comissionAmount,
-              date: input.signDate,
-              type: 'EXPENSE',
-              expenseSource: 'LOAN_GRANTED_COMISSION',
-              sourceAccount: input.sourceAccountId,
-              loan: loan.id,
-              lead: input.leadId,
-              route: routeId,
-            },
-          })
-          console.log('[LoanService] Created EXPENSE transaction for comission:', {
-            id: comissionTransaction.id,
-            amount: comissionAmount.toString(),
-            sourceAccount: input.sourceAccountId,
-            type: 'EXPENSE'
-          })
+          await balanceService.createEntry({
+            accountId: input.sourceAccountId,
+            entryType: 'DEBIT',
+            amount: comissionAmount,
+            sourceType: 'LOAN_GRANT_COMMISSION',
+            entryDate: input.signDate,
+            loanId: loan.id,
+            snapshotLeadId: input.leadId,
+            snapshotRouteId: routeId || '',
+          }, tx)
         }
 
         // 8. Crear primer pago si se especificó
@@ -701,51 +686,33 @@ export class LoanService {
             paymentMethod: loanInput.firstPayment.paymentMethod,
           })
 
-          // Track net balance effect (payment adds to balance, commission subtracts)
-          totalFirstPaymentNetEffect = totalFirstPaymentNetEffect.plus(paymentAmount).minus(firstPaymentComission)
-          console.log('[LoanService] First payment tracked:', {
+          // CREDIT: Primer pago recibido
+          await balanceService.createEntry({
+            accountId: input.sourceAccountId,
+            entryType: 'CREDIT',
+            amount: paymentAmount,
+            sourceType: loanInput.firstPayment.paymentMethod === 'CASH' ? 'LOAN_PAYMENT_CASH' : 'LOAN_PAYMENT_BANK',
+            entryDate: input.signDate,
             loanId: loan.id,
-            paymentAmount: paymentAmount.toString(),
-            commission: firstPaymentComission.toString(),
-            netEffect: paymentAmount.minus(firstPaymentComission).toString(),
-            totalNetEffectSoFar: totalFirstPaymentNetEffect.toString(),
-          })
+            loanPaymentId: payment.id,
+            profitAmount,
+            returnToCapital,
+            snapshotLeadId: input.leadId,
+            snapshotRouteId: routeId || '',
+          }, tx)
 
-          // Crear transacción INCOME por el pago
-          const incomeSource = loanInput.firstPayment.paymentMethod === 'CASH'
-            ? 'CASH_LOAN_PAYMENT'
-            : 'BANK_LOAN_PAYMENT'
-
-          await tx.transaction.create({
-            data: {
-              amount: paymentAmount,
-              date: input.signDate,
-              type: 'INCOME',
-              incomeSource,
-              profitAmount,
-              returnToCapital,
-              sourceAccount: input.sourceAccountId,
-              loan: loan.id,
-              loanPayment: payment.id,
-              lead: input.leadId,
-              route: routeId,
-            },
-          })
-
-          // Crear transacción EXPENSE por comisión si aplica
+          // DEBIT: Comisión del primer pago
           if (firstPaymentComission.greaterThan(0)) {
-            await tx.transaction.create({
-              data: {
-                amount: firstPaymentComission,
-                date: input.signDate,
-                type: 'EXPENSE',
-                expenseSource: 'LOAN_PAYMENT_COMISSION',
-                sourceAccount: input.sourceAccountId,
-                loanPayment: payment.id,
-                lead: input.leadId,
-                route: routeId,
-              },
-            })
+            await balanceService.createEntry({
+              accountId: input.sourceAccountId,
+              entryType: 'DEBIT',
+              amount: firstPaymentComission,
+              sourceType: 'PAYMENT_COMMISSION',
+              entryDate: input.signDate,
+              loanPaymentId: payment.id,
+              snapshotLeadId: input.leadId,
+              snapshotRouteId: routeId || '',
+            }, tx)
           }
 
           // Actualizar métricas del préstamo
@@ -857,53 +824,17 @@ export class LoanService {
           })
         }
 
-        // Update transactions to link to LeadPaymentReceived
-        await tx.transaction.updateMany({
+        // Update AccountEntry to link to LeadPaymentReceived
+        await tx.accountEntry.updateMany({
           where: {
-            loanPayment: { in: firstPaymentsCreated.map((fp) => fp.paymentId) },
+            loanPaymentId: { in: firstPaymentsCreated.map((fp) => fp.paymentId) },
           },
-          data: { leadPaymentReceived: leadPaymentReceivedId },
+          data: { leadPaymentReceivedId: leadPaymentReceivedId },
         })
       }
 
-      // 10. Restar el monto total de la cuenta origen
-      const accountBefore = await tx.account.findUnique({ where: { id: input.sourceAccountId } })
-      console.log('\n[AUDIT] ========================================')
-      console.log('[AUDIT] OPERACIÓN: CREAR CRÉDITO(S)')
-      console.log('[AUDIT] ========================================')
-      console.log('[AUDIT] Cuenta:', input.sourceAccountId)
-      console.log('[AUDIT] Balance ANTES:', accountBefore?.amount?.toString())
-      console.log('[LoanService] Subtracting from balance:', {
-        totalAmountToDeduct: totalAmountToDeduct.toString(),
-        accountId: input.sourceAccountId,
-      })
-      await this.accountRepository.subtractFromBalance(input.sourceAccountId, totalAmountToDeduct, tx)
-
-      // 11. Ajustar balance por primeros pagos (el pago suma, la comisión resta)
-      console.log('[LoanService] Final first payment balance adjustment:', {
-        totalFirstPaymentNetEffect: totalFirstPaymentNetEffect.toString(),
-        isZero: totalFirstPaymentNetEffect.isZero(),
-        accountId: input.sourceAccountId,
-      })
-      if (!totalFirstPaymentNetEffect.isZero()) {
-        await this.accountRepository.addToBalance(input.sourceAccountId, totalFirstPaymentNetEffect, tx)
-        console.log('[LoanService] Balance adjusted by:', totalFirstPaymentNetEffect.toString())
-      }
-
-      const accountAfter = await tx.account.findUnique({ where: { id: input.sourceAccountId } })
-      const expected = new Decimal(accountBefore?.amount?.toString() || '0').minus(totalAmountToDeduct).plus(totalFirstPaymentNetEffect)
-      const actual = new Decimal(accountAfter?.amount?.toString() || '0')
-      const diff = actual.minus(expected)
-      console.log('[AUDIT] Balance DESPUÉS:', accountAfter?.amount?.toString())
-      console.log('[AUDIT] ----------------------------------------')
-      console.log('[AUDIT] RESUMEN CREAR CRÉDITO:')
-      console.log('[AUDIT]   Inicial:        ', accountBefore?.amount?.toString())
-      console.log('[AUDIT]   - Créditos:     ', totalAmountToDeduct.toString())
-      console.log('[AUDIT]   + Pagos neto:   ', totalFirstPaymentNetEffect.toString())
-      console.log('[AUDIT]   = Esperado:     ', expected.toString())
-      console.log('[AUDIT]   = Actual:       ', actual.toString())
-      console.log('[AUDIT]   DIFERENCIA:     ', diff.toString(), diff.isZero() ? '✓ OK' : '⚠️ ERROR')
-      console.log('[AUDIT] ========================================\n')
+      // 10. Balance ya actualizado por BalanceService.createEntry
+      // (Cada entrada DEBIT/CREDIT actualiza automáticamente Account.amount)
 
       return createdLoans
     })
@@ -1153,19 +1084,14 @@ export class LoanService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      // 0. Obtener balance inicial para logging
-      const accountBefore = await tx.account.findUnique({ where: { id: accountId } })
-      console.log('[LoanService] ====== CANCEL LOAN - INICIO ======')
-      console.log('[LoanService] Balance inicial:', accountBefore?.amount?.toString())
-      console.log('[LoanService] Loan ID:', loanId)
+      const balanceService = new BalanceService(tx as any)
 
-      // 1. Obtener pagos del préstamo con su método de pago
+      // 1. Obtener pagos del préstamo
       const payments = await tx.loanPayment.findMany({
         where: { loan: loanId },
       })
-      console.log('[LoanService] Pagos encontrados:', payments.length)
 
-      // 2. Calcular totales por tipo de pago
+      // 2. Calcular totales por tipo de pago (para info de retorno)
       let totalCashPayments = new Decimal(0)
       let totalBankPayments = new Decimal(0)
       let totalPaymentComissions = new Decimal(0)
@@ -1173,12 +1099,6 @@ export class LoanService {
       for (const payment of payments) {
         const paymentAmount = new Decimal(payment.amount.toString())
         const paymentComission = new Decimal(payment.comission?.toString() || '0')
-        console.log('[LoanService] Pago:', {
-          id: payment.id,
-          amount: paymentAmount.toString(),
-          comission: paymentComission.toString(),
-          method: payment.paymentMethod,
-        })
 
         if (payment.paymentMethod === 'MONEY_TRANSFER') {
           totalBankPayments = totalBankPayments.plus(paymentAmount)
@@ -1188,30 +1108,12 @@ export class LoanService {
         totalPaymentComissions = totalPaymentComissions.plus(paymentComission)
       }
 
-      // 3. Calcular monto a restaurar a cuenta de ruta
-      // = amountGived + loanGrantedComission - cashPayments + paymentComissions
-      // NOTA: loanGrantedComission es solo la comisión de otorgamiento (NO incluye comisiones de pagos)
-      // Las comisiones de pagos ya están en totalPaymentComissions (obtenidas de loanPayment.comission)
-      const amountGived = new Decimal(loan.amountGived.toString())
-      const loanGrantedComission = new Decimal(loan.comissionAmount?.toString() || '0')
-      console.log('[LoanService] Cálculo de restauración:')
-      console.log('[LoanService]   - amountGived:', amountGived.toString())
-      console.log('[LoanService]   - loanGrantedComission (del loan):', loanGrantedComission.toString())
-      console.log('[LoanService]   - totalCashPayments:', totalCashPayments.toString())
-      console.log('[LoanService]   - totalBankPayments:', totalBankPayments.toString())
-      console.log('[LoanService]   - totalPaymentComissions:', totalPaymentComissions.toString())
-
-      const totalToRestoreToRouteAccount = amountGived
-        .plus(loanGrantedComission)
-        .minus(totalCashPayments)
-        .plus(totalPaymentComissions)
-      console.log('[LoanService]   - totalToRestore:', totalToRestoreToRouteAccount.toString())
-      console.log('[LoanService]   - Fórmula: amountGived + loanGrantedComission - cashPayments + paymentComissions')
-      console.log('[LoanService]   - Cálculo:', `${amountGived} + ${loanGrantedComission} - ${totalCashPayments} + ${totalPaymentComissions} = ${totalToRestoreToRouteAccount}`)
-
-      // 4. Eliminar pagos y sus transacciones, y actualizar LeadPaymentReceived
+      // 3. Para cada pago, eliminar entries y actualizar LeadPaymentReceived
       for (const payment of payments) {
-        // 4.1 Si el pago está asociado a un LeadPaymentReceived, actualizarlo
+        // 3.1 Eliminar AccountEntry asociados al pago (revierte balance automáticamente)
+        await balanceService.deleteEntriesByLoanPayment(payment.id, tx)
+
+        // 3.2 Si el pago está asociado a un LeadPaymentReceived, actualizarlo
         if (payment.leadPaymentReceived) {
           const lpr = await tx.leadPaymentReceived.findUnique({
             where: { id: payment.leadPaymentReceived },
@@ -1227,15 +1129,6 @@ export class LoanService {
             const newPaidAmount = existingPaidAmount.minus(paymentAmount)
             const newExpected = existingExpected.minus(paymentAmount)
 
-            console.log('[LoanService] Updating LeadPaymentReceived after payment deletion:', {
-              lprId: lpr.id,
-              paymentId: payment.id,
-              paymentAmount: paymentAmount.toString(),
-              paymentMethod: payment.paymentMethod,
-              oldPaidAmount: existingPaidAmount.toString(),
-              newPaidAmount: newPaidAmount.toString(),
-            })
-
             if (payment.paymentMethod === 'CASH') {
               await tx.leadPaymentReceived.update({
                 where: { id: lpr.id },
@@ -1246,7 +1139,6 @@ export class LoanService {
                 },
               })
             } else {
-              // MONEY_TRANSFER
               await tx.leadPaymentReceived.update({
                 where: { id: lpr.id },
                 data: {
@@ -1261,16 +1153,13 @@ export class LoanService {
             const remainingPaymentsCount = await tx.loanPayment.count({
               where: {
                 leadPaymentReceived: lpr.id,
-                id: { not: payment.id }, // Exclude the one we're about to delete
+                id: { not: payment.id },
               },
             })
 
             if (remainingPaymentsCount === 0) {
-              console.log('[LoanService] LeadPaymentReceived has no remaining payments, deleting:', lpr.id)
-              // Delete transactions associated with this LPR (like TRANSFER transactions)
-              await tx.transaction.deleteMany({
-                where: { leadPaymentReceived: lpr.id },
-              })
+              // Delete entries associated with this LPR (transfers, falco, etc)
+              await balanceService.deleteEntriesByLeadPaymentReceived(lpr.id, tx)
               await tx.leadPaymentReceived.delete({
                 where: { id: lpr.id },
               })
@@ -1278,80 +1167,17 @@ export class LoanService {
           }
         }
 
-        // 4.2 Eliminar transacciones del pago
-        await tx.transaction.deleteMany({
-          where: { loanPayment: payment.id },
-        })
-
-        // 4.3 Eliminar el pago
+        // 3.3 Eliminar el pago
         await tx.loanPayment.delete({
           where: { id: payment.id },
         })
       }
 
-      // 5. Eliminar transacciones del préstamo (EXPENSE de LOAN_GRANTED, etc.)
-      await tx.transaction.deleteMany({
-        where: { loan: loanId },
-      })
+      // 4. Eliminar entries del préstamo (LOAN_GRANT, LOAN_GRANT_COMMISSION)
+      // Esto revierte automáticamente el balance
+      await balanceService.deleteEntriesByLoan(loanId, tx)
 
-      // 6. Crear transacción de restauración para cuenta de ruta (INCOME)
-      if (!totalToRestoreToRouteAccount.isZero()) {
-        await tx.transaction.create({
-          data: {
-            amount: totalToRestoreToRouteAccount.abs(),
-            date: new Date(),
-            type: totalToRestoreToRouteAccount.isPositive() ? 'INCOME' : 'EXPENSE',
-            incomeSource: totalToRestoreToRouteAccount.isPositive() ? 'LOAN_CANCELLED_RESTORE' : undefined,
-            expenseSource: totalToRestoreToRouteAccount.isNegative() ? 'LOAN_CANCELLED_ADJUSTMENT' : undefined,
-            sourceAccount: accountId,
-            lead: loan.lead || undefined,
-            route: loan.snapshotRouteId || undefined,
-          },
-        })
-      }
-
-      // 7. Restaurar/ajustar el balance de la cuenta de ruta
-      if (totalToRestoreToRouteAccount.isPositive()) {
-        console.log('[LoanService] Restaurando al balance:', totalToRestoreToRouteAccount.toString())
-        await this.accountRepository.addToBalance(accountId, totalToRestoreToRouteAccount, tx)
-      } else if (totalToRestoreToRouteAccount.isNegative()) {
-        console.log('[LoanService] Restando del balance:', totalToRestoreToRouteAccount.abs().toString())
-        await this.accountRepository.subtractFromBalance(accountId, totalToRestoreToRouteAccount.abs(), tx)
-      }
-
-      // Log balance después de restaurar
-      const accountAfterRestore = await tx.account.findUnique({ where: { id: accountId } })
-      console.log('[LoanService] Balance después de restaurar:', accountAfterRestore?.amount?.toString())
-
-      // 8. Si hay pagos bancarios, revertir del banco
-      if (totalBankPayments.greaterThan(0)) {
-        // Buscar cuenta de banco de la ruta
-        const bankAccount = await tx.account.findFirst({
-          where: {
-            type: 'BANK',
-            routes: {
-              some: { id: loan.snapshotRouteId || undefined },
-            },
-          },
-        })
-
-        if (bankAccount) {
-          await tx.transaction.create({
-            data: {
-              amount: totalBankPayments,
-              date: new Date(),
-              type: 'EXPENSE',
-              expenseSource: 'LOAN_CANCELLED_BANK_REVERSAL',
-              sourceAccount: bankAccount.id,
-              lead: loan.lead || undefined,
-              route: loan.snapshotRouteId || undefined,
-            },
-          })
-          await this.accountRepository.subtractFromBalance(bankAccount.id, totalBankPayments, tx)
-        }
-      }
-
-      // 9. Si es renovación, reactivar el préstamo anterior
+      // 5. Si es renovación, reactivar el préstamo anterior
       if (loan.previousLoan) {
         await tx.loan.update({
           where: { id: loan.previousLoan },
@@ -1363,7 +1189,7 @@ export class LoanService {
         })
       }
 
-      // 10. Eliminar el préstamo
+      // 6. Eliminar el préstamo
       await tx.loan.update({
         where: { id: loanId },
         data: { collaterals: { set: [] } },
@@ -1373,23 +1199,16 @@ export class LoanService {
         where: { id: loanId },
       })
 
-      // Log balance final
-      const accountFinal = await tx.account.findUnique({ where: { id: accountId } })
-      console.log('[LoanService] ====== CANCEL LOAN - FIN ======')
-      console.log('[LoanService] Balance final:', accountFinal?.amount?.toString())
-      console.log('[LoanService] Resumen:')
-      console.log('[LoanService]   - Balance inicial:', accountBefore?.amount?.toString())
-      console.log('[LoanService]   - Monto restaurado:', totalToRestoreToRouteAccount.toString())
-      console.log('[LoanService]   - Balance final:', accountFinal?.amount?.toString())
-      console.log('[LoanService]   - Diferencia real:', new Decimal(accountFinal?.amount?.toString() || '0').minus(new Decimal(accountBefore?.amount?.toString() || '0')).toString())
+      // Calcular monto restaurado para info de retorno
+      const amountGived = new Decimal(loan.amountGived.toString())
+      const loanGrantedComission = new Decimal(loan.comissionAmount?.toString() || '0')
+      const totalRestored = amountGived.plus(loanGrantedComission).minus(totalCashPayments).plus(totalPaymentComissions)
 
-      // Retornar información detallada
       return {
         success: true,
         deletedLoanId: loanId,
-        restoredAmount: totalToRestoreToRouteAccount.toString(),
+        restoredAmount: totalRestored.toString(),
         accountId,
-        // Nuevos campos para mostrar en el dialog
         paymentsDeleted: payments.length,
         totalCashPayments: totalCashPayments.toString(),
         totalBankPayments: totalBankPayments.toString(),

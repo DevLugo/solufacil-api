@@ -1,8 +1,9 @@
 import { GraphQLError } from 'graphql'
 import { Decimal } from 'decimal.js'
-import type { PrismaClient, TransactionType } from '@solufacil/database'
+import type { PrismaClient, TransactionType, SourceType } from '@solufacil/database'
 import { TransactionRepository } from '../repositories/TransactionRepository'
 import { AccountRepository } from '../repositories/AccountRepository'
+import { BalanceService } from './BalanceService'
 
 export interface CreateTransactionInput {
   amount: string | number
@@ -33,13 +34,44 @@ export interface UpdateTransactionInput {
   description?: string
 }
 
+/**
+ * Maps old expense/income source strings to new SourceType enum
+ */
+function mapToSourceType(type: TransactionType, incomeSource?: string, expenseSource?: string): SourceType {
+  if (type === 'INCOME') {
+    switch (incomeSource) {
+      case 'CASH_LOAN_PAYMENT': return 'LOAN_PAYMENT_CASH'
+      case 'BANK_LOAN_PAYMENT': return 'LOAN_PAYMENT_BANK'
+      default: return 'BALANCE_ADJUSTMENT'
+    }
+  } else if (type === 'EXPENSE') {
+    switch (expenseSource) {
+      case 'LOAN_GRANTED': return 'LOAN_GRANT'
+      case 'LOAN_GRANTED_COMISSION': return 'LOAN_GRANT_COMMISSION'
+      case 'LOAN_PAYMENT_COMISSION': return 'PAYMENT_COMMISSION'
+      case 'GASOLINE': return 'GASOLINE'
+      case 'GASOLINE_TOKA': return 'GASOLINE_TOKA'
+      case 'NOMINA_SALARY': return 'NOMINA_SALARY'
+      case 'EXTERNAL_SALARY': return 'EXTERNAL_SALARY'
+      case 'VIATIC': return 'VIATIC'
+      case 'TRAVEL_EXPENSES': return 'TRAVEL_EXPENSES'
+      case 'FALCO_LOSS': return 'FALCO_LOSS'
+      case 'FALCO_COMPENSATORY': return 'FALCO_COMPENSATORY'
+      default: return 'BALANCE_ADJUSTMENT'
+    }
+  }
+  return 'BALANCE_ADJUSTMENT'
+}
+
 export class TransactionService {
   private transactionRepository: TransactionRepository
   private accountRepository: AccountRepository
+  private balanceService: BalanceService
 
   constructor(private prisma: PrismaClient) {
     this.transactionRepository = new TransactionRepository(prisma)
     this.accountRepository = new AccountRepository(prisma)
+    this.balanceService = new BalanceService(prisma)
   }
 
   async findById(id: string) {
@@ -86,44 +118,84 @@ export class TransactionService {
     }
 
     const amount = new Decimal(input.amount)
+    const sourceType = mapToSourceType(input.type, input.incomeSource, input.expenseSource)
 
-    // Ejecutar creación en transacción para actualizar balances
+    // Ejecutar creación usando BalanceService (crea AccountEntry)
     return this.prisma.$transaction(async (tx) => {
-      const transaction = await this.transactionRepository.create(
-        {
+      const balanceService = new BalanceService(tx as any)
+
+      // Crear AccountEntry según tipo de transacción
+      if (input.type === 'INCOME' && input.sourceAccountId) {
+        // INCOME = CREDIT (dinero entra)
+        await balanceService.createEntry({
+          accountId: input.sourceAccountId,
+          entryType: 'CREDIT',
           amount,
-          date: input.date,
-          type: input.type,
-          incomeSource: input.incomeSource,
-          expenseSource: input.expenseSource,
-          sourceAccountId: input.sourceAccountId,
-          destinationAccountId: input.destinationAccountId,
+          sourceType,
+          entryDate: input.date,
           loanId: input.loanId,
           loanPaymentId: input.loanPaymentId,
-          routeId: input.routeId,
-          leadId: input.leadId,
-        },
-        tx
-      )
-
-      // Actualizar balance según tipo de transacción
-      if (input.type === 'INCOME' && input.sourceAccountId) {
-        // INCOME suma al balance
-        await this.accountRepository.addToBalance(input.sourceAccountId, amount, tx)
+          snapshotLeadId: input.leadId || '',
+          snapshotRouteId: input.routeId || '',
+          description: input.incomeSource || '',
+        }, tx)
       } else if (input.type === 'EXPENSE' && input.sourceAccountId) {
-        // EXPENSE resta del balance
-        await this.accountRepository.subtractFromBalance(input.sourceAccountId, amount, tx)
+        // EXPENSE = DEBIT (dinero sale)
+        await balanceService.createEntry({
+          accountId: input.sourceAccountId,
+          entryType: 'DEBIT',
+          amount,
+          sourceType,
+          entryDate: input.date,
+          loanId: input.loanId,
+          snapshotLeadId: input.leadId || '',
+          snapshotRouteId: input.routeId || '',
+          description: input.expenseSource || '',
+        }, tx)
       } else if (input.type === 'TRANSFER') {
-        // TRANSFER resta del origen y suma al destino
+        // TRANSFER = DEBIT del origen + CREDIT al destino
         if (input.sourceAccountId) {
-          await this.accountRepository.subtractFromBalance(input.sourceAccountId, amount, tx)
+          await balanceService.createEntry({
+            accountId: input.sourceAccountId,
+            entryType: 'DEBIT',
+            amount,
+            sourceType: 'TRANSFER_OUT',
+            entryDate: input.date,
+            snapshotLeadId: input.leadId || '',
+            snapshotRouteId: input.routeId || '',
+            destinationAccountId: input.destinationAccountId,
+          }, tx)
         }
         if (input.destinationAccountId) {
-          await this.accountRepository.addToBalance(input.destinationAccountId, amount, tx)
+          await balanceService.createEntry({
+            accountId: input.destinationAccountId,
+            entryType: 'CREDIT',
+            amount,
+            sourceType: 'TRANSFER_IN',
+            entryDate: input.date,
+            snapshotLeadId: input.leadId || '',
+            snapshotRouteId: input.routeId || '',
+          }, tx)
         }
       }
 
-      return transaction
+      // Retornar un objeto compatible con Transaction para mantener API
+      // Nota: Ya no creamos Transaction, solo AccountEntry
+      return {
+        id: `entry-${Date.now()}`, // ID temporal, no se guarda en Transaction
+        amount,
+        date: input.date,
+        type: input.type,
+        incomeSource: input.incomeSource,
+        expenseSource: input.expenseSource,
+        sourceAccount: input.sourceAccountId,
+        destinationAccount: input.destinationAccountId,
+        loan: input.loanId,
+        loanPayment: input.loanPaymentId,
+        route: input.routeId,
+        snapshotLeadId: input.leadId,
+        createdAt: new Date(),
+      }
     })
   }
 
@@ -153,30 +225,53 @@ export class TransactionService {
       })
     }
 
-    // Ejecutar transferencia en transacción
+    // Ejecutar transferencia usando BalanceService
     return this.prisma.$transaction(async (tx) => {
-      // Crear transacción de transferencia
-      const transaction = await this.transactionRepository.create(
-        {
-          amount,
-          date: new Date(),
-          type: 'TRANSFER',
-          expenseSource: input.description || 'TRANSFER',
-          sourceAccountId: input.sourceAccountId,
-          destinationAccountId: input.destinationAccountId,
-        },
-        tx
-      )
+      const balanceService = new BalanceService(tx as any)
 
-      // Restar del origen y sumar al destino
-      await this.accountRepository.subtractFromBalance(input.sourceAccountId, amount, tx)
-      await this.accountRepository.addToBalance(input.destinationAccountId, amount, tx)
+      // DEBIT del origen
+      await balanceService.createEntry({
+        accountId: input.sourceAccountId,
+        entryType: 'DEBIT',
+        amount,
+        sourceType: 'TRANSFER_OUT',
+        entryDate: new Date(),
+        destinationAccountId: input.destinationAccountId,
+        description: input.description || 'Transfer',
+      }, tx)
 
-      return transaction
+      // CREDIT al destino
+      await balanceService.createEntry({
+        accountId: input.destinationAccountId,
+        entryType: 'CREDIT',
+        amount,
+        sourceType: 'TRANSFER_IN',
+        entryDate: new Date(),
+        description: input.description || 'Transfer',
+      }, tx)
+
+      // Retornar objeto compatible con Transaction para mantener API
+      return {
+        id: `transfer-${Date.now()}`,
+        amount,
+        date: new Date(),
+        type: 'TRANSFER' as const,
+        expenseSource: input.description || 'TRANSFER',
+        sourceAccount: input.sourceAccountId,
+        destinationAccount: input.destinationAccountId,
+        createdAt: new Date(),
+      }
     })
   }
 
+  /**
+   * @deprecated Este método opera sobre Transaction legacy.
+   * Las nuevas operaciones usan AccountEntry via BalanceService.
+   * Solo usar para editar transacciones creadas antes de la migración.
+   */
   async update(id: string, input: UpdateTransactionInput) {
+    console.warn('[DEPRECATED] TransactionService.update() - Use AccountEntry for new operations')
+
     // Obtener transacción actual
     const existingTransaction = await this.transactionRepository.findById(id)
     if (!existingTransaction) {
@@ -244,7 +339,14 @@ export class TransactionService {
     })
   }
 
+  /**
+   * @deprecated Este método opera sobre Transaction legacy.
+   * Las nuevas operaciones usan AccountEntry via BalanceService.
+   * Solo usar para eliminar transacciones creadas antes de la migración.
+   */
   async delete(id: string) {
+    console.warn('[DEPRECATED] TransactionService.delete() - Use AccountEntry for new operations')
+
     // Obtener transacción actual
     const existingTransaction = await this.transactionRepository.findById(id)
     if (!existingTransaction) {

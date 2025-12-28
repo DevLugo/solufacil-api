@@ -15,6 +15,7 @@ export const testData = {
   transactionIds: [] as string[],
   loanPaymentIds: [] as string[],
   personalDataIds: [] as string[],
+  accountEntryIds: [] as string[],
 }
 
 beforeEach(async () => {
@@ -29,12 +30,21 @@ beforeEach(async () => {
   testData.transactionIds = []
   testData.loanPaymentIds = []
   testData.personalDataIds = []
+  testData.accountEntryIds = []
 })
 
 afterEach(async () => {
   // Clean up test data in correct order (respecting FK constraints)
   try {
     // Delete in reverse order of dependencies
+
+    // AccountEntry must be deleted before Account (required FK)
+    if (testData.accountEntryIds.length > 0) {
+      await prisma.accountEntry.deleteMany({
+        where: { id: { in: testData.accountEntryIds } }
+      })
+    }
+
     if (testData.transactionIds.length > 0) {
       await prisma.transaction.deleteMany({
         where: { id: { in: testData.transactionIds } }
@@ -78,6 +88,11 @@ afterEach(async () => {
     }
 
     if (testData.accountIds.length > 0) {
+      // Delete any AccountEntry linked to these accounts (even if not tracked)
+      await prisma.accountEntry.deleteMany({
+        where: { accountId: { in: testData.accountIds } }
+      })
+
       await prisma.account.deleteMany({
         where: { id: { in: testData.accountIds } }
       })

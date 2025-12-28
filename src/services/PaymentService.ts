@@ -5,6 +5,7 @@ import { PaymentRepository } from '../repositories/PaymentRepository'
 import { LoanRepository } from '../repositories/LoanRepository'
 import { TransactionRepository } from '../repositories/TransactionRepository'
 import { AccountRepository } from '../repositories/AccountRepository'
+import { BalanceService } from './BalanceService'
 import { calculatePaymentProfit } from '@solufacil/business-logic'
 
 export interface CreateLoanPaymentInput {
@@ -62,12 +63,14 @@ export class PaymentService {
   private loanRepository: LoanRepository
   private transactionRepository: TransactionRepository
   private accountRepository: AccountRepository
+  private balanceService: BalanceService
 
   constructor(private prisma: PrismaClient) {
     this.paymentRepository = new PaymentRepository(prisma)
     this.loanRepository = new LoanRepository(prisma)
     this.transactionRepository = new TransactionRepository(prisma)
     this.accountRepository = new AccountRepository(prisma)
+    this.balanceService = new BalanceService(prisma)
   }
 
   async findByLoanId(loanId: string, options?: { limit?: number; offset?: number }) {
@@ -204,6 +207,8 @@ export class PaymentService {
       : 'PARTIAL'
 
     return this.prisma.$transaction(async (tx) => {
+      const balanceService = new BalanceService(tx as any)
+
       // 1. Obtener cuentas del agente (EMPLOYEE_CASH_FUND y BANK)
       const agent = await tx.employee.findUnique({
         where: { id: input.agentId },
@@ -224,8 +229,8 @@ export class PaymentService {
       const cashAccount = agentAccounts.find(a => a.type === 'EMPLOYEE_CASH_FUND')
       const bankAccount = agentAccounts.find(a => a.type === 'BANK')
 
-      // Obtener routeId para las transacciones
-      const routeId = agent?.routes?.[0]?.id
+      // Obtener routeId para los entries
+      const routeId = agent?.routes?.[0]?.id || ''
 
       // 2. Crear el registro de pago del lead
       const leadPaymentReceived = await this.paymentRepository.createLeadPaymentReceived({
@@ -240,22 +245,10 @@ export class PaymentService {
         createdAt: paymentDate,
       })
 
-      // 3. Acumuladores para cambios en cuentas
-      let cashAmountChange = new Decimal(0)
-      let bankAmountChange = new Decimal(0)
+      // Track bank payments that came via MONEY_TRANSFER (direct bank deposits)
+      let directBankPayments = new Decimal(0)
 
-      console.log('[PaymentService] ===== CREATE LeadPaymentReceived =====')
-      console.log('[PaymentService] Input summary:', {
-        leadId: input.leadId,
-        expectedAmount: expectedAmount.toString(),
-        paidAmount: paidAmount.toString(),
-        cashPaidAmount: cashPaidAmount.toString(),
-        bankPaidAmount: bankPaidAmount.toString(),
-        falcoAmount: falcoAmount.toString(),
-        paymentsCount: input.payments.length,
-      })
-
-      // 4. Crear los pagos individuales y transacciones
+      // 3. Crear los pagos individuales y sus entries en el ledger
       for (const paymentInput of input.payments) {
         const loan = await this.loanRepository.findById(paymentInput.loanId)
         if (!loan) continue
@@ -298,62 +291,42 @@ export class PaymentService {
         const isTransfer = paymentInput.paymentMethod === 'MONEY_TRANSFER'
         const destinationAccountId = isTransfer ? bankAccount?.id : cashAccount?.id
 
-        // Crear transacción INCOME (suma a la cuenta)
+        // CREDIT: Pago recibido (suma a la cuenta)
         if (destinationAccountId) {
-          await this.transactionRepository.create(
-            {
-              amount: paymentAmount,
-              date: paymentDate,
-              type: 'INCOME',
-              incomeSource: isTransfer ? 'BANK_LOAN_PAYMENT' : 'CASH_LOAN_PAYMENT',
-              profitAmount,
-              returnToCapital,
-              destinationAccountId,
-              loanId: loan.id,
-              loanPaymentId: payment.id,
-              leadId: input.leadId,
-              routeId,
-              leadPaymentReceivedId: leadPaymentReceived.id,
-            },
-            tx
-          )
+          await balanceService.createEntry({
+            accountId: destinationAccountId,
+            entryType: 'CREDIT',
+            amount: paymentAmount,
+            sourceType: isTransfer ? 'LOAN_PAYMENT_BANK' : 'LOAN_PAYMENT_CASH',
+            entryDate: paymentDate,
+            loanId: loan.id,
+            loanPaymentId: payment.id,
+            leadPaymentReceivedId: leadPaymentReceived.id,
+            profitAmount,
+            returnToCapital,
+            snapshotLeadId: input.leadId,
+            snapshotRouteId: routeId,
+          }, tx)
         }
 
-        // Acumular cambio según método de pago
-        console.log('[PaymentService] Processing payment:', {
-          loanId: paymentInput.loanId,
-          amount: paymentAmount.toString(),
-          comission: comissionAmount.toString(),
-          method: paymentInput.paymentMethod,
-          isTransfer,
-        })
-
+        // Track direct bank payments for cashToBank calculation
         if (isTransfer) {
-          bankAmountChange = bankAmountChange.plus(paymentAmount)
-          console.log('[PaymentService]   -> bankAmountChange += ' + paymentAmount.toString() + ' = ' + bankAmountChange.toString())
-        } else {
-          cashAmountChange = cashAmountChange.plus(paymentAmount)
-          console.log('[PaymentService]   -> cashAmountChange += ' + paymentAmount.toString() + ' = ' + cashAmountChange.toString())
+          directBankPayments = directBankPayments.plus(paymentAmount)
         }
 
-        // Crear transacción EXPENSE por comisión (resta de la cuenta de efectivo)
+        // DEBIT: Comisión (resta de efectivo)
         if (comissionAmount.greaterThan(0) && cashAccount) {
-          await this.transactionRepository.create(
-            {
-              amount: comissionAmount,
-              date: paymentDate,
-              type: 'EXPENSE',
-              expenseSource: 'LOAN_PAYMENT_COMISSION',
-              sourceAccountId: cashAccount.id,
-              loanPaymentId: payment.id,
-              leadId: input.leadId,
-              routeId,
-            },
-            tx
-          )
-          // La comisión siempre se descuenta de efectivo
-          cashAmountChange = cashAmountChange.minus(comissionAmount)
-          console.log('[PaymentService]   -> cashAmountChange -= ' + comissionAmount.toString() + ' (comision) = ' + cashAmountChange.toString())
+          await balanceService.createEntry({
+            accountId: cashAccount.id,
+            entryType: 'DEBIT',
+            amount: comissionAmount,
+            sourceType: 'PAYMENT_COMMISSION',
+            entryDate: paymentDate,
+            loanPaymentId: payment.id,
+            leadPaymentReceivedId: leadPaymentReceived.id,
+            snapshotLeadId: input.leadId,
+            snapshotRouteId: routeId,
+          }, tx)
         }
 
         // Actualizar métricas del préstamo
@@ -375,84 +348,40 @@ export class PaymentService {
         })
       }
 
-      // 5. Calcular si el líder depositó efectivo al banco
+      // 4. Calcular si el líder depositó efectivo al banco
       // bankPaidAmount = total que terminó en banco
-      // bankAmountChange = pagos que fueron directo por MONEY_TRANSFER
+      // directBankPayments = pagos que fueron directo por MONEY_TRANSFER
       // La diferencia = efectivo que el líder depositó al banco
-      const cashToBank = bankPaidAmount.minus(bankAmountChange)
-
-      console.log('[PaymentService] Distribution calculation:')
-      console.log('[PaymentService]   bankPaidAmount (total al banco):', bankPaidAmount.toString())
-      console.log('[PaymentService]   bankAmountChange (pagos MONEY_TRANSFER):', bankAmountChange.toString())
-      console.log('[PaymentService]   cashToBank (efectivo depositado):', cashToBank.toString())
+      const cashToBank = bankPaidAmount.minus(directBankPayments)
 
       if (cashToBank.greaterThan(0) && cashAccount && bankAccount) {
-        // Crear transacción TRANSFER por el efectivo depositado al banco
-        await this.transactionRepository.create(
-          {
-            amount: cashToBank,
-            date: paymentDate,
-            type: 'TRANSFER',
-            sourceAccountId: cashAccount.id,
-            destinationAccountId: bankAccount.id,
-            leadId: input.leadId,
-            routeId,
-            leadPaymentReceivedId: leadPaymentReceived.id,
-          },
-          tx
-        )
-        // Ajustar el cambio: restar de efectivo, sumar a banco
-        cashAmountChange = cashAmountChange.minus(cashToBank)
-        bankAmountChange = bankAmountChange.plus(cashToBank)
-        console.log('[PaymentService]   After transfer: cashAmountChange =', cashAmountChange.toString())
-        console.log('[PaymentService]   After transfer: bankAmountChange =', bankAmountChange.toString())
+        // TRANSFER: Efectivo depositado al banco
+        await balanceService.createTransfer({
+          sourceAccountId: cashAccount.id,
+          destinationAccountId: bankAccount.id,
+          amount: cashToBank,
+          entryDate: paymentDate,
+          description: `Depósito efectivo a banco - LPR ${leadPaymentReceived.id}`,
+          snapshotLeadId: input.leadId,
+          snapshotRouteId: routeId,
+          leadPaymentReceivedId: leadPaymentReceived.id,
+        }, tx)
       }
 
-      // 5.5 Si hay falco, crear transacción FALCO_LOSS y descontar del balance
+      // 5. Si hay falco, crear DEBIT por pérdida
       if (falcoAmount.greaterThan(0) && cashAccount) {
-        // Crear transacción de pérdida por falco (EXPENSE que reduce el balance)
-        await this.transactionRepository.create(
-          {
-            amount: falcoAmount,
-            date: paymentDate,
-            type: 'EXPENSE',
-            expenseSource: 'FALCO_LOSS',
-            description: `Pérdida por falco - ${leadPaymentReceived.id}`,
-            sourceAccountId: cashAccount.id,
-            leadId: input.leadId,
-            routeId,
-            leadPaymentReceivedId: leadPaymentReceived.id,
-          },
-          tx
-        )
-        // Descontar el falco del balance de efectivo
-        cashAmountChange = cashAmountChange.minus(falcoAmount)
-        console.log('[PaymentService] Falco applied: cashAmountChange -= ' + falcoAmount.toString() + ' = ' + cashAmountChange.toString())
+        await balanceService.createEntry({
+          accountId: cashAccount.id,
+          entryType: 'DEBIT',
+          amount: falcoAmount,
+          sourceType: 'FALCO_LOSS',
+          entryDate: paymentDate,
+          description: `Pérdida por falco - LPR ${leadPaymentReceived.id}`,
+          leadPaymentReceivedId: leadPaymentReceived.id,
+          snapshotLeadId: input.leadId,
+          snapshotRouteId: routeId,
+        }, tx)
       }
-
-      // 6. Actualizar balances de cuentas con los montos acumulados
-      console.log('[PaymentService] ===== FINAL BALANCE CHANGES =====')
-      console.log('[PaymentService] cashAmountChange to apply:', cashAmountChange.toString())
-      console.log('[PaymentService] bankAmountChange to apply:', bankAmountChange.toString())
-
-      if (cashAccount && !cashAmountChange.isZero()) {
-        const beforeCash = await tx.account.findUnique({ where: { id: cashAccount.id } })
-        console.log('[PaymentService] Cash balance BEFORE:', beforeCash?.amount?.toString())
-        await this.accountRepository.addToBalance(cashAccount.id, cashAmountChange, tx)
-        const afterCash = await tx.account.findUnique({ where: { id: cashAccount.id } })
-        console.log('[PaymentService] Cash balance AFTER:', afterCash?.amount?.toString())
-      }
-
-      if (bankAccount && !bankAmountChange.isZero()) {
-        const beforeBank = await tx.account.findUnique({ where: { id: bankAccount.id } })
-        console.log('[PaymentService] Bank balance BEFORE:', beforeBank?.amount?.toString())
-        await this.accountRepository.addToBalance(bankAccount.id, bankAmountChange, tx)
-        const afterBank = await tx.account.findUnique({ where: { id: bankAccount.id } })
-        console.log('[PaymentService] Bank balance AFTER:', afterBank?.amount?.toString())
-      }
-
-      console.log('[PaymentService] ===== END CREATE =====')
-
 
       return leadPaymentReceived
     })
@@ -672,167 +601,11 @@ export class PaymentService {
   }
 
   async updateLeadPaymentReceived(id: string, input: UpdateLeadPaymentReceivedInput) {
-    console.log('[PaymentService] ===== UPDATE START =====')
-    console.log('[PaymentService] ID:', id)
-    console.log('[PaymentService] Input:', JSON.stringify({
-      expectedAmount: input.expectedAmount,
-      paidAmount: input.paidAmount,
-      cashPaidAmount: input.cashPaidAmount,
-      bankPaidAmount: input.bankPaidAmount,
-      falcoAmount: input.falcoAmount,
-      paymentCount: input.payments?.length || 0,
-      payments: input.payments?.map(p => ({
-        paymentId: p.paymentId,
-        loanId: p.loanId,
-        amount: p.amount,
-        comission: p.comission,
-        paymentMethod: p.paymentMethod,
-        isDeleted: p.isDeleted,
-      })),
-    }, null, 2))
-
-    // Obtener el LeadPaymentReceived existente
+    // Get the existing LeadPaymentReceived
     const existingRecord = await this.paymentRepository.findLeadPaymentReceivedById(id)
     if (!existingRecord) {
       throw new GraphQLError('LeadPaymentReceived not found', {
         extensions: { code: 'NOT_FOUND' },
-      })
-    }
-
-    console.log('[PaymentService] Existing record:', {
-      expectedAmount: existingRecord.expectedAmount.toString(),
-      paidAmount: existingRecord.paidAmount.toString(),
-      cashPaidAmount: existingRecord.cashPaidAmount.toString(),
-      bankPaidAmount: existingRecord.bankPaidAmount.toString(),
-      falcoAmount: existingRecord.falcoAmount.toString(),
-      paymentCount: existingRecord.payments.length,
-    })
-
-    // SPECIAL PATH: Distribution-only change (no payment modifications)
-    // This is a simpler path that just updates the distribution and adjusts balances
-    if (input.distributionOnlyChange && input.cashPaidAmount !== undefined && input.bankPaidAmount !== undefined) {
-      console.log('[PaymentService] ===== DISTRIBUTION-ONLY CHANGE =====')
-
-      const oldCashPaid = new Decimal(existingRecord.cashPaidAmount.toString())
-      const oldBankPaid = new Decimal(existingRecord.bankPaidAmount.toString())
-      const newCashPaid = new Decimal(input.cashPaidAmount)
-      const newBankPaid = new Decimal(input.bankPaidAmount)
-
-      const cashDelta = newCashPaid.minus(oldCashPaid)
-      const bankDelta = newBankPaid.minus(oldBankPaid)
-
-      console.log('[PaymentService] Distribution change:', {
-        old: { cash: oldCashPaid.toString(), bank: oldBankPaid.toString() },
-        new: { cash: newCashPaid.toString(), bank: newBankPaid.toString() },
-        delta: { cash: cashDelta.toString(), bank: bankDelta.toString() },
-      })
-
-      return this.prisma.$transaction(async (tx) => {
-        // Get agent accounts
-        const agent = await tx.employee.findUnique({
-          where: { id: existingRecord.agent },
-          include: {
-            routes: {
-              include: {
-                accounts: {
-                  where: { type: { in: ['EMPLOYEE_CASH_FUND', 'BANK'] } }
-                }
-              }
-            }
-          }
-        })
-
-        const agentAccounts = agent?.routes?.flatMap(r => r.accounts) || []
-        const cashAccount = agentAccounts.find(a => a.type === 'EMPLOYEE_CASH_FUND')
-        const bankAccount = agentAccounts.find(a => a.type === 'BANK')
-
-        // Get routeId from existing transactions or agent's routes
-        const existingIncomeTx = await tx.transaction.findFirst({
-          where: { leadPaymentReceived: id, type: 'INCOME' },
-          select: { route: true },
-        })
-        const routeId = existingIncomeTx?.route || agent?.routes?.[0]?.id || ''
-
-        // Update account balances by the delta
-        if (cashAccount && !cashDelta.isZero()) {
-          console.log('[PaymentService] Updating cash account balance by:', cashDelta.toString())
-          await this.accountRepository.addToBalance(cashAccount.id, cashDelta, tx)
-        }
-
-        if (bankAccount && !bankDelta.isZero()) {
-          console.log('[PaymentService] Updating bank account balance by:', bankDelta.toString())
-          await this.accountRepository.addToBalance(bankAccount.id, bankDelta, tx)
-        }
-
-        // Handle TRANSFER transaction
-        // Calculate how much of the cash is being "transferred to bank" by the leader
-        // (vs money that was paid directly by clients via MONEY_TRANSFER)
-        const moneyTransferSum = existingRecord.payments
-          .filter(p => p.paymentMethod === 'MONEY_TRANSFER')
-          .reduce((sum, p) => sum.plus(new Decimal(p.amount.toString())), new Decimal(0))
-
-        const oldCashToBank = oldBankPaid.minus(moneyTransferSum)
-        const newCashToBank = newBankPaid.minus(moneyTransferSum)
-
-        console.log('[PaymentService] TRANSFER transaction:', {
-          moneyTransferSum: moneyTransferSum.toString(),
-          oldCashToBank: oldCashToBank.toString(),
-          newCashToBank: newCashToBank.toString(),
-        })
-
-        // Always check for existing TRANSFER first to prevent duplicates
-        // (handles case where frontend might have stale data)
-        const existingTransferTx = await tx.transaction.findFirst({
-          where: { leadPaymentReceived: id, type: 'TRANSFER' },
-        })
-
-        console.log('[PaymentService] Existing TRANSFER:', existingTransferTx?.id || 'none',
-          existingTransferTx ? `amount: ${existingTransferTx.amount}` : '')
-
-        if (newCashToBank.isZero()) {
-          // No transfer needed - delete if exists
-          if (existingTransferTx) {
-            console.log('[PaymentService] Deleting TRANSFER transaction (no longer needed)')
-            await tx.transaction.delete({ where: { id: existingTransferTx.id } })
-          }
-        } else if (existingTransferTx) {
-          // TRANSFER exists - update it with new amount
-          if (!new Decimal(existingTransferTx.amount.toString()).equals(newCashToBank)) {
-            console.log('[PaymentService] Updating TRANSFER transaction:', newCashToBank.toString())
-            await tx.transaction.update({
-              where: { id: existingTransferTx.id },
-              data: { amount: newCashToBank },
-            })
-          } else {
-            console.log('[PaymentService] TRANSFER amount unchanged, skipping update')
-          }
-        } else if (cashAccount && bankAccount) {
-          // No TRANSFER exists and we need one - create it
-          console.log('[PaymentService] Creating TRANSFER transaction:', newCashToBank.toString())
-          await this.transactionRepository.create({
-            amount: newCashToBank,
-            date: existingRecord.createdAt, // Use the original LeadPaymentReceived date
-            type: 'TRANSFER',
-            sourceAccountId: cashAccount.id,
-            destinationAccountId: bankAccount.id,
-            leadId: existingRecord.lead,
-            routeId: routeId || '',
-            leadPaymentReceivedId: id,
-          }, tx)
-        }
-
-        // Update the LeadPaymentReceived record
-        const updatedRecord = await tx.leadPaymentReceived.update({
-          where: { id },
-          data: {
-            cashPaidAmount: newCashPaid,
-            bankPaidAmount: newBankPaid,
-          },
-          include: { payments: true },
-        })
-
-        console.log('[PaymentService] ===== DISTRIBUTION-ONLY CHANGE COMPLETE =====')
-        return updatedRecord
       })
     }
 
@@ -852,34 +625,21 @@ export class PaymentService {
       ? new Decimal(input.falcoAmount)
       : new Decimal(existingRecord.falcoAmount.toString())
 
-    // Check if any payments are being deleted
-    const hasAnyDeletion = input.payments?.some(p => p.isDeleted) || false
-
-    // IMPORTANT: Track if distribution was explicitly changed
-    // Distribution is considered changed if:
-    // 1. bankPaidAmount/cashPaidAmount are explicitly in the input, OR
-    // 2. Any payments are being deleted (which implicitly changes distribution)
-    const distributionExplicitlyChanged = input.bankPaidAmount !== undefined || input.cashPaidAmount !== undefined
-    const distributionChanged = distributionExplicitlyChanged || hasAnyDeletion
-    console.log('[PaymentService] Distribution explicitly changed:', distributionExplicitlyChanged)
-    console.log('[PaymentService] Has any deletion:', hasAnyDeletion)
-    console.log('[PaymentService] Distribution changed (effective):', distributionChanged)
-
     const paymentStatus = paidAmount.greaterThanOrEqualTo(expectedAmount)
       ? 'COMPLETE'
       : 'PARTIAL'
 
     return this.prisma.$transaction(async (tx) => {
-      // 1. Obtener cuentas del agente (EMPLOYEE_CASH_FUND y BANK)
+      const balanceService = new BalanceService(tx as any)
+
+      // 1. Get agent accounts
       const agent = await tx.employee.findUnique({
         where: { id: existingRecord.agent },
         include: {
           routes: {
             include: {
               accounts: {
-                where: {
-                  type: { in: ['EMPLOYEE_CASH_FUND', 'BANK'] }
-                }
+                where: { type: { in: ['EMPLOYEE_CASH_FUND', 'BANK'] } }
               }
             }
           }
@@ -889,157 +649,43 @@ export class PaymentService {
       const agentAccounts = agent?.routes?.flatMap(r => r.accounts) || []
       const cashAccount = agentAccounts.find(a => a.type === 'EMPLOYEE_CASH_FUND')
       const bankAccount = agentAccounts.find(a => a.type === 'BANK')
-      const routeId = agent?.routes?.[0]?.id
+      const routeId = agent?.routes?.[0]?.id || ''
 
-      // 2. Calcular el delta basándose SOLO en los pagos que se modifican
-      // Solo contamos los pagos que vienen en el input, no todos los del record
+      // 2. Delete all existing AccountEntry for this LPR (this reverses all balance changes)
+      await balanceService.deleteEntriesByLeadPaymentReceived(id, tx)
 
-      // Crear mapa de pagos existentes para búsqueda rápida
+      // 3. Delete all existing Transaction for this LPR (cleanup)
+      await tx.transaction.deleteMany({
+        where: { leadPaymentReceived: id },
+      })
+
+      // 4. Process payments: delete/update/create LoanPayment records
       const existingPaymentsMap = new Map(
         existingRecord.payments.map(p => [p.id, p])
       )
 
-      // oldCashChange = efecto de los pagos QUE SE VAN A MODIFICAR (valores anteriores)
-      // newCashChange = efecto NUEVO de esos pagos (valores nuevos)
-      let oldCashChange = new Decimal(0)
-      let oldBankChange = new Decimal(0)
+      // Track bank payments that came via MONEY_TRANSFER (for cashToBank calculation)
+      let directBankPayments = new Decimal(0)
 
-      // 3. Acumuladores para los nuevos cambios
-      let newCashChange = new Decimal(0)
-      let newBankChange = new Decimal(0)
-
-      // Track de IDs de pagos procesados en el input
-      const processedPaymentIds = new Set<string>()
-
-      // Primero, calcular oldCashChange SOLO de los pagos que vienen en el input
-      console.log('[PaymentService] ====== BALANCE CALCULATION START ======')
-      console.log('[PaymentService] LeadPaymentReceived ID:', id)
-      console.log('[PaymentService] Total payments in input:', input.payments?.length || 0)
-      console.log('[PaymentService] Existing payments in record:', existingRecord.payments.length)
-      console.log('[PaymentService] Input bankPaidAmount:', bankPaidAmount.toString())
-      console.log('[PaymentService] Existing bankPaidAmount:', existingRecord.bankPaidAmount.toString())
-
-      if (input.payments) {
-        for (const paymentInput of input.payments) {
-          console.log('[PaymentService] Input payment:', {
-            paymentId: paymentInput.paymentId,
-            loanId: paymentInput.loanId,
-            inputAmount: paymentInput.amount,
-            inputComission: paymentInput.comission,
-            inputMethod: paymentInput.paymentMethod,
-            isDeleted: paymentInput.isDeleted,
-          })
-
-          if (paymentInput.paymentId) {
-            const existingPayment = existingPaymentsMap.get(paymentInput.paymentId)
-            if (existingPayment) {
-              const oldAmount = new Decimal(existingPayment.amount.toString())
-              const oldComission = new Decimal(existingPayment.comission.toString())
-              const wasTransfer = existingPayment.paymentMethod === 'MONEY_TRANSFER'
-
-              console.log('[PaymentService] Existing payment from DB:', {
-                paymentId: paymentInput.paymentId,
-                dbAmount: oldAmount.toString(),
-                dbComission: oldComission.toString(),
-                dbMethod: existingPayment.paymentMethod,
-              })
-
-              if (wasTransfer) {
-                oldBankChange = oldBankChange.plus(oldAmount)
-                console.log('[PaymentService]   -> Added to oldBankChange:', oldAmount.toString())
-              } else {
-                oldCashChange = oldCashChange.plus(oldAmount)
-                console.log('[PaymentService]   -> Added to oldCashChange:', oldAmount.toString())
-              }
-              oldCashChange = oldCashChange.minus(oldComission)
-              console.log('[PaymentService]   -> Subtracted commission from oldCashChange:', oldComission.toString())
-              console.log('[PaymentService]   -> Current oldCashChange:', oldCashChange.toString())
-              console.log('[PaymentService]   -> Current oldBankChange:', oldBankChange.toString())
-            } else {
-              console.log('[PaymentService] WARNING: Payment ID not found in existingPaymentsMap:', paymentInput.paymentId)
-            }
-          }
-        }
-      }
-
-      console.log('[PaymentService] After processing all input payments:')
-      console.log('[PaymentService]   oldCashChange (before transfer adj):', oldCashChange.toString())
-      console.log('[PaymentService]   oldBankChange (before transfer adj):', oldBankChange.toString())
-
-      // IMPORTANTE: Solo aplicar ajuste de transferencia (cashToBank) SI la distribución cambió.
-      // Si solo se editaron comisiones (distributionChanged = false), no tocar la distribución.
-      let existingCashToBank = new Decimal(0)
-
-      if (distributionChanged) {
-        // Cuando se creó el LeadPaymentReceived, si bankPaidAmount > bankAmountChange,
-        // se creó una transacción TRANSFER de efectivo a banco.
-        // Debemos considerar ese ajuste en oldCashChange y oldBankChange.
-        const existingBankPaidAmount = new Decimal(existingRecord.bankPaidAmount.toString())
-        const rawCashToBank = existingBankPaidAmount.minus(oldBankChange)
-
-        // IMPORTANTE: El efectivo transferido al banco no puede exceder el efectivo disponible
-        // después de la comisión. Si bankPaidAmount fue seteado a un valor mayor que el disponible
-        // (por ejemplo 100 cuando solo había 92 después de comisión), debemos usar el valor real.
-        // Esto evita que netCashChange tenga un excedente de la comisión al eliminar pagos.
-        existingCashToBank = Decimal.min(rawCashToBank, oldCashChange)
-        if (existingCashToBank.lessThan(0)) {
-          existingCashToBank = new Decimal(0)
-        }
-
-        console.log('[PaymentService] Transfer adjustment calculation (distribution changed):')
-        console.log('[PaymentService]   existingBankPaidAmount:', existingBankPaidAmount.toString())
-        console.log('[PaymentService]   oldBankChange (from MONEY_TRANSFER payments):', oldBankChange.toString())
-        console.log('[PaymentService]   rawCashToBank (sin cap):', rawCashToBank.toString())
-        console.log('[PaymentService]   oldCashChange (disponible):', oldCashChange.toString())
-        console.log('[PaymentService]   existingCashToBank (con cap):', existingCashToBank.toString())
-
-        if (existingCashToBank.greaterThan(0)) {
-          oldCashChange = oldCashChange.minus(existingCashToBank)
-          // Para oldBankChange, usar el valor REAL de bankPaidAmount para que la reversión
-          // del banco sea correcta (el banco SÍ recibió el monto completo via bankDelta)
-          oldBankChange = existingBankPaidAmount
-          console.log('[PaymentService]   -> Adjusted oldCashChange:', oldCashChange.toString())
-          console.log('[PaymentService]   -> Adjusted oldBankChange (usando bankPaidAmount):', oldBankChange.toString())
-        }
-      } else {
-        console.log('[PaymentService] Skipping transfer adjustment (distribution NOT changed, commission-only edit)')
-      }
-
-      // Procesar cada pago en el input
       if (input.payments) {
         for (const paymentInput of input.payments) {
           const paymentAmount = new Decimal(paymentInput.amount)
-          const paymentComission = paymentInput.comission
-            ? new Decimal(paymentInput.comission)
-            : new Decimal(0)
 
           if (paymentInput.paymentId) {
-            // Pago existente - actualizar o eliminar
-            const existingPayment = existingRecord.payments.find(
-              (p) => p.id === paymentInput.paymentId
-            )
+            // Existing payment
+            const existingPayment = existingPaymentsMap.get(paymentInput.paymentId)
 
             if (existingPayment) {
               const oldAmount = new Decimal(existingPayment.amount.toString())
               const oldComission = new Decimal(existingPayment.comission.toString())
 
-              // Marcar como procesado
-              processedPaymentIds.add(paymentInput.paymentId)
-
               if (paymentInput.isDeleted) {
-                console.log('[PaymentService] DELETING payment:', paymentInput.paymentId)
-                console.log('[PaymentService]   -> NOT adding to newCashChange/newBankChange (deleted)')
-
-                // Eliminar el pago
-                await tx.transaction.deleteMany({
-                  where: { loanPayment: paymentInput.paymentId },
-                })
-
+                // Delete the payment
                 await tx.loanPayment.delete({
                   where: { id: paymentInput.paymentId },
                 })
 
-                // Revertir métricas del préstamo
+                // Revert loan metrics
                 const loan = existingPayment.loanRelation
                 await tx.loan.update({
                   where: { id: loan.id },
@@ -1051,11 +697,11 @@ export class PaymentService {
                     finishedDate: null,
                   },
                 })
-                // No acumular nada en newCashChange/newBankChange porque el pago se eliminó
               } else {
-                // Actualizar el pago
-                const amountDiff = paymentAmount.minus(oldAmount)
-                const comissionDiff = paymentComission.minus(oldComission)
+                // Update the payment
+                const paymentComission = paymentInput.comission !== undefined
+                  ? new Decimal(paymentInput.comission)
+                  : new Decimal(0)
 
                 await tx.loanPayment.update({
                   where: { id: paymentInput.paymentId },
@@ -1066,90 +712,10 @@ export class PaymentService {
                   },
                 })
 
-                // Actualizar transacciones (incluyendo recálculo de profitAmount)
-                const incomeSource = paymentInput.paymentMethod === 'CASH'
-                  ? 'CASH_LOAN_PAYMENT'
-                  : 'BANK_LOAN_PAYMENT'
+                // Update loan metrics if changed
+                const amountDiff = paymentAmount.minus(oldAmount)
+                const comissionDiff = paymentComission.minus(oldComission)
 
-                const isTransfer = paymentInput.paymentMethod === 'MONEY_TRANSFER'
-                const destinationAccountId = isTransfer ? bankAccount?.id : cashAccount?.id
-
-                // Obtener datos del loan para recalcular profit
-                const loan = existingPayment.loanRelation
-                const loanTotalProfit = new Decimal(loan.profitAmount.toString())
-                const loanTotalDebt = new Decimal(loan.totalDebtAcquired.toString())
-                const loanIsBadDebt = !!loan.badDebtDate
-
-                // Recalcular profitAmount y returnToCapital
-                const { profitAmount, returnToCapital } = calculatePaymentProfit(
-                  paymentAmount,
-                  loanTotalProfit,
-                  loanTotalDebt,
-                  loanIsBadDebt
-                )
-
-                await tx.transaction.updateMany({
-                  where: {
-                    loanPayment: paymentInput.paymentId,
-                    type: 'INCOME',
-                  },
-                  data: {
-                    amount: paymentAmount,
-                    incomeSource,
-                    destinationAccount: destinationAccountId,
-                    profitAmount,
-                    returnToCapital,
-                  },
-                })
-
-                // Handle commission transaction
-                if (paymentComission.isZero() && !oldComission.isZero()) {
-                  // Commission became 0 - DELETE the commission transaction
-                  console.log('[PaymentService] Deleting commission transaction (commission became 0)')
-                  await tx.transaction.deleteMany({
-                    where: {
-                      loanPayment: paymentInput.paymentId,
-                      type: 'EXPENSE',
-                      expenseSource: 'LOAN_PAYMENT_COMISSION',
-                    },
-                  })
-                } else if (!comissionDiff.isZero()) {
-                  // Commission changed but is not 0 - update it
-                  if (oldComission.isZero() && paymentComission.greaterThan(0)) {
-                    // Commission was 0 and now has a value - create new transaction
-                    console.log('[PaymentService] Creating new commission transaction')
-                    if (cashAccount) {
-                      await this.transactionRepository.create(
-                        {
-                          amount: paymentComission,
-                          date: new Date(),
-                          type: 'EXPENSE',
-                          expenseSource: 'LOAN_PAYMENT_COMISSION',
-                          sourceAccountId: cashAccount.id,
-                          loanPaymentId: paymentInput.paymentId,
-                          leadId: existingRecord.lead,
-                          routeId,
-                        },
-                        tx
-                      )
-                    }
-                  } else {
-                    // Just update the existing commission transaction
-                    console.log('[PaymentService] Updating commission transaction to:', paymentComission.toString())
-                    await tx.transaction.updateMany({
-                      where: {
-                        loanPayment: paymentInput.paymentId,
-                        type: 'EXPENSE',
-                        expenseSource: 'LOAN_PAYMENT_COMISSION',
-                      },
-                      data: {
-                        amount: paymentComission,
-                      },
-                    })
-                  }
-                }
-
-                // Actualizar métricas del préstamo si cambió el monto
                 if (!amountDiff.isZero() || !comissionDiff.isZero()) {
                   const loan = existingPayment.loanRelation
                   await tx.loan.update({
@@ -1161,51 +727,20 @@ export class PaymentService {
                     },
                   })
                 }
-
-                // Acumular nuevos cambios
-                console.log('[PaymentService] UPDATING payment:', paymentInput.paymentId)
-                if (isTransfer) {
-                  newBankChange = newBankChange.plus(paymentAmount)
-                  console.log('[PaymentService]   -> Added to newBankChange:', paymentAmount.toString())
-                } else {
-                  newCashChange = newCashChange.plus(paymentAmount)
-                  console.log('[PaymentService]   -> Added to newCashChange:', paymentAmount.toString())
-                }
-                // Comisión siempre afecta efectivo
-                newCashChange = newCashChange.minus(paymentComission)
-                console.log('[PaymentService]   -> Subtracted commission from newCashChange:', paymentComission.toString())
-                console.log('[PaymentService]   -> Current newCashChange:', newCashChange.toString())
-                console.log('[PaymentService]   -> Current newBankChange:', newBankChange.toString())
               }
             }
           } else if (!paymentInput.isDeleted && paymentAmount.greaterThan(0)) {
-            // Nuevo pago - crear
+            // New payment - create
             const loan = await this.loanRepository.findById(paymentInput.loanId)
             if (!loan) continue
 
-            // Recalculate commission using loantype's default if not provided
             const actualCommission = paymentInput.comission !== undefined
               ? new Decimal(paymentInput.comission)
               : loan.loantypeRelation?.loanPaymentComission
                 ? new Decimal(loan.loantypeRelation.loanPaymentComission.toString())
                 : new Decimal(0)
 
-            const isTransfer = paymentInput.paymentMethod === 'MONEY_TRANSFER'
-            const destinationAccountId = isTransfer ? bankAccount?.id : cashAccount?.id
-
-            // Calcular profit del pago
-            const totalProfit = new Decimal(loan.profitAmount.toString())
-            const totalDebt = new Decimal(loan.totalDebtAcquired.toString())
-            const isBadDebt = !!loan.badDebtDate
-
-            const { profitAmount, returnToCapital } = calculatePaymentProfit(
-              paymentAmount,
-              totalProfit,
-              totalDebt,
-              isBadDebt
-            )
-
-            const payment = await this.paymentRepository.create(
+            await this.paymentRepository.create(
               {
                 amount: paymentAmount,
                 comission: actualCommission,
@@ -1218,59 +753,7 @@ export class PaymentService {
               tx
             )
 
-            // Crear transacción INCOME
-            if (destinationAccountId) {
-              await this.transactionRepository.create(
-                {
-                  amount: paymentAmount,
-                  date: new Date(),
-                  type: 'INCOME',
-                  incomeSource: isTransfer ? 'BANK_LOAN_PAYMENT' : 'CASH_LOAN_PAYMENT',
-                  profitAmount,
-                  returnToCapital,
-                  destinationAccountId,
-                  loanId: loan.id,
-                  loanPaymentId: payment.id,
-                  leadId: existingRecord.lead,
-                  routeId,
-                  leadPaymentReceivedId: id,
-                },
-                tx
-              )
-            }
-
-            // Crear transacción EXPENSE por comisión si aplica
-            if (actualCommission.greaterThan(0) && cashAccount) {
-              await this.transactionRepository.create(
-                {
-                  amount: actualCommission,
-                  date: new Date(),
-                  type: 'EXPENSE',
-                  expenseSource: 'LOAN_PAYMENT_COMISSION',
-                  sourceAccountId: cashAccount.id,
-                  loanPaymentId: payment.id,
-                  leadId: existingRecord.lead,
-                  routeId,
-                },
-                tx
-              )
-            }
-
-            // Acumular nuevos cambios
-            console.log('[PaymentService] CREATING new payment for loan:', paymentInput.loanId)
-            if (isTransfer) {
-              newBankChange = newBankChange.plus(paymentAmount)
-              console.log('[PaymentService]   -> Added to newBankChange:', paymentAmount.toString())
-            } else {
-              newCashChange = newCashChange.plus(paymentAmount)
-              console.log('[PaymentService]   -> Added to newCashChange:', paymentAmount.toString())
-            }
-            newCashChange = newCashChange.minus(actualCommission)
-            console.log('[PaymentService]   -> Subtracted commission from newCashChange:', actualCommission.toString())
-            console.log('[PaymentService]   -> Current newCashChange:', newCashChange.toString())
-            console.log('[PaymentService]   -> Current newBankChange:', newBankChange.toString())
-
-            // Actualizar métricas del préstamo
+            // Update loan metrics
             const currentTotalPaid = new Decimal(loan.totalPaid.toString())
             const currentPending = new Decimal(loan.pendingAmountStored.toString())
             const updatedPending = currentPending.minus(paymentAmount)
@@ -1291,232 +774,118 @@ export class PaymentService {
         }
       }
 
-      console.log('[PaymentService] After processing all payments:')
-      console.log('[PaymentService]   newCashChange (before transfer adj):', newCashChange.toString())
-      console.log('[PaymentService]   newBankChange (before transfer adj):', newBankChange.toString())
-
-      // Solo aplicar ajuste de transferencia si la distribución cambió
-      let newCashToBank = new Decimal(0)
-
-      if (distributionChanged) {
-        // Verificar si quedan pagos después de las eliminaciones (para determinar newBankPaidAmount)
-        const remainingPaymentsForCalc = await tx.loanPayment.count({
-          where: { leadPaymentReceived: id },
-        })
-
-        // El nuevo bankPaidAmount viene del input (distribución del modal).
-        // Si no hay pagos restantes, bankPaidAmount debe ser 0.
-        // Si hay pagos y el input no especifica bankPaidAmount, mantener el existente.
-        const newBankPaidAmount = remainingPaymentsForCalc === 0
-          ? new Decimal(0)
-          : bankPaidAmount  // bankPaidAmount ya viene del input o del existingRecord
-
-        console.log('[PaymentService] New transfer adjustment calculation (distribution changed):')
-        console.log('[PaymentService]   newBankChange (from MONEY_TRANSFER payments):', newBankChange.toString())
-        console.log('[PaymentService]   newBankPaidAmount (from input/distribution):', newBankPaidAmount.toString())
-        console.log('[PaymentService]   remainingPayments:', remainingPaymentsForCalc)
-
-        // Ajustar newCashChange y newBankChange si hay transferencia de efectivo a banco
-        newCashToBank = newBankPaidAmount.minus(newBankChange)
-        console.log('[PaymentService]   newCashToBank (efectivo que irá al banco):', newCashToBank.toString())
-
-        if (newCashToBank.greaterThan(0)) {
-          newCashChange = newCashChange.minus(newCashToBank)
-          newBankChange = newBankChange.plus(newCashToBank)
-          console.log('[PaymentService]   -> Adjusted newCashChange:', newCashChange.toString())
-          console.log('[PaymentService]   -> Adjusted newBankChange:', newBankChange.toString())
-        }
-
-        // Manejar la transacción TRANSFER según los cambios en cashToBank
-        // Always check for existing TRANSFER first to prevent duplicates
-        console.log('[PaymentService] Handling TRANSFER transaction:')
-        console.log('[PaymentService]   existingCashToBank:', existingCashToBank.toString())
-        console.log('[PaymentService]   newCashToBank:', newCashToBank.toString())
-
-        // Buscar transacción TRANSFER existente
-        const existingTransferTx = await tx.transaction.findFirst({
-          where: {
-            leadPaymentReceived: id,
-            type: 'TRANSFER',
-          },
-        })
-
-        console.log('[PaymentService]   Existing TRANSFER:', existingTransferTx?.id || 'none',
-          existingTransferTx ? `amount: ${existingTransferTx.amount}` : '')
-
-        if (newCashToBank.isZero()) {
-          // No transfer needed - delete if exists
-          if (existingTransferTx) {
-            console.log('[PaymentService]   -> Deleting TRANSFER transaction (no longer needed)')
-            await tx.transaction.delete({
-              where: { id: existingTransferTx.id },
-            })
-          }
-        } else if (existingTransferTx) {
-          // TRANSFER exists - update it with new amount if different
-          if (!new Decimal(existingTransferTx.amount.toString()).equals(newCashToBank)) {
-            console.log('[PaymentService]   -> Updating TRANSFER transaction:', newCashToBank.toString())
-            await tx.transaction.update({
-              where: { id: existingTransferTx.id },
-              data: { amount: newCashToBank },
-            })
-          } else {
-            console.log('[PaymentService]   -> TRANSFER amount unchanged, skipping update')
-          }
-        } else if (cashAccount && bankAccount) {
-          // No TRANSFER exists and we need one - create it
-          console.log('[PaymentService]   -> Creating new TRANSFER transaction:', newCashToBank.toString())
-          await this.transactionRepository.create(
-            {
-              amount: newCashToBank,
-              date: existingRecord.createdAt, // Use the original LeadPaymentReceived date
-              type: 'TRANSFER',
-              sourceAccountId: cashAccount.id,
-              destinationAccountId: bankAccount.id,
-              leadId: existingRecord.lead,
-              routeId,
-              leadPaymentReceivedId: id,
-            },
-            tx
-          )
-        }
-      } else {
-        console.log('[PaymentService] Skipping new transfer adjustment (distribution NOT changed)')
-      }
-
-      // 5. Calcular y aplicar cambios netos de balance
-      console.log('[PaymentService] ====== FINAL BALANCE CALCULATION ======')
-      console.log('[PaymentService] Cash and bank changes calculated from payment methods:')
-      console.log('[PaymentService]   oldCashChange:', oldCashChange.toString())
-      console.log('[PaymentService]   oldBankChange:', oldBankChange.toString())
-      console.log('[PaymentService]   newCashChange:', newCashChange.toString())
-      console.log('[PaymentService]   newBankChange:', newBankChange.toString())
-
-      const netCashChange = newCashChange.minus(oldCashChange)
-      const netBankChange = newBankChange.minus(oldBankChange)
-
-      console.log('[PaymentService] NET CHANGE CALCULATION:')
-      console.log('[PaymentService]   netCashChange = newCashChange - oldCashChange')
-      console.log('[PaymentService]   netCashChange = ' + newCashChange.toString() + ' - ' + oldCashChange.toString() + ' = ' + netCashChange.toString())
-      console.log('[PaymentService]   netBankChange = newBankChange - oldBankChange')
-      console.log('[PaymentService]   netBankChange = ' + newBankChange.toString() + ' - ' + oldBankChange.toString() + ' = ' + netBankChange.toString())
-      console.log('[PaymentService] EXPECTED: If deleting all payments, netCashChange should be NEGATIVE')
-
-      // Log balance BEFORE adjustment
-      const cashBalanceBefore = cashAccount ? await tx.account.findUnique({ where: { id: cashAccount.id } }) : null
-      const bankBalanceBefore = bankAccount ? await tx.account.findUnique({ where: { id: bankAccount.id } }) : null
-      console.log('[PaymentService] Balances BEFORE adjustment:')
-      console.log('[PaymentService]   Cash account:', {
-        id: cashAccount?.id,
-        type: cashAccount?.type,
-        amount: cashBalanceBefore?.amount?.toString(),
-      })
-      console.log('[PaymentService]   Bank account:', {
-        id: bankAccount?.id,
-        type: bankAccount?.type,
-        amount: bankBalanceBefore?.amount?.toString(),
-      })
-
-      if (cashAccount && !netCashChange.isZero()) {
-        console.log('[PaymentService] Applying netCashChange to cash account:', netCashChange.toString())
-        console.log('[PaymentService]   Formula: ' + cashBalanceBefore?.amount?.toString() + ' + (' + netCashChange.toString() + ')')
-        await this.accountRepository.addToBalance(cashAccount.id, netCashChange, tx)
-      } else {
-        console.log('[PaymentService] No cash balance change needed (netCashChange is zero)')
-      }
-
-      if (bankAccount && !netBankChange.isZero()) {
-        console.log('[PaymentService] Applying netBankChange to bank account:', netBankChange.toString())
-        console.log('[PaymentService]   Formula: ' + bankBalanceBefore?.amount?.toString() + ' + (' + netBankChange.toString() + ')')
-        await this.accountRepository.addToBalance(bankAccount.id, netBankChange, tx)
-      } else {
-        console.log('[PaymentService] No bank balance change needed (netBankChange is zero)')
-      }
-
-      // Log balance AFTER adjustment
-      const cashBalanceAfter = cashAccount ? await tx.account.findUnique({ where: { id: cashAccount.id } }) : null
-      const bankBalanceAfter = bankAccount ? await tx.account.findUnique({ where: { id: bankAccount.id } }) : null
-      console.log('[PaymentService] Balances AFTER adjustment:')
-      console.log('[PaymentService]   Cash: ' + cashBalanceBefore?.amount?.toString() + ' → ' + cashBalanceAfter?.amount?.toString())
-      console.log('[PaymentService]   Bank: ' + bankBalanceBefore?.amount?.toString() + ' → ' + bankBalanceAfter?.amount?.toString())
-
-      // Verificar si quedan pagos después de las eliminaciones
-      const remainingPayments = await tx.loanPayment.count({
+      // 5. Check if any payments remain
+      const remainingPayments = await tx.loanPayment.findMany({
         where: { leadPaymentReceived: id },
+        include: { loanRelation: true },
       })
 
-      console.log('[PaymentService] ====== SUMMARY ======')
-      console.log('[PaymentService] Remaining payments after operation:', remainingPayments)
-      console.log('[PaymentService] Final netCashChange applied:', netCashChange.toString())
-      console.log('[PaymentService] Final netBankChange applied:', netBankChange.toString())
-      console.log('[PaymentService] Cash balance changed from', cashBalanceBefore?.amount?.toString(), 'to', cashBalanceAfter?.amount?.toString())
-      console.log('[PaymentService] ====== END BALANCE CALCULATION ======')
-
-      // Si no quedan pagos, eliminar el LeadPaymentReceived y transacciones restantes
-      if (remainingPayments === 0) {
-        console.log('[PaymentService] No remaining payments, deleting LeadPaymentReceived and related transactions')
-
-        // Eliminar cualquier transacción restante vinculada al LeadPaymentReceived
-        await tx.transaction.deleteMany({
-          where: { leadPaymentReceived: id },
-        })
-
-        // Eliminar el LeadPaymentReceived
+      if (remainingPayments.length === 0) {
+        // Delete the LeadPaymentReceived
         await tx.leadPaymentReceived.delete({
           where: { id },
         })
-
-        return null // Indicar que fue eliminado
+        return null
       }
 
-      // Obtener pagos actuales después de la actualización para calcular montos reales
-      const allCurrentPayments = await tx.loanPayment.findMany({
-        where: { leadPaymentReceived: id },
-      })
+      // 6. Recreate AccountEntry for all remaining payments
+      for (const payment of remainingPayments) {
+        const loan = payment.loanRelation
+        const paymentAmount = new Decimal(payment.amount.toString())
+        const comissionAmount = new Decimal(payment.comission.toString())
 
-      // Calcular montos base desde los métodos de pago actuales
-      let rawCashFromPayments = new Decimal(0)
-      let rawBankFromPayments = new Decimal(0)
+        const totalProfit = new Decimal(loan.profitAmount.toString())
+        const totalDebt = new Decimal(loan.totalDebtAcquired.toString())
+        const isBadDebt = !!loan.badDebtDate
 
-      for (const payment of allCurrentPayments) {
-        if (payment.paymentMethod === 'MONEY_TRANSFER') {
-          rawBankFromPayments = rawBankFromPayments.plus(new Decimal(payment.amount.toString()))
-        } else {
-          rawCashFromPayments = rawCashFromPayments.plus(new Decimal(payment.amount.toString()))
+        const { profitAmount, returnToCapital } = calculatePaymentProfit(
+          paymentAmount,
+          totalProfit,
+          totalDebt,
+          isBadDebt
+        )
+
+        const isTransfer = payment.paymentMethod === 'MONEY_TRANSFER'
+        const destinationAccountId = isTransfer ? bankAccount?.id : cashAccount?.id
+
+        // CREDIT: Payment received
+        if (destinationAccountId) {
+          await balanceService.createEntry({
+            accountId: destinationAccountId,
+            entryType: 'CREDIT',
+            amount: paymentAmount,
+            sourceType: isTransfer ? 'LOAN_PAYMENT_BANK' : 'LOAN_PAYMENT_CASH',
+            entryDate: payment.receivedAt,
+            loanId: loan.id,
+            loanPaymentId: payment.id,
+            leadPaymentReceivedId: id,
+            profitAmount,
+            returnToCapital,
+            snapshotLeadId: existingRecord.lead,
+            snapshotRouteId: routeId,
+          }, tx)
+        }
+
+        // Track direct bank payments for cashToBank calculation
+        if (isTransfer) {
+          directBankPayments = directBankPayments.plus(paymentAmount)
+        }
+
+        // DEBIT: Commission
+        if (comissionAmount.greaterThan(0) && cashAccount) {
+          await balanceService.createEntry({
+            accountId: cashAccount.id,
+            entryType: 'DEBIT',
+            amount: comissionAmount,
+            sourceType: 'PAYMENT_COMMISSION',
+            entryDate: payment.receivedAt,
+            loanPaymentId: payment.id,
+            leadPaymentReceivedId: id,
+            snapshotLeadId: existingRecord.lead,
+            snapshotRouteId: routeId,
+          }, tx)
         }
       }
 
-      // IMPORTANTE: cashPaidAmount y bankPaidAmount deben incluir el efecto del cashToBank (TRANSFER)
-      // Si distributionChanged, usamos los valores del input (que ya incluyen cashToBank)
-      // Si no, calculamos basándonos en el cashToBank actual
-      let finalCashPaid: Decimal
-      let finalBankPaid: Decimal
+      // 7. Handle cash-to-bank transfer
+      const cashToBank = bankPaidAmount.minus(directBankPayments)
 
-      if (distributionChanged) {
-        // Usar los valores del input (ya tienen cashToBank aplicado)
-        finalCashPaid = cashPaidAmount
-        finalBankPaid = bankPaidAmount
-      } else {
-        // Sin cambio de distribución, mantener los valores existentes
-        finalCashPaid = new Decimal(existingRecord.cashPaidAmount.toString())
-        finalBankPaid = new Decimal(existingRecord.bankPaidAmount.toString())
+      if (cashToBank.greaterThan(0) && cashAccount && bankAccount) {
+        await balanceService.createTransfer({
+          sourceAccountId: cashAccount.id,
+          destinationAccountId: bankAccount.id,
+          amount: cashToBank,
+          entryDate: existingRecord.createdAt,
+          description: `Depósito efectivo a banco - LPR ${id}`,
+          snapshotLeadId: existingRecord.lead,
+          snapshotRouteId: routeId,
+          leadPaymentReceivedId: id,
+        }, tx)
       }
 
-      console.log('[PaymentService] Final paid amounts (including cashToBank effect):')
-      console.log('[PaymentService]   rawCashFromPayments:', rawCashFromPayments.toString())
-      console.log('[PaymentService]   rawBankFromPayments:', rawBankFromPayments.toString())
-      console.log('[PaymentService]   finalCashPaid:', finalCashPaid.toString())
-      console.log('[PaymentService]   finalBankPaid:', finalBankPaid.toString())
-      console.log('[PaymentService]   distributionChanged:', distributionChanged)
+      // 8. Handle falco
+      if (falcoAmount.greaterThan(0) && cashAccount) {
+        await balanceService.createEntry({
+          accountId: cashAccount.id,
+          entryType: 'DEBIT',
+          amount: falcoAmount,
+          sourceType: 'FALCO_LOSS',
+          entryDate: existingRecord.createdAt,
+          description: `Pérdida por falco - LPR ${id}`,
+          leadPaymentReceivedId: id,
+          snapshotLeadId: existingRecord.lead,
+          snapshotRouteId: routeId,
+        }, tx)
+      }
 
-      // Actualizar el registro LeadPaymentReceived
+      // 9. Update the LeadPaymentReceived record
       return this.paymentRepository.updateLeadPaymentReceived(
         id,
         {
           expectedAmount,
           paidAmount,
-          cashPaidAmount: finalCashPaid,
-          bankPaidAmount: finalBankPaid,
+          cashPaidAmount,
+          bankPaidAmount,
           falcoAmount,
           paymentStatus,
         },
@@ -1581,9 +950,11 @@ export class PaymentService {
 
     // Get the cash account for the lead
     const cashAccount = leadPaymentReceived.leadRelation?.routes?.[0]?.accounts?.[0]
-    const routeId = leadPaymentReceived.leadRelation?.routes?.[0]?.id
+    const routeId = leadPaymentReceived.leadRelation?.routes?.[0]?.id || ''
 
     return this.prisma.$transaction(async (tx) => {
+      const balanceService = new BalanceService(tx as any)
+
       // 1. Create the FalcoCompensatoryPayment record
       const falcoCompensatoryPayment = await tx.falcoCompensatoryPayment.create({
         data: {
@@ -1592,54 +963,23 @@ export class PaymentService {
         },
       })
 
-      // 2. Find and update the FALCO_LOSS transaction
-      const falcoLossTransaction = await tx.transaction.findFirst({
-        where: {
-          leadPaymentReceived: input.leadPaymentReceivedId,
-          type: 'EXPENSE',
-          expenseSource: 'FALCO_LOSS',
-        },
-      })
-
-      if (falcoLossTransaction) {
-        const newCompensatedTotal = totalCompensated.plus(compensationAmount)
-        const newLossAmount = originalFalcoAmount.minus(newCompensatedTotal)
-
-        // Update the transaction amount and description
-        const isFullyCompensated = newLossAmount.lessThanOrEqualTo(0)
-
-        await tx.transaction.update({
-          where: { id: falcoLossTransaction.id },
-          data: {
-            amount: isFullyCompensated ? new Decimal(0) : newLossAmount,
-            description: isFullyCompensated
-              ? `Pérdida por falco - COMPLETAMENTE COMPENSADO`
-              : `Pérdida por falco - PARCIALMENTE COMPENSADO (${newCompensatedTotal} de ${originalFalcoAmount})`,
-          },
-        })
-      }
-
-      // 3. Return money to the cash account (compensated amount)
+      // 2. CREDIT: Return money to the cash account (compensated amount)
       if (cashAccount) {
-        await this.accountRepository.addToBalance(cashAccount.id, compensationAmount, tx)
-      }
+        const newCompensatedTotal = totalCompensated.plus(compensationAmount)
+        const isFullyCompensated = originalFalcoAmount.minus(newCompensatedTotal).lessThanOrEqualTo(0)
 
-      // 4. Create an INCOME transaction for the compensation
-      if (cashAccount && routeId) {
-        await this.transactionRepository.create(
-          {
-            amount: compensationAmount,
-            date: new Date(),
-            type: 'INCOME',
-            incomeSource: 'FALCO_COMPENSATORY',
-            description: `Compensación de falco - ${input.leadPaymentReceivedId}`,
-            sourceAccountId: cashAccount.id,
-            leadId: leadPaymentReceived.lead,
-            routeId,
-            leadPaymentReceivedId: input.leadPaymentReceivedId,
-          },
-          tx
-        )
+        await balanceService.createEntry({
+          accountId: cashAccount.id,
+          entryType: 'CREDIT',
+          amount: compensationAmount,
+          sourceType: 'FALCO_COMPENSATORY',
+          description: isFullyCompensated
+            ? `Compensación de falco - COMPLETA - LPR ${input.leadPaymentReceivedId}`
+            : `Compensación de falco (${newCompensatedTotal} de ${originalFalcoAmount}) - LPR ${input.leadPaymentReceivedId}`,
+          leadPaymentReceivedId: input.leadPaymentReceivedId,
+          snapshotLeadId: leadPaymentReceived.lead,
+          snapshotRouteId: routeId,
+        }, tx)
       }
 
       return falcoCompensatoryPayment

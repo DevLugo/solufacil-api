@@ -67,6 +67,7 @@ const MIGRATION_ORDER = [
   'PortfolioCleanup', 'LeadPaymentReceived',
   'Loan',
   'LoanPayment', 'DocumentPhoto', 'CommissionPayment', 'Transaction',
+  'AccountEntry',  // Nueva tabla de ledger - después de Transaction
   'FalcoCompensatoryPayment',
   'AuditLog', 'ReportExecutionLog', 'DocumentNotificationLog',
 ]
@@ -119,6 +120,7 @@ function getForeignKeyColumns(tableName: string): Record<string, string> {
     DocumentPhoto: { personalData: 'PersonalData', loan: 'Loan', uploadedBy: 'User' },
     CommissionPayment: { loan: 'Loan', employee: 'Employee' },
     Transaction: { loan: 'Loan', loanPayment: 'LoanPayment', sourceAccount: 'Account', destinationAccount: 'Account', lead: 'Employee', leadPaymentReceived: 'LeadPaymentReceived' },
+    AccountEntry: { accountId: 'Account', loanId: 'Loan', loanPaymentId: 'LoanPayment', leadPaymentReceivedId: 'LeadPaymentReceived', destinationAccountId: 'Account' },
     FalcoCompensatoryPayment: { leadPaymentReceived: 'LeadPaymentReceived' },
     ReportExecutionLog: { reportConfig: 'ReportConfig' },
   }
@@ -305,6 +307,34 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
           OR (t.type = 'INCOME' AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '') AND (t."destinationAccount" IS NULL OR t."destinationAccount" = ''))
         )`
 
+    case 'AccountEntry':
+      return `INSERT INTO "${tgt}"."AccountEntry" (
+        id, "accountId", amount, "entryType", "sourceType",
+        "profitAmount", "returnToCapital",
+        "snapshotLeadId", "snapshotRouteId",
+        "entryDate", description,
+        "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
+        "syncId", "createdAt"
+      )
+      SELECT
+        e.id, e."accountId", e.amount,
+        e."entryType"::text::"${tgt}"."AccountEntryType",
+        e."sourceType"::text::"${tgt}"."SourceType",
+        COALESCE(e."profitAmount", 0),
+        COALESCE(e."returnToCapital", 0),
+        COALESCE(e."snapshotLeadId", ''),
+        COALESCE(e."snapshotRouteId", ''),
+        e."entryDate",
+        COALESCE(e.description, ''),
+        CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = e."loanId") THEN e."loanId" ELSE NULL END,
+        CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."LoanPayment" WHERE id = e."loanPaymentId") THEN e."loanPaymentId" ELSE NULL END,
+        CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."LeadPaymentReceived" WHERE id = e."leadPaymentReceivedId") THEN e."leadPaymentReceivedId" ELSE NULL END,
+        CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = e."destinationAccountId") THEN e."destinationAccountId" ELSE NULL END,
+        COALESCE(e."syncId", gen_random_uuid()::text),
+        e."createdAt"
+      FROM "${src}"."AccountEntry" e
+      WHERE EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = e."accountId")`
+
     case 'FalcoCompensatoryPayment':
       return `INSERT INTO "${tgt}"."FalcoCompensatoryPayment" (id, amount, "leadPaymentReceived", "createdAt", "updatedAt")
         SELECT f.id, f.amount, f."leadPaymentReceived", f."createdAt", COALESCE(f."updatedAt", f."createdAt", NOW())
@@ -421,6 +451,11 @@ function transformRow(tableName: string, row: Record<string, any>, fkSets: Recor
       // INCOME transactions with valid destination are allowed
       const isIncomeWithValidDest = row.type === 'INCOME' && hasValidDest
       if (!hasValidSource && !hasValidDest && !isIncomeWithoutAccount && !isIncomeWithValidDest) return null
+      break
+    case 'AccountEntry':
+      // accountId is required
+      if (!row.accountId) return null
+      if (fkSets.accountId && !fkSets.accountId.has(row.accountId)) return null
       break
   }
 
@@ -715,6 +750,395 @@ async function migrateEmployeeRoutes(): Promise<MigrationResult> {
 }
 
 // ============================================================================
+// BALANCE RECONCILIATION
+// ============================================================================
+
+interface ReconciliationResult {
+  accountId: string
+  accountName: string
+  storedBalance: number
+  calculatedBalance: number
+  difference: number
+  adjustmentCreated: boolean
+}
+
+/**
+ * Convierte Transaction → AccountEntry
+ * Mapea los tipos de transacción a los nuevos SourceType
+ *
+ * IMPORTANTE: profitAmount y returnToCapital están en transacciones INCOME (sin sourceAccount)
+ * vinculadas por loanPayment. Hacemos JOIN para traer esos datos.
+ */
+async function convertTransactionsToEntries(): Promise<number> {
+  console.log('\n📊 Convirtiendo Transaction → AccountEntry...\n')
+  const client = await targetPool.connect()
+
+  try {
+    // Mapping de incomeSource/expenseSource a SourceType
+    // IMPORTANTE: Gastos negativos (devoluciones) se convierten a CREDIT con EXPENSE_REFUND
+    const result = await client.query(`
+      INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+        id, "accountId", amount, "entryType", "sourceType",
+        "profitAmount", "returnToCapital",
+        "snapshotLeadId", "snapshotRouteId",
+        "entryDate", description,
+        "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
+        "syncId", "createdAt"
+      )
+      SELECT
+        gen_random_uuid()::text,
+        t."sourceAccount",
+        ABS(t.amount),
+        CASE
+          WHEN t.type = 'INCOME' THEN 'CREDIT'
+          -- Gastos negativos son devoluciones = CREDIT
+          WHEN t.type = 'EXPENSE' AND t.amount < 0 THEN 'CREDIT'
+          WHEN t.type = 'EXPENSE' THEN 'DEBIT'
+          WHEN t.type = 'TRANSFER' THEN 'DEBIT'
+          ELSE 'DEBIT'
+        END::"${TARGET_SCHEMA}"."AccountEntryType",
+        CASE
+          -- Income sources
+          WHEN t."incomeSource" = 'CASH_LOAN_PAYMENT' THEN 'LOAN_PAYMENT_CASH'
+          WHEN t."incomeSource" = 'BANK_LOAN_PAYMENT' THEN 'LOAN_PAYMENT_BANK'
+          -- Gastos negativos = devoluciones
+          WHEN t.type = 'EXPENSE' AND t.amount < 0 THEN 'EXPENSE_REFUND'
+          -- Expense sources con mapping específico
+          WHEN t."expenseSource" = 'LOAN_GRANTED' THEN 'LOAN_GRANT'
+          WHEN t."expenseSource" = 'LOAN_GRANTED_COMISSION' THEN 'LOAN_GRANT_COMMISSION'
+          WHEN t."expenseSource" = 'LOAN_PAYMENT_COMISSION' THEN 'PAYMENT_COMMISSION'
+          WHEN t."expenseSource" = 'GASOLINE' THEN 'GASOLINE'
+          WHEN t."expenseSource" = 'GASOLINE_TOKA' THEN 'GASOLINE_TOKA'
+          WHEN t."expenseSource" = 'NOMINA_SALARY' THEN 'NOMINA_SALARY'
+          WHEN t."expenseSource" = 'EXTERNAL_SALARY' THEN 'EXTERNAL_SALARY'
+          WHEN t."expenseSource" = 'VIATIC' THEN 'VIATIC'
+          WHEN t."expenseSource" = 'TRAVEL_EXPENSES' THEN 'TRAVEL_EXPENSES'
+          WHEN t."expenseSource" = 'FALCO_LOSS' THEN 'FALCO_LOSS'
+          -- Otros gastos operativos (antes iban a BALANCE_ADJUSTMENT)
+          WHEN t."expenseSource" = 'EMPLOYEE_EXPENSE' THEN 'EMPLOYEE_EXPENSE'
+          WHEN t."expenseSource" = 'GENERAL_EXPENSE' THEN 'GENERAL_EXPENSE'
+          WHEN t."expenseSource" = 'CAR_PAYMENT' THEN 'CAR_PAYMENT'
+          WHEN t."expenseSource" = 'BANK_EXPENSE' THEN 'BANK_EXPENSE'
+          WHEN t."expenseSource" = 'OTRO' THEN 'OTHER_EXPENSE'
+          -- Transfer
+          WHEN t.type = 'TRANSFER' THEN 'TRANSFER_OUT'
+          -- Default: SOLO si no hay mapping (no debería pasar)
+          ELSE 'OTHER_EXPENSE'
+        END::"${TARGET_SCHEMA}"."SourceType",
+        COALESCE(t."profitAmount", 0),
+        COALESCE(t."returnToCapital", 0),
+        COALESCE(t."snapshotLeadId", ''),
+        COALESCE(t."snapshotRouteId", ''),
+        t.date,
+        COALESCE(t.description, ''),
+        t.loan,
+        t."loanPayment",
+        t."leadPaymentReceived",
+        t."destinationAccount",
+        gen_random_uuid()::text,
+        t."createdAt"
+      FROM "${TARGET_SCHEMA}"."Transaction" t
+      WHERE t."sourceAccount" IS NOT NULL
+    `)
+
+    const debitCount = result.rowCount || 0
+    console.log(`   ✅ ${debitCount} entries DEBIT/CREDIT creados desde Transaction`)
+
+    // Crear AccountEntry desde transacciones INCOME de producción
+    // (estas transacciones no tienen sourceAccount, por eso no se migraron a Transaction local)
+    // Los datos de profitAmount y returnToCapital están en estas transacciones
+    if (!SAME_DATABASE) {
+      console.log('   📊 Creando entries desde transacciones INCOME de producción...')
+      const sourceClient = await sourcePool.connect()
+      try {
+        // Obtener mapeo de rutas a cuentas EMPLOYEE_CASH_FUND
+        const routeAccountsResult = await client.query(`
+          SELECT r.id as route_id, r.name as route_name, a.id as account_id
+          FROM "${TARGET_SCHEMA}"."Route" r
+          JOIN "${TARGET_SCHEMA}"."_RouteAccounts" ra ON ra."B" = r.id
+          JOIN "${TARGET_SCHEMA}"."Account" a ON a.id = ra."A"
+          WHERE a.type = 'EMPLOYEE_CASH_FUND'
+        `)
+        const routeToAccount = new Map(routeAccountsResult.rows.map(r => [r.route_id, r.account_id]))
+
+        // Obtener cuenta BANK
+        const bankResult = await client.query(`
+          SELECT id FROM "${TARGET_SCHEMA}"."Account" WHERE type = 'BANK' LIMIT 1
+        `)
+        const bankAccountId = bankResult.rows[0]?.id
+
+        // Obtener TODAS las transacciones INCOME de producción sin sourceAccount
+        // Incluye pagos de préstamos y otros ingresos (MONEY_INVESMENT, MULTA, etc.)
+        const incomeTransactions = await sourceClient.query(`
+          SELECT
+            t.id, t.amount, t."profitAmount", t."returnToCapital",
+            t."snapshotLeadId", t."snapshotRouteId", t.date, t.description,
+            t.loan, t."loanPayment", t."leadPaymentReceived", t."createdAt",
+            t."incomeSource",
+            lp."paymentMethod"
+          FROM "Transaction" t
+          LEFT JOIN "LoanPayment" lp ON lp.id = t."loanPayment"
+          WHERE t.type = 'INCOME'
+            AND t."sourceAccount" IS NULL
+        `)
+
+        let insertedCount = 0
+        let skippedCount = 0
+
+        for (const tx of incomeTransactions.rows) {
+          // Determinar la cuenta: BANK para transferencias, EMPLOYEE_CASH_FUND para efectivo
+          let accountId: string | null = null
+          if (tx.paymentMethod === 'MONEY_TRANSFER') {
+            accountId = bankAccountId
+          } else {
+            accountId = routeToAccount.get(tx.snapshotRouteId) || null
+          }
+
+          if (!accountId) {
+            skippedCount++
+            continue
+          }
+
+          // Determinar sourceType basado en incomeSource y método de pago
+          // MONEY_INVESMENT y MULTA NO son cobranza, usan tipos específicos
+          let sourceType: string
+          let profitAmount: number
+          let returnToCapital: number
+
+          if (tx.incomeSource === 'MONEY_INVESMENT') {
+            sourceType = 'MONEY_INVESTMENT' // Inversión de capital (NO es cobranza)
+            profitAmount = 0 // Inversión no es ganancia
+            returnToCapital = 0
+          } else if (tx.incomeSource === 'MULTA') {
+            sourceType = 'MULTA' // Multas cobradas (NO es cobranza)
+            profitAmount = Math.abs(tx.amount) // 100% del monto es ganancia
+            returnToCapital = 0
+          } else if (tx.paymentMethod === 'MONEY_TRANSFER') {
+            sourceType = 'LOAN_PAYMENT_BANK'
+            profitAmount = tx.profitAmount || 0
+            returnToCapital = tx.returnToCapital || 0
+          } else {
+            sourceType = 'LOAN_PAYMENT_CASH'
+            profitAmount = tx.profitAmount || 0
+            returnToCapital = tx.returnToCapital || 0
+          }
+
+          try {
+            await client.query(`
+              INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+                id, "accountId", amount, "entryType", "sourceType",
+                "profitAmount", "returnToCapital",
+                "snapshotLeadId", "snapshotRouteId",
+                "entryDate", description,
+                "loanId", "loanPaymentId", "leadPaymentReceivedId",
+                "syncId", "createdAt"
+              ) VALUES (
+                gen_random_uuid()::text,
+                $1, $2,
+                'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType",
+                $3::"${TARGET_SCHEMA}"."SourceType",
+                $4, $5,
+                COALESCE($6, ''), COALESCE($7, ''),
+                $8, COALESCE($9, ''),
+                $10, $11, $12,
+                gen_random_uuid()::text, $13
+              )
+            `, [
+              accountId,
+              Math.abs(tx.amount),
+              sourceType,
+              profitAmount,
+              returnToCapital,
+              tx.snapshotLeadId,
+              tx.snapshotRouteId,
+              tx.date,
+              tx.description,
+              tx.loan,
+              tx.loanPayment,
+              tx.leadPaymentReceived,
+              tx.createdAt
+            ])
+            insertedCount++
+          } catch (err) {
+            skippedCount++
+          }
+        }
+
+        console.log(`   ✅ ${insertedCount} entries INCOME creados desde producción`)
+        if (skippedCount > 0) {
+          console.log(`   ⚠️  ${skippedCount} transacciones omitidas (sin cuenta mapeada)`)
+        }
+      } finally {
+        sourceClient.release()
+      }
+    }
+
+    // Crear entries CREDIT para el destino de transfers
+    const transferResult = await client.query(`
+      INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+        id, "accountId", amount, "entryType", "sourceType",
+        "profitAmount", "returnToCapital",
+        "snapshotLeadId", "snapshotRouteId",
+        "entryDate", description,
+        "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
+        "syncId", "createdAt"
+      )
+      SELECT
+        gen_random_uuid()::text,
+        t."destinationAccount",
+        ABS(t.amount),
+        'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType",
+        'TRANSFER_IN'::"${TARGET_SCHEMA}"."SourceType",
+        0,
+        0,
+        COALESCE(t."snapshotLeadId", ''),
+        COALESCE(t."snapshotRouteId", ''),
+        t.date,
+        COALESCE(t.description, ''),
+        NULL,
+        NULL,
+        NULL,
+        t."sourceAccount",
+        gen_random_uuid()::text,
+        t."createdAt"
+      FROM "${TARGET_SCHEMA}"."Transaction" t
+      WHERE t.type = 'TRANSFER'
+        AND t."destinationAccount" IS NOT NULL
+    `)
+
+    const creditCount = transferResult.rowCount || 0
+    console.log(`   ✅ ${creditCount} entries TRANSFER_IN creados para destinos de transferencias`)
+
+    return debitCount + creditCount
+  } finally {
+    client.release()
+  }
+}
+
+async function reconcileBalances(): Promise<ReconciliationResult[]> {
+  console.log('\n💰 Reconciliando balances de cuentas...\n')
+  const client = await targetPool.connect()
+  const results: ReconciliationResult[] = []
+
+  try {
+    // Get all accounts with their stored balance
+    const accounts = await client.query(`
+      SELECT id, name, amount::numeric as amount
+      FROM "${TARGET_SCHEMA}"."Account"
+    `)
+
+    for (const account of accounts.rows) {
+      const storedBalance = parseFloat(account.amount) || 0
+
+      // Calculate balance from AccountEntry
+      const entrySum = await client.query(`
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN "entryType" = 'CREDIT' THEN amount
+            WHEN "entryType" = 'DEBIT' THEN -amount
+            ELSE 0
+          END
+        ), 0)::numeric as total
+        FROM "${TARGET_SCHEMA}"."AccountEntry"
+        WHERE "accountId" = $1
+      `, [account.id])
+
+      const calculatedBalance = parseFloat(entrySum.rows[0].total) || 0
+      const difference = storedBalance - calculatedBalance
+
+      const result: ReconciliationResult = {
+        accountId: account.id,
+        accountName: account.name,
+        storedBalance,
+        calculatedBalance,
+        difference,
+        adjustmentCreated: false,
+      }
+
+      // If there's a difference, create an adjustment entry
+      if (Math.abs(difference) > 0.0001) {
+        try {
+          const entryType = difference > 0 ? 'CREDIT' : 'DEBIT'
+          const amount = Math.abs(difference)
+
+          await client.query(`
+            INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+              id, "accountId", amount, "entryType", "sourceType",
+              "profitAmount", "returnToCapital",
+              "snapshotLeadId", "snapshotRouteId",
+              "entryDate", description,
+              "syncId", "createdAt"
+            ) VALUES (
+              gen_random_uuid()::text,
+              $1,
+              $2,
+              $3::"${TARGET_SCHEMA}"."AccountEntryType",
+              'BALANCE_ADJUSTMENT'::"${TARGET_SCHEMA}"."SourceType",
+              0, 0,
+              '', '',
+              NOW(),
+              'Ajuste de migración - diferencia entre Account.amount y SUM(AccountEntry)',
+              gen_random_uuid()::text,
+              NOW()
+            )
+          `, [account.id, amount, entryType])
+
+          result.adjustmentCreated = true
+          console.log(`   ⚖️  ${account.name}: ${storedBalance.toFixed(2)} vs ${calculatedBalance.toFixed(2)} → Ajuste ${entryType} ${amount.toFixed(2)}`)
+        } catch (err) {
+          console.log(`   ❌ Error creando ajuste para ${account.name}: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      } else {
+        console.log(`   ✅ ${account.name}: Balance OK (${storedBalance.toFixed(2)})`)
+      }
+
+      results.push(result)
+    }
+
+    // Summary
+    const adjustmentsCreated = results.filter(r => r.adjustmentCreated).length
+    const totalAccounts = results.length
+
+    console.log(`\n   📊 Resumen: ${totalAccounts} cuentas, ${adjustmentsCreated} ajustes creados`)
+
+    // Verify final reconciliation
+    console.log('\n   🔍 Verificando reconciliación final...')
+    let allOk = true
+    for (const result of results) {
+      if (result.storedBalance === 0 && result.calculatedBalance === 0) continue
+
+      const finalSum = await client.query(`
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN "entryType" = 'CREDIT' THEN amount
+            WHEN "entryType" = 'DEBIT' THEN -amount
+            ELSE 0
+          END
+        ), 0)::numeric as total
+        FROM "${TARGET_SCHEMA}"."AccountEntry"
+        WHERE "accountId" = $1
+      `, [result.accountId])
+
+      const finalCalculated = parseFloat(finalSum.rows[0].total) || 0
+      const finalDiff = Math.abs(result.storedBalance - finalCalculated)
+
+      if (finalDiff > 0.0001) {
+        console.log(`   ❌ ${result.accountName}: Aún difiere! ${result.storedBalance.toFixed(2)} vs ${finalCalculated.toFixed(2)}`)
+        allOk = false
+      }
+    }
+
+    if (allOk) {
+      console.log('   ✅ Todos los balances reconciliados correctamente')
+    }
+
+    return results
+  } finally {
+    client.release()
+  }
+}
+
+// ============================================================================
 // DIAGNOSTICS
 // ============================================================================
 
@@ -944,6 +1368,12 @@ async function main() {
     results.push(result)
     console.log(`   ${src}: ${result.success ? '✅' : '❌'} ${result.sourceCount} → ${result.targetCount}`)
   }
+
+  // Step 1: Convert Transaction → AccountEntry
+  await convertTransactionsToEntries()
+
+  // Step 2: Balance reconciliation - create BALANCE_ADJUSTMENT entries to match Account.amount
+  await reconcileBalances()
 
   console.log('\n' + '='.repeat(60))
   console.log('📊 RESUMEN')

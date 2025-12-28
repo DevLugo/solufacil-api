@@ -80,6 +80,7 @@ export const resolvers = {
   LoanPayment: paymentResolvers.LoanPayment,
   LeadPaymentReceived: paymentResolvers.LeadPaymentReceived,
   Transaction: transactionResolvers.Transaction,
+  AccountEntry: transactionResolvers.AccountEntry,
   Account: accountResolvers.Account,
   Route: routeResolvers.Route,
   Location: routeResolvers.Location,

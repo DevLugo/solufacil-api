@@ -1,11 +1,87 @@
 import type { GraphQLContext } from '@solufacil/graphql-schema'
-import type { TransactionType } from '@solufacil/database'
+import type { TransactionType, SourceType, AccountEntryType } from '@solufacil/database'
 import { TransactionService } from '../services/TransactionService'
 import { TransactionSummaryService } from '../services/TransactionSummaryService'
 import { authenticateUser } from '../middleware/auth'
 
 export const transactionResolvers = {
   Query: {
+    accountEntries: async (
+      _parent: unknown,
+      args: {
+        accountId?: string
+        routeId?: string
+        sourceType?: SourceType
+        entryType?: AccountEntryType
+        fromDate?: Date
+        toDate?: Date
+        limit?: number
+        offset?: number
+      },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      const where: any = {}
+
+      if (args.accountId) {
+        where.accountId = args.accountId
+      }
+      if (args.routeId) {
+        where.snapshotRouteId = args.routeId
+      }
+      if (args.sourceType) {
+        where.sourceType = args.sourceType
+      }
+      if (args.entryType) {
+        where.entryType = args.entryType
+      }
+      if (args.fromDate || args.toDate) {
+        where.entryDate = {}
+        if (args.fromDate) {
+          where.entryDate.gte = args.fromDate
+        }
+        if (args.toDate) {
+          where.entryDate.lte = args.toDate
+        }
+      }
+
+      const limit = args.limit ?? 50
+      const offset = args.offset ?? 0
+
+      const [entries, totalCount] = await Promise.all([
+        context.prisma.accountEntry.findMany({
+          where,
+          include: {
+            account: true,
+            loan: true,
+            loanPayment: true,
+          },
+          orderBy: { entryDate: 'desc' },
+          take: limit,
+          skip: offset,
+        }),
+        context.prisma.accountEntry.count({ where }),
+      ])
+
+      // Format as connection type
+      const edges = entries.map((entry, index) => ({
+        node: entry,
+        cursor: Buffer.from(`cursor:${offset + index}`).toString('base64'),
+      }))
+
+      return {
+        edges,
+        totalCount,
+        pageInfo: {
+          hasNextPage: offset + entries.length < totalCount,
+          hasPreviousPage: offset > 0,
+          startCursor: edges[0]?.cursor || null,
+          endCursor: edges[edges.length - 1]?.cursor || null,
+        },
+      }
+    },
+
     transactions: async (
       _parent: unknown,
       args: {
@@ -281,6 +357,60 @@ export const transactionResolvers = {
         include: {
           personalDataRelation: true,
         },
+      })
+    },
+  },
+
+  AccountEntry: {
+    account: async (
+      parent: { accountId: string; account?: unknown },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      if (parent.account) {
+        return parent.account
+      }
+      return context.prisma.account.findUnique({
+        where: { id: parent.accountId },
+      })
+    },
+
+    loan: async (
+      parent: { loanId?: string | null; loan?: unknown },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      if (parent.loan) {
+        return parent.loan
+      }
+      if (!parent.loanId) return null
+      return context.prisma.loan.findUnique({
+        where: { id: parent.loanId },
+      })
+    },
+
+    loanPayment: async (
+      parent: { loanPaymentId?: string | null; loanPayment?: unknown },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      if (parent.loanPayment) {
+        return parent.loanPayment
+      }
+      if (!parent.loanPaymentId) return null
+      return context.prisma.loanPayment.findUnique({
+        where: { id: parent.loanPaymentId },
+      })
+    },
+
+    destinationAccount: async (
+      parent: { destinationAccountId?: string | null },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      if (!parent.destinationAccountId) return null
+      return context.prisma.account.findUnique({
+        where: { id: parent.destinationAccountId },
       })
     },
   },

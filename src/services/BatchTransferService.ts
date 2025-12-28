@@ -1,8 +1,8 @@
 import { GraphQLError } from 'graphql'
 import { Decimal } from 'decimal.js'
 import type { PrismaClient, Account } from '@solufacil/database'
-import { TransactionRepository } from '../repositories/TransactionRepository'
 import { AccountRepository } from '../repositories/AccountRepository'
+import { BalanceService } from './BalanceService'
 
 export interface DrainRoutesInput {
   routeIds: string[]
@@ -29,7 +29,9 @@ export interface BatchTransferResult {
   message: string
   transactionsCreated: number
   totalAmount: Decimal
-  transactions: unknown[]
+  entries: unknown[]
+  /** @deprecated Use entries instead */
+  transactions?: unknown[] // Backwards compatibility alias
 }
 
 interface RouteWithCashAccount {
@@ -40,12 +42,12 @@ interface RouteWithCashAccount {
 }
 
 export class BatchTransferService {
-  private transactionRepository: TransactionRepository
   private accountRepository: AccountRepository
+  private balanceService: BalanceService
 
   constructor(private prisma: PrismaClient) {
-    this.transactionRepository = new TransactionRepository(prisma)
     this.accountRepository = new AccountRepository(prisma)
+    this.balanceService = new BalanceService(prisma)
   }
 
   /**
@@ -108,50 +110,57 @@ export class BatchTransferService {
         message: 'No hay saldo para transferir en las rutas seleccionadas',
         transactionsCreated: 0,
         totalAmount: new Decimal(0),
-        transactions: [],
+        entries: [],
+        transactions: [], // Backwards compatibility
       }
     }
 
-    // Execute all transfers in a single transaction
+    // Execute all transfers using BalanceService
     const result = await this.prisma.$transaction(async (tx) => {
-      const transactions: unknown[] = []
+      const balanceService = new BalanceService(tx as any)
+      const entries: unknown[] = []
       let totalAmount = new Decimal(0)
-      const accountsToRecalculate = new Set<string>()
 
       for (const routeAccount of routesWithBalance) {
-        // Create transfer transaction
-        const transaction = await this.transactionRepository.create(
-          {
-            amount: routeAccount.balance,
-            date: new Date(),
-            type: 'TRANSFER',
-            expenseSource: input.description || `Vaciado de ruta ${routeAccount.routeName}`,
-            sourceAccountId: routeAccount.account.id,
-            destinationAccountId: input.destinationAccountId,
-            routeId: routeAccount.routeId,
-          },
-          tx
-        )
+        const description = input.description || `Vaciado de ruta ${routeAccount.routeName}`
 
-        transactions.push(transaction)
+        // DEBIT from source (route cash account)
+        const debitEntry = await balanceService.createEntry({
+          accountId: routeAccount.account.id,
+          entryType: 'DEBIT',
+          amount: routeAccount.balance,
+          sourceType: 'TRANSFER_OUT',
+          entryDate: new Date(),
+          destinationAccountId: input.destinationAccountId,
+          snapshotRouteId: routeAccount.routeId,
+          description,
+        }, tx)
+
+        // CREDIT to destination
+        const creditEntry = await balanceService.createEntry({
+          accountId: input.destinationAccountId,
+          entryType: 'CREDIT',
+          amount: routeAccount.balance,
+          sourceType: 'TRANSFER_IN',
+          entryDate: new Date(),
+          snapshotRouteId: routeAccount.routeId,
+          description,
+        }, tx)
+
+        entries.push(debitEntry, creditEntry)
         totalAmount = totalAmount.plus(routeAccount.balance)
-
-        // Restar del balance de la cuenta origen
-        await this.accountRepository.subtractFromBalance(routeAccount.account.id, routeAccount.balance, tx)
       }
 
-      // Sumar al balance de la cuenta destino
-      await this.accountRepository.addToBalance(input.destinationAccountId, totalAmount, tx)
-
-      return { transactions, totalAmount }
+      return { entries, totalAmount }
     })
 
     return {
       success: true,
       message: `Se vaciaron ${routesWithBalance.length} rutas correctamente`,
-      transactionsCreated: result.transactions.length,
+      transactionsCreated: result.entries.length / 2, // Each transfer creates 2 entries
       totalAmount: result.totalAmount,
-      transactions: result.transactions,
+      entries: result.entries,
+      transactions: result.entries, // Backwards compatibility
     }
   }
 
@@ -233,48 +242,55 @@ export class BatchTransferService {
         message: 'No hay montos para distribuir',
         transactionsCreated: 0,
         totalAmount: new Decimal(0),
-        transactions: [],
+        entries: [],
+        transactions: [], // Backwards compatibility
       }
     }
 
-    // Execute all transfers in a single transaction
+    // Execute all transfers using BalanceService
     const result = await this.prisma.$transaction(async (tx) => {
-      const transactions: unknown[] = []
-      const accountsToRecalculate = new Set<string>()
+      const balanceService = new BalanceService(tx as any)
+      const entries: unknown[] = []
 
       for (const [, { amount, routeAccount }] of amountsToDistribute) {
-        // Create transfer transaction
-        const transaction = await this.transactionRepository.create(
-          {
-            amount,
-            date: new Date(),
-            type: 'TRANSFER',
-            expenseSource: input.description || `Distribución a ruta ${routeAccount.routeName}`,
-            sourceAccountId: input.sourceAccountId,
-            destinationAccountId: routeAccount.account.id,
-            routeId: routeAccount.routeId,
-          },
-          tx
-        )
+        const description = input.description || `Distribución a ruta ${routeAccount.routeName}`
 
-        transactions.push(transaction)
+        // DEBIT from source
+        const debitEntry = await balanceService.createEntry({
+          accountId: input.sourceAccountId,
+          entryType: 'DEBIT',
+          amount,
+          sourceType: 'TRANSFER_OUT',
+          entryDate: new Date(),
+          destinationAccountId: routeAccount.account.id,
+          snapshotRouteId: routeAccount.routeId,
+          description,
+        }, tx)
 
-        // Sumar al balance de la cuenta destino
-        await this.accountRepository.addToBalance(routeAccount.account.id, amount, tx)
+        // CREDIT to destination (route cash account)
+        const creditEntry = await balanceService.createEntry({
+          accountId: routeAccount.account.id,
+          entryType: 'CREDIT',
+          amount,
+          sourceType: 'TRANSFER_IN',
+          entryDate: new Date(),
+          snapshotRouteId: routeAccount.routeId,
+          description,
+        }, tx)
+
+        entries.push(debitEntry, creditEntry)
       }
 
-      // Restar del balance de la cuenta origen
-      await this.accountRepository.subtractFromBalance(input.sourceAccountId, totalToDistribute, tx)
-
-      return { transactions, totalAmount: totalToDistribute }
+      return { entries, totalAmount: totalToDistribute }
     })
 
     return {
       success: true,
       message: `Se distribuyó dinero a ${amountsToDistribute.size} rutas correctamente`,
-      transactionsCreated: result.transactions.length,
+      transactionsCreated: result.entries.length / 2, // Each transfer creates 2 entries
       totalAmount: result.totalAmount,
-      transactions: result.transactions,
+      entries: result.entries,
+      transactions: result.entries, // Backwards compatibility
     }
   }
 }
