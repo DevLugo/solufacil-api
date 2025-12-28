@@ -852,10 +852,18 @@ export class PaymentService {
       ? new Decimal(input.falcoAmount)
       : new Decimal(existingRecord.falcoAmount.toString())
 
+    // Check if any payments are being deleted
+    const hasAnyDeletion = input.payments?.some(p => p.isDeleted) || false
+
     // IMPORTANT: Track if distribution was explicitly changed
-    // If bankPaidAmount/cashPaidAmount are NOT in the input, we should NOT recalculate distribution
-    const distributionChanged = input.bankPaidAmount !== undefined || input.cashPaidAmount !== undefined
-    console.log('[PaymentService] Distribution changed:', distributionChanged)
+    // Distribution is considered changed if:
+    // 1. bankPaidAmount/cashPaidAmount are explicitly in the input, OR
+    // 2. Any payments are being deleted (which implicitly changes distribution)
+    const distributionExplicitlyChanged = input.bankPaidAmount !== undefined || input.cashPaidAmount !== undefined
+    const distributionChanged = distributionExplicitlyChanged || hasAnyDeletion
+    console.log('[PaymentService] Distribution explicitly changed:', distributionExplicitlyChanged)
+    console.log('[PaymentService] Has any deletion:', hasAnyDeletion)
+    console.log('[PaymentService] Distribution changed (effective):', distributionChanged)
 
     const paymentStatus = paidAmount.greaterThanOrEqualTo(expectedAmount)
       ? 'COMPLETE'
@@ -1453,30 +1461,49 @@ export class PaymentService {
         where: { leadPaymentReceived: id },
       })
 
-      // Calcular cashPaidAmount y bankPaidAmount desde los métodos de pago actuales
-      let calculatedCashPaid = new Decimal(0)
-      let calculatedBankPaid = new Decimal(0)
+      // Calcular montos base desde los métodos de pago actuales
+      let rawCashFromPayments = new Decimal(0)
+      let rawBankFromPayments = new Decimal(0)
 
       for (const payment of allCurrentPayments) {
         if (payment.paymentMethod === 'MONEY_TRANSFER') {
-          calculatedBankPaid = calculatedBankPaid.plus(new Decimal(payment.amount.toString()))
+          rawBankFromPayments = rawBankFromPayments.plus(new Decimal(payment.amount.toString()))
         } else {
-          calculatedCashPaid = calculatedCashPaid.plus(new Decimal(payment.amount.toString()))
+          rawCashFromPayments = rawCashFromPayments.plus(new Decimal(payment.amount.toString()))
         }
       }
 
-      console.log('[PaymentService] Calculated paid amounts from actual payments:')
-      console.log('[PaymentService]   calculatedCashPaid:', calculatedCashPaid.toString())
-      console.log('[PaymentService]   calculatedBankPaid:', calculatedBankPaid.toString())
+      // IMPORTANTE: cashPaidAmount y bankPaidAmount deben incluir el efecto del cashToBank (TRANSFER)
+      // Si distributionChanged, usamos los valores del input (que ya incluyen cashToBank)
+      // Si no, calculamos basándonos en el cashToBank actual
+      let finalCashPaid: Decimal
+      let finalBankPaid: Decimal
 
-      // Actualizar el registro LeadPaymentReceived con montos calculados
+      if (distributionChanged) {
+        // Usar los valores del input (ya tienen cashToBank aplicado)
+        finalCashPaid = cashPaidAmount
+        finalBankPaid = bankPaidAmount
+      } else {
+        // Sin cambio de distribución, mantener los valores existentes
+        finalCashPaid = new Decimal(existingRecord.cashPaidAmount.toString())
+        finalBankPaid = new Decimal(existingRecord.bankPaidAmount.toString())
+      }
+
+      console.log('[PaymentService] Final paid amounts (including cashToBank effect):')
+      console.log('[PaymentService]   rawCashFromPayments:', rawCashFromPayments.toString())
+      console.log('[PaymentService]   rawBankFromPayments:', rawBankFromPayments.toString())
+      console.log('[PaymentService]   finalCashPaid:', finalCashPaid.toString())
+      console.log('[PaymentService]   finalBankPaid:', finalBankPaid.toString())
+      console.log('[PaymentService]   distributionChanged:', distributionChanged)
+
+      // Actualizar el registro LeadPaymentReceived
       return this.paymentRepository.updateLeadPaymentReceived(
         id,
         {
           expectedAmount,
           paidAmount,
-          cashPaidAmount: calculatedCashPaid,
-          bankPaidAmount: calculatedBankPaid,
+          cashPaidAmount: finalCashPaid,
+          bankPaidAmount: finalBankPaid,
           falcoAmount,
           paymentStatus,
         },

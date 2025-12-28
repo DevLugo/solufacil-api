@@ -128,10 +128,31 @@ newBankPaid = existingBankPaid + bankDelta + cashToBankDelta
 
 **Scenario**: User marks a payment as deleted.
 
-**Effect**:
+**Frontend Effect**:
 - `cashDelta` or `bankDelta` decreases by the deleted amount
 - Total paid decreases
 - Available cash for transfer may decrease
+
+**Backend Handling** (Critical for balance correctness):
+
+When payments are deleted, the backend automatically treats this as a distribution change, even if the frontend didn't explicitly send new distribution values. This ensures:
+
+1. **TRANSFER adjustment is applied**: The existing `cashToBank` is factored into `oldCashChange`/`oldBankChange`
+2. **TRANSFER transaction is cleaned up**: If all payments are deleted, the TRANSFER transaction is also deleted
+3. **Balance reversal is correct**: Account balances are properly reversed including the TRANSFER effect
+
+**Example - Deleting all payments with TRANSFER**:
+- Before: cash=8000, bank=1000, CASH payments=8700, MONEY_TRANSFER=300, cashToBank=700
+- When all payments deleted:
+  - oldCashChange = 8700 - 700 = 8000 (includes TRANSFER adjustment)
+  - oldBankChange = 300 + 700 = 1000 (includes TRANSFER adjustment)
+  - newCashChange = 0, newBankChange = 0
+  - netCashChange = 0 - 8000 = -8000 ✓
+  - netBankChange = 0 - 1000 = -1000 ✓
+  - TRANSFER transaction is deleted
+  - LeadPaymentReceived is deleted
+
+**Implementation Note**: The backend uses `hasAnyDeletion` flag to force `distributionChanged = true` when payments are being deleted, ensuring the TRANSFER logic always runs.
 
 ### 7. Commission-Only Changes
 

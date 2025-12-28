@@ -91,7 +91,13 @@ export class BorrowerService {
 
     // Transformar resultados al formato BorrowerSearchResult
     return results.map((borrower) => {
-      const activeLoans = borrower.loans.filter((loan) => loan.status === 'ACTIVE')
+      // Filtrar solo préstamos:
+      // 1. ACTIVE (no RENOVATED, FINISHED, etc.)
+      // 2. Sin renewedBy (no han sido renovados por otro préstamo)
+      const activeLoans = borrower.loans.filter(
+        (loan) => loan.status === 'ACTIVE' && !loan.renewedBy
+      )
+
       const pendingDebtAmount = activeLoans.reduce(
         (sum, loan) => sum + parseFloat(loan.pendingAmountStored || '0'),
         0

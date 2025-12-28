@@ -31,7 +31,7 @@ export interface BorrowerSearchResultRaw {
       }
     }[]
   }
-  loans: { id: string; status: string; pendingAmountStored: string }[]
+  loans: { id: string; status: string; pendingAmountStored: string; renewedBy?: { id: string } | null }[]
   isFromCurrentLocation?: boolean
   locationId?: string
   locationName?: string
@@ -255,6 +255,10 @@ export class BorrowerRepository {
             id: true,
             status: true,
             pendingAmountStored: true,
+            // Verificar si el préstamo ya fue renovado (tiene otro préstamo que lo referencia como previousLoan)
+            renewedBy: {
+              select: { id: true },
+            },
             // Incluir lead para obtener la localidad del préstamo
             leadRelation: {
               select: {
