@@ -174,21 +174,21 @@ export function buildRenewalMap(
  * - Has pending amount > 0
  * - Not marked as bad debt
  * - Not excluded by cleanup
- * - Status is NOT 'RENOVATED' (renovated loans were replaced by another loan)
+ * - Was not renewed (renewedDate is null)
  *
  * @param loan - Loan data to check
  * @returns true if loan is active
  *
  * @example
- * isActiveLoan({ pendingAmountStored: 1000, badDebtDate: null, excludedByCleanup: null, status: 'ACTIVE' })
+ * isActiveLoan({ pendingAmountStored: 1000, badDebtDate: null, excludedByCleanup: null, renewedDate: null })
  * // Returns: true
  *
- * isActiveLoan({ pendingAmountStored: 1000, badDebtDate: null, excludedByCleanup: null, status: 'RENOVATED' })
- * // Returns: false (loan was renovated, new loan replaced it)
+ * isActiveLoan({ pendingAmountStored: 1000, badDebtDate: null, excludedByCleanup: null, renewedDate: new Date() })
+ * // Returns: false (loan was renewed, new loan replaced it)
  */
 export function isActiveLoan(loan: LoanForPortfolio): boolean {
-  // RENOVATED loans are NOT active - they were replaced by another loan
-  if (loan.status === 'RENOVATED') {
+  // Renewed loans are NOT active - they were replaced by another loan
+  if (loan.renewedDate !== null) {
     return false
   }
 
@@ -380,10 +380,9 @@ export function isNewClient(loan: LoanForPortfolio): boolean {
 /**
  * Checks if a loan represents a client who finished without renewing
  *
- * Uses both renewedDate and status to determine if the loan was renewed.
  * A loan finished without renewal if:
  * - finishedDate is in the period AND
- * - renewedDate is null AND status is NOT 'RENOVATED'
+ * - renewedDate is null
  *
  * @param loan - Loan to check
  * @param periodStart - Start of the period to check
@@ -402,8 +401,8 @@ export function isFinishedWithoutRenewal(
   const finishedInPeriod =
     loan.finishedDate >= periodStart && loan.finishedDate <= periodEnd
 
-  // Check both renewedDate and status to determine if it was renewed
-  const wasRenewed = loan.renewedDate !== null || loan.status === 'RENOVATED'
+  // Check renewedDate to determine if it was renewed
+  const wasRenewed = loan.renewedDate !== null
 
   return finishedInPeriod && !wasRenewed
 }
@@ -411,8 +410,7 @@ export function isFinishedWithoutRenewal(
 /**
  * Checks if a loan represents a renewal in the period
  *
- * Uses renewedDate as primary indicator. If renewedDate is null but
- * status is 'RENOVATED', uses finishedDate as fallback date.
+ * Uses renewedDate to determine if it was renewed in the period.
  *
  * @param loan - Loan to check
  * @param periodStart - Start of the period to check
@@ -424,17 +422,11 @@ export function isRenewalInPeriod(
   periodStart: Date,
   periodEnd: Date
 ): boolean {
-  // Primary: use renewedDate if available
-  if (loan.renewedDate !== null) {
-    return loan.renewedDate >= periodStart && loan.renewedDate <= periodEnd
+  if (loan.renewedDate === null) {
+    return false
   }
 
-  // Fallback: if status is RENOVATED but renewedDate is null, use finishedDate
-  if (loan.status === 'RENOVATED' && loan.finishedDate !== null) {
-    return loan.finishedDate >= periodStart && loan.finishedDate <= periodEnd
-  }
-
-  return false
+  return loan.renewedDate >= periodStart && loan.renewedDate <= periodEnd
 }
 
 /**
@@ -596,8 +588,9 @@ export function wasLoanActiveInWeek(
   loan: LoanForPortfolio,
   week: WeekRange
 ): boolean {
-  // RENOVATED loans are NOT active - they were replaced by another loan
-  if (loan.status === 'RENOVATED') {
+  // Renewed loans are NOT active - they were replaced by another loan
+  // If renewedDate is before this week, the loan was not active
+  if (loan.renewedDate !== null && loan.renewedDate < week.start) {
     return false
   }
 
@@ -680,9 +673,13 @@ export function wasLoanActiveAtDate(
   loan: LoanForPortfolio,
   date: Date
 ): boolean {
-  // RENOVATED loans are NOT active - they were replaced by another loan
-  if (loan.status === 'RENOVATED') {
-    return false
+  // Renewed loans are NOT active after their renewal date
+  if (loan.renewedDate !== null) {
+    const renewedDateTime = new Date(loan.renewedDate).getTime()
+    const dateTime = new Date(date).getTime()
+    if (renewedDateTime < dateTime) {
+      return false
+    }
   }
 
   // Convert to timestamps for reliable comparison (handles Date objects and strings)

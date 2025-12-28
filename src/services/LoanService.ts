@@ -240,10 +240,11 @@ export class LoanService {
       )
       pendingProfit = profitHeredado
 
-      // Marcar el préstamo anterior como RENOVATED
+      // Marcar el préstamo anterior como FINISHED (renovado)
       await this.loanRepository.update(input.previousLoanId, {
-        status: 'RENOVATED',
+        status: 'FINISHED',
         renewedDate: input.signDate,
+        finishedDate: input.signDate,
       })
     }
 
@@ -559,12 +560,12 @@ export class LoanService {
           )
           pendingProfit = profitHeredado
 
-          // Marcar préstamo anterior como RENOVATED y cerrado
-          console.log('[LoanService] Updating previous loan to RENOVATED:', loanInput.previousLoanId)
+          // Marcar préstamo anterior como FINISHED (renovado)
+          console.log('[LoanService] Updating previous loan to FINISHED (renewed):', loanInput.previousLoanId)
           const updatedPreviousLoan = await tx.loan.update({
             where: { id: loanInput.previousLoanId },
             data: {
-              status: 'RENOVATED',
+              status: 'FINISHED',
               renewedDate: input.signDate,
               finishedDate: input.signDate,
             },

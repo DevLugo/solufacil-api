@@ -30,7 +30,6 @@ export class PdfService {
     const labels: Record<string, string> = {
       ACTIVE: 'Activo',
       FINISHED: 'Terminado',
-      RENOVATED: 'Renovado',
       CANCELLED: 'Cancelado',
     }
     return labels[status] || status

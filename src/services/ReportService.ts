@@ -65,6 +65,27 @@ export class ReportService {
   // ========== Private Helper Methods ==========
 
   /**
+   * Builds the route filter condition for querying loans.
+   * Matches loans where:
+   * - snapshotRouteId is in routeIds, OR
+   * - The lead's current routes include a route in routeIds
+   */
+  private getRouteFilterCondition(routeIds: string[]) {
+    return {
+      OR: [
+        { snapshotRouteId: { in: routeIds } },
+        {
+          leadRelation: {
+            routes: {
+              some: { id: { in: routeIds } },
+            },
+          },
+        },
+      ],
+    }
+  }
+
+  /**
    * Builds the base WHERE clause for querying active loans.
    */
   private getActiveLoansWhereClause(
@@ -72,7 +93,7 @@ export class ReportService {
     signDateFilter?: { lte?: Date; gte?: Date }
   ) {
     return {
-      snapshotRouteId: { in: routeIds },
+      ...this.getRouteFilterCondition(routeIds),
       finishedDate: null,
       pendingAmountStored: { gt: 0 },
       excludedByCleanup: null,
@@ -149,9 +170,10 @@ export class ReportService {
     const endDate = new Date(year, month, 0, 23, 59, 59)
 
     // Get loans for the specified routes and period
+    // Filter by snapshotRouteId OR lead's current routes
     const loans = await this.prisma.loan.findMany({
       where: {
-        snapshotRouteId: { in: routeIds },
+        ...this.getRouteFilterCondition(routeIds),
         signDate: {
           gte: startDate,
           lte: endDate,
@@ -251,9 +273,10 @@ export class ReportService {
 
     // OPTIMIZATION: Get all data for the month in 3 queries instead of N*3 queries
     // Query 1: Get all loans granted in the month
+    // Filter by snapshotRouteId OR lead's current routes
     const allLoansGranted = await this.prisma.loan.findMany({
       where: {
-        snapshotRouteId: { in: routeIds },
+        ...this.getRouteFilterCondition(routeIds),
         signDate: {
           gte: startDate,
           lte: endDate,
@@ -266,11 +289,10 @@ export class ReportService {
     })
 
     // Query 2: Get all payments for the month
+    // Filter by loan's snapshotRouteId OR lead's current routes
     const allPayments = await this.prisma.loanPayment.findMany({
       where: {
-        loanRelation: {
-          snapshotRouteId: { in: routeIds },
-        },
+        loanRelation: this.getRouteFilterCondition(routeIds),
         receivedAt: {
           gte: startDate,
           lte: endDate,
@@ -421,7 +443,7 @@ export class ReportService {
 
     const currentLoans = await this.prisma.loan.findMany({
       where: {
-        snapshotRouteId: { in: routeIds },
+        ...this.getRouteFilterCondition(routeIds),
         signDate: {
           gte: currentStartDate,
           lte: currentEndDate,
@@ -468,7 +490,7 @@ export class ReportService {
 
     const finishedLoansCount = await this.prisma.loan.count({
       where: {
-        snapshotRouteId: { in: routeIds },
+        ...this.getRouteFilterCondition(routeIds),
         finishedDate: { not: null },
       },
     })
@@ -725,11 +747,22 @@ export class ReportService {
     const yearEnd = new Date(`${year}-12-31T23:59:59.999Z`)
 
     // Get all account entries for the year
-    // Use snapshotRouteId for historical data
+    // Filter by snapshotRouteId OR by the associated loan's lead routes
     const entries = await this.prisma.accountEntry.findMany({
       where: {
         entryDate: { gte: yearStart, lte: yearEnd },
-        snapshotRouteId: { in: routeIds },
+        OR: [
+          { snapshotRouteId: { in: routeIds } },
+          {
+            loan: {
+              leadRelation: {
+                routes: {
+                  some: { id: { in: routeIds } },
+                },
+              },
+            },
+          },
+        ],
       },
       select: {
         amount: true,
@@ -746,12 +779,16 @@ export class ReportService {
     // The badDebt calculation needs payments from previous years that were made before badDebtDate
     const loans = await this.prisma.loan.findMany({
       where: {
-        signDate: { lt: yearEnd },
-        OR: [
-          { finishedDate: null },
-          { finishedDate: { gte: yearStart } }
+        AND: [
+          { signDate: { lt: yearEnd } },
+          {
+            OR: [
+              { finishedDate: null },
+              { finishedDate: { gte: yearStart } }
+            ],
+          },
+          this.getRouteFilterCondition(routeIds),
         ],
-        snapshotRouteId: { in: routeIds },
       },
       select: {
         id: true,

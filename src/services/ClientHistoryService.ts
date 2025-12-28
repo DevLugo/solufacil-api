@@ -247,9 +247,7 @@ export class ClientHistoryService {
       const borrower = pd.borrower
       const loans = borrower?.loans || []
       const activeLoans = loans.filter((l) => l.status === 'ACTIVE')
-      const finishedLoans = loans.filter(
-        (l) => l.status === 'FINISHED' || l.status === 'RENOVATED'
-      )
+      const finishedLoans = loans.filter((l) => l.status === 'FINISHED')
       const latestLoan = loans[0]
       const collateralCount = collateralLoansMap.get(pd.id) || 0
 
@@ -536,9 +534,6 @@ export class ClientHistoryService {
       // Check if this loan was renewed - simple check: if renewedDate exists, it was renewed
       const wasRenewed = !!loan.renewedDate
 
-      // Determine the correct status: if renewedDate exists, status should be RENOVATED
-      const correctStatus = wasRenewed ? 'RENOVATED' : loan.status
-
       // Find the loan that renewed this one (for renewedTo field)
       const renewingLoan = loan.renewedBy
         ? loan.renewedBy
@@ -560,7 +555,7 @@ export class ClientHistoryService {
         totalPaid: loan.totalPaid,
         pendingDebt: loan.pendingAmountStored,
         daysSinceSign,
-        status: correctStatus,
+        status: loan.status,
         wasRenewed,
         weekDuration: loan.loantypeRelation?.weekDuration || 0,
         rate: loan.loantypeRelation?.rate || '0',

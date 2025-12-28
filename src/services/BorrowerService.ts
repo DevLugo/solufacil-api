@@ -91,9 +91,9 @@ export class BorrowerService {
 
     // Transformar resultados al formato BorrowerSearchResult
     return results.map((borrower) => {
-      // Filtrar solo préstamos:
-      // 1. ACTIVE (no RENOVATED, FINISHED, etc.)
-      // 2. Sin renewedBy (no han sido renovados por otro préstamo)
+      // Filtrar solo préstamos activos:
+      // - status ACTIVE (no FINISHED, CANCELLED)
+      // - Sin renewedBy (no han sido renovados por otro préstamo)
       const activeLoans = borrower.loans.filter(
         (loan) => loan.status === 'ACTIVE' && !loan.renewedBy
       )

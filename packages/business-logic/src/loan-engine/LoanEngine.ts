@@ -21,7 +21,7 @@
  *    - totalDebtAcquired: Total debt (requestedAmount + profitAmount)
  *    - pendingAmountStored: Remaining debt to pay
  *    - expectedWeeklyPayment: Weekly payment amount
- *    - status: ACTIVE | FINISHED | RENOVATED | BAD_DEBT
+ *    - status: ACTIVE | FINISHED | CANCELLED (renewedDate indicates if it was renewed)
  *    - previousLoan: Reference to previous loan (for renewals)
  *
  * 2. Payment - Individual payments
@@ -225,7 +225,7 @@ export class LoanEngine {
    *
    * DATABASE CHANGES:
    * - INSERT into Loan table
-   * - If renewal: UPDATE previous loan status to 'RENOVATED'
+   * - If renewal: UPDATE previous loan status to 'FINISHED' with renewedDate
    * - INSERT Transaction (EXPENSE from cash account)
    * - UPDATE Account balance (subtract amountGived)
    *
@@ -662,7 +662,7 @@ export class LoanEngine {
  * ```
  *
  * DATABASE OPERATIONS:
- * 1. UPDATE previous Loan: status = 'RENOVATED', finishedDate = now
+ * 1. UPDATE previous Loan: status = 'FINISHED', renewedDate = now, finishedDate = now
  * 2. INSERT new Loan with previousLoan reference
  * 3. INSERT Transaction (EXPENSE, amount: 1800)
  * 4. UPDATE Account (subtract 1800 from balance)

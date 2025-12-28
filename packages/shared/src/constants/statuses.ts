@@ -1,7 +1,6 @@
 export const LOAN_STATUSES = {
   ACTIVE: 'ACTIVE',
   FINISHED: 'FINISHED',
-  RENOVATED: 'RENOVATED',
   CANCELLED: 'CANCELLED',
 } as const
 

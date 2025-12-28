@@ -150,7 +150,7 @@ export async function createTestLoan(
     totalDebtAcquired?: number
     expectedWeeklyPayment?: number
     pendingAmountStored?: number
-    status?: 'ACTIVE' | 'FINISHED' | 'RENOVATED' | 'CANCELLED'
+    status?: 'ACTIVE' | 'FINISHED' | 'CANCELLED'
   } = {}
 ) {
   const {

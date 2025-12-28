@@ -10,7 +10,6 @@ import {
   countClientsStatus,
   countActiveLoansAtDate,
   isLoanConsideredOnDate,
-  buildRenewalMap,
   type WeekRange,
   type LoanForPortfolio,
   type PaymentForCV,
@@ -28,23 +27,12 @@ import {
   type LocalitySummary,
   type LocalityClientDetail,
   type ClientCategory,
-  type LoanRenewalInfo,
 } from '@solufacil/business-logic'
 
 export interface PortfolioFilters {
   locationIds?: string[]
   routeIds?: string[]
   loantypeIds?: string[]
-}
-
-// Type for loan with included relations
-type LoanWithRelations = Loan & {
-  payments: LoanPayment[]
-  borrowerRelation?: {
-    personalDataRelation?: {
-      fullName: string
-    } | null
-  } | null
 }
 
 export class PortfolioReportService {
@@ -272,116 +260,6 @@ export class PortfolioReportService {
       periodEnd,
       filters
     )
-
-    // DEBUG: Log para encontrar diferencias
-    console.log('\n🔍 DEBUG PORTFOLIO REPORT - NOVIEMBRE 2025')
-    console.log(`Total loans fetched: ${loans.length}`)
-
-    // Construir renewalMap para debug
-    const debugRenewalMap = buildRenewalMap(loans)
-    const lastWeek = weeks[weeks.length - 1]
-    const refDate = lastWeek.end
-
-    // Contar cuántos pasan cada check
-    let passSignDate = 0
-    let passFinishedDate = 0
-    let passCleanup = 0
-    let passRenewal = 0
-    let passPendingAmount = 0
-
-    const activeLoans: string[] = []
-    const excludedByCleanupLoans: { id: string, hasCleanupDate: boolean }[] = []
-
-    for (const loan of loans) {
-      const dateTime = refDate.getTime()
-
-      // Check 1: signDate
-      if (!loan.signDate || new Date(loan.signDate).getTime() > dateTime) {
-        continue
-      }
-      passSignDate++
-
-      // Check 2: finishedDate
-      if (loan.finishedDate !== null) {
-        const finishedDateTime = new Date(loan.finishedDate).getTime()
-        if (finishedDateTime <= dateTime) {
-          continue
-        }
-      }
-      passFinishedDate++
-
-      // Check 3: excludedByCleanup
-      if (loan.excludedByCleanup !== null) {
-        excludedByCleanupLoans.push({
-          id: loan.id,
-          hasCleanupDate: loan.cleanupDate !== null && loan.cleanupDate !== undefined
-        })
-        if (loan.cleanupDate) {
-          const cleanupDateTime = new Date(loan.cleanupDate).getTime()
-          if (cleanupDateTime <= dateTime) {
-            continue
-          }
-        } else {
-          continue // Si no hay cleanupDate pero sí excludedByCleanup, excluir
-        }
-      }
-      passCleanup++
-
-      // Check 4: renewals
-      if (loan.previousLoan) {
-        const renewals = debugRenewalMap.get(loan.id) || []
-        const hasNewerRenewal = renewals.some((r) => new Date(r.signDate).getTime() <= dateTime)
-        if (hasNewerRenewal) {
-          continue
-        }
-      }
-      passRenewal++
-
-      // Check 5: pendingAmount
-      const rate = loan.rate ?? 0
-      const requestedAmount = loan.requestedAmount ?? 0
-      const totalDebt = requestedAmount * (1 + rate)
-      const totalPaid = loan.totalPaid ?? 0
-      const realPendingAmount = Math.max(0, totalDebt - totalPaid)
-
-      if (realPendingAmount > 0) {
-        passPendingAmount++
-        activeLoans.push(loan.id)
-      } else {
-        // Log loans that WOULD be active by pendingAmountStored but NOT by realPendingAmount
-        if (loan.pendingAmountStored > 0) {
-          console.log(`⚠️ Loan ${loan.id}: pendingAmountStored=${loan.pendingAmountStored} but realPending=${realPendingAmount} (req=${requestedAmount}, rate=${rate}, totalPaid=${totalPaid}, totalDebt=${totalDebt})`)
-        }
-      }
-    }
-
-    // Contar cuántos de los activos tienen badDebtDate
-    const activeWithBadDebt = loans.filter(l =>
-      activeLoans.includes(l.id) && l.badDebtDate !== null
-    )
-
-    console.log(`\n📊 RESUMEN DE CHECKS:`)
-    console.log(`  Pass signDate: ${passSignDate}`)
-    console.log(`  Pass finishedDate: ${passFinishedDate}`)
-    console.log(`  Pass cleanup: ${passCleanup}`)
-    console.log(`  Pass renewal: ${passRenewal}`)
-    console.log(`  Pass pendingAmount (ACTIVE): ${passPendingAmount}`)
-    console.log(`\n  Loans with excludedByCleanup: ${excludedByCleanupLoans.length}`)
-    console.log(`  - With cleanupDate: ${excludedByCleanupLoans.filter(l => l.hasCleanupDate).length}`)
-    console.log(`  - Without cleanupDate: ${excludedByCleanupLoans.filter(l => !l.hasCleanupDate).length}`)
-    console.log(`\n  Active loans with badDebtDate: ${activeWithBadDebt.length}`)
-    if (activeWithBadDebt.length > 0 && activeWithBadDebt.length <= 10) {
-      activeWithBadDebt.forEach(l => console.log(`    - ${l.id}: badDebtDate=${l.badDebtDate}`))
-    }
-
-    // Contar cuántos de los activos tienen status = 'RENOVATED'
-    const activeWithRenovatedStatus = loans.filter(l =>
-      activeLoans.includes(l.id) && l.status === 'RENOVATED'
-    )
-    console.log(`\n  Active loans with status='RENOVATED': ${activeWithRenovatedStatus.length}`)
-    if (activeWithRenovatedStatus.length > 0 && activeWithRenovatedStatus.length <= 10) {
-      activeWithRenovatedStatus.forEach(l => console.log(`    - ${l.id}`))
-    }
 
     // Build weekly data for ALL weeks (completed and not) by filtering payments in memory
     const weeklyData: WeeklyPortfolioData[] = []
@@ -1018,7 +896,7 @@ export class PortfolioReportService {
     filters?: PortfolioFilters
   ) {
     const baseWhereClause = this.buildActiveLoansWhereClause(filters, {
-      useRouteOrCondition: false,
+      useRouteOrCondition: true,  // Include loans by lead's routes too
       includeLocationFilter: true,
     })
 
@@ -1026,9 +904,10 @@ export class PortfolioReportService {
     const activeLoans = await this.prisma.loan.findMany({
       where: baseWhereClause,
       include: {
-        // Include lead (loanOfficer) to get their locality
+        // Include lead (loanOfficer) to get their locality and routes
         leadRelation: {
           include: {
+            routes: true,  // Include lead's assigned routes for route priority
             personalDataRelation: {
               include: {
                 addresses: {
@@ -1057,23 +936,39 @@ export class PortfolioReportService {
     })
 
     // Query 2: Get loans that finished this week (for "finalizados" count)
-    // Build where clause directly - cleaner than spreading and deleting
-    const finishedLoans = await this.prisma.loan.findMany({
-      where: {
-        badDebtDate: null,
-        excludedByCleanup: null,
-        renewedDate: null, // Finished without renewal
-        finishedDate: {
-          gte: weekRange.start,
-          lte: weekRange.end,
-        },
-        ...(filters?.routeIds?.length && { snapshotRouteId: { in: filters.routeIds } }),
-        ...(filters?.loantypeIds?.length && { loantype: { in: filters.loantypeIds } }),
+    // Build where clause with OR condition for routes
+    const finishedLoansWhere: Record<string, unknown> = {
+      badDebtDate: null,
+      excludedByCleanup: null,
+      renewedDate: null, // Finished without renewal
+      finishedDate: {
+        gte: weekRange.start,
+        lte: weekRange.end,
       },
+      ...(filters?.loantypeIds?.length && { loantype: { in: filters.loantypeIds } }),
+    }
+
+    // Apply route filter with OR condition
+    if (filters?.routeIds?.length) {
+      finishedLoansWhere.OR = [
+        { snapshotRouteId: { in: filters.routeIds } },
+        {
+          leadRelation: {
+            routes: {
+              some: { id: { in: filters.routeIds } },
+            },
+          },
+        },
+      ]
+    }
+
+    const finishedLoans = await this.prisma.loan.findMany({
+      where: finishedLoansWhere,
       include: {
-        // Include lead (loanOfficer) to get their locality
+        // Include lead (loanOfficer) to get their locality and routes
         leadRelation: {
           include: {
+            routes: true,  // Include lead's assigned routes
             personalDataRelation: {
               include: {
                 addresses: {
@@ -1100,11 +995,15 @@ export class PortfolioReportService {
       const location = address?.locationRelation
       const locationRoute = location?.routeRelation
 
-      // Route priority (consistent with getRouteBreakdown):
-      // 1. snapshotRouteId (synced from lead assignment)
-      // 2. Lead's locality route (fallback)
-      const routeId = loan.snapshotRouteId || locationRoute?.id || undefined
-      const routeName = loan.snapshotRouteName || locationRoute?.name || undefined
+      // Get lead's assigned route (first one)
+      const leadRoute = loan.leadRelation?.routes?.[0]
+
+      // Route priority (consistent with getRoutePriorityFromData):
+      // 1. Lead's assigned route (reflects current assignment)
+      // 2. snapshotRouteId (historical)
+      // 3. Lead's locality route (fallback)
+      const routeId = leadRoute?.id || loan.snapshotRouteId || locationRoute?.id || undefined
+      const routeName = leadRoute?.name || loan.snapshotRouteName || locationRoute?.name || undefined
 
       // "Nuevo" = signed this week without a previous loan
       const isNew =
@@ -1250,7 +1149,8 @@ export class PortfolioReportService {
 
   /**
    * Gets route priority based on snapshot and lead data.
-   * Priority: snapshotRouteId > lead's route > 'unknown'
+   * Priority: lead's route > snapshotRouteId > 'unknown'
+   * (Prioriza la ruta actual del lead para reflejar cambios de asignación)
    */
   private getRoutePriority(
     loan: {
@@ -1261,10 +1161,10 @@ export class PortfolioReportService {
     leadRoute?: { id: string; name: string } | null
   ): { routeId: string; routeName: string } {
     return {
-      routeId: loan.snapshotRouteId || leadRoute?.id || 'unknown',
+      routeId: leadRoute?.id || loan.snapshotRouteId || 'unknown',
       routeName:
-        loan.snapshotRoute?.name ||
         leadRoute?.name ||
+        loan.snapshotRoute?.name ||
         loan.snapshotRouteName ||
         'Sin ruta',
     }
@@ -1480,17 +1380,21 @@ export class PortfolioReportService {
 
   /**
    * Helper para obtener routeId y routeName de los datos del préstamo
+   * Priority: leadRoute > snapshotRoute > 'unknown'
+   * (Prioriza la ruta actual del lead para reflejar cambios de asignación)
    */
   private getRoutePriorityFromData(
     snapshotRouteId: string | null,
     snapshotRoute: { id: string; name: string } | null,
     leadRoute: { id: string; name: string } | null
   ): { routeId: string; routeName: string } {
-    if (snapshotRouteId && snapshotRoute) {
-      return { routeId: snapshotRoute.id, routeName: snapshotRoute.name }
-    }
+    // Priorizar ruta actual del lead
     if (leadRoute) {
       return { routeId: leadRoute.id, routeName: leadRoute.name }
+    }
+    // Fallback a snapshot route
+    if (snapshotRouteId && snapshotRoute) {
+      return { routeId: snapshotRoute.id, routeName: snapshotRoute.name }
     }
     return { routeId: 'unknown', routeName: 'Sin ruta' }
   }
@@ -1656,7 +1560,7 @@ export class PortfolioReportService {
     promedioCV: number,
     semanasCompletadas: number,
     totalSemanas: number,
-    filters?: PortfolioFilters
+    _filters?: PortfolioFilters
   ): Promise<PortfolioSummary> {
     // OPTIMIZACIÓN: Usar los loans que ya tenemos en lugar de hacer otra query
     // Los loans ya incluyen todos los préstamos relevantes para el período
@@ -1731,7 +1635,7 @@ export class PortfolioReportService {
     loans: LoanForPortfolio[],
     paymentsMap: Map<string, PaymentForCV[]>,
     activeWeek: WeekRange,
-    filters?: PortfolioFilters,
+    _filters?: PortfolioFilters,
     routeInfoMap?: Map<string, { routeId: string; routeName: string }>
   ): Promise<LocationBreakdown[]> {
     // Group loans by route
@@ -1820,84 +1724,6 @@ export class PortfolioReportService {
     return result.sort((a, b) => b.clientesActivos - a.clientesActivos)
   }
 
-  /**
-   * Gets loans that had activity during the period.
-   * This includes:
-   * - New loans (signDate in period and no previousLoan)
-   * - Finished loans (finishedDate in period)
-   * - Renewed loans (renewedDate in period)
-   *
-   * Used for calculating client balance (nuevos, terminadosSinRenovar, renovados)
-   */
-  private async getLoansWithActivityInPeriod(
-    periodStart: Date,
-    periodEnd: Date,
-    filters?: PortfolioFilters
-  ): Promise<LoanForPortfolio[]> {
-    // Build route filter conditions
-    const routeFilter = filters?.routeIds?.length
-      ? {
-          OR: [
-            { snapshotRouteId: { in: filters.routeIds } },
-            {
-              leadRelation: {
-                routes: {
-                  some: { id: { in: filters.routeIds } },
-                },
-              },
-            },
-          ],
-        }
-      : undefined
-
-    const loans = await this.prisma.loan.findMany({
-      where: {
-        AND: [
-          // Activity in period
-          {
-            OR: [
-              // New clients (first loan, signed in period)
-              {
-                signDate: {
-                  gte: periodStart,
-                  lte: periodEnd,
-                },
-                previousLoan: null,
-              },
-              // Finished loans (regardless of renewal status)
-              {
-                finishedDate: {
-                  gte: periodStart,
-                  lte: periodEnd,
-                },
-              },
-              // Renewed loans
-              {
-                renewedDate: {
-                  gte: periodStart,
-                  lte: periodEnd,
-                },
-              },
-            ],
-          },
-          // Route filter (if provided)
-          ...(routeFilter ? [routeFilter] : []),
-        ],
-      },
-      include: filters?.routeIds?.length
-        ? {
-            leadRelation: {
-              include: {
-                routes: true,
-              },
-            },
-          }
-        : undefined,
-    })
-
-    return loans.map((loan) => this.toLoanForPortfolio(loan))
-  }
-
   private async getRenovationKPIs(
     periodStart: Date,
     periodEnd: Date,
@@ -1923,23 +1749,13 @@ export class PortfolioReportService {
               lte: periodEnd,
             },
           },
-          // Loans that finished in period without renewal
+          // Loans that finished in period without renewal (renewedDate is null)
           {
             finishedDate: {
               gte: periodStart,
               lte: periodEnd,
             },
             renewedDate: null,
-            status: { not: 'RENOVATED' },
-          },
-          // Fallback: Loans with status RENOVATED but no renewedDate (use finishedDate)
-          {
-            finishedDate: {
-              gte: periodStart,
-              lte: periodEnd,
-            },
-            renewedDate: null,
-            status: 'RENOVATED',
           },
         ],
       },

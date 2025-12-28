@@ -73,8 +73,8 @@ export const generatePaymentChronology = (loan: LoanData): PaymentChronologyItem
   // Determinar hasta cuándo evaluar el crédito
   let endDate: Date
 
-  // Si el crédito está terminado o renovado, usar la fecha de finalización
-  if (loan.finishedDate && (loan.status === 'FINISHED' || loan.status === 'RENOVATED')) {
+  // Si el crédito está terminado, usar la fecha de finalización
+  if (loan.finishedDate && loan.status === 'FINISHED') {
     endDate = new Date(loan.finishedDate)
   }
   // Si está marcado como cartera muerta, usar esa fecha
@@ -97,7 +97,7 @@ export const generatePaymentChronology = (loan: LoanData): PaymentChronologyItem
 
   // Calcular el número total de semanas a evaluar
   let totalWeeks: number
-  if (loan.finishedDate && (loan.status === 'FINISHED' || loan.status === 'RENOVATED')) {
+  if (loan.finishedDate && loan.status === 'FINISHED') {
     totalWeeks = Math.ceil((new Date(loan.finishedDate).getTime() - signDate.getTime()) / (7 * 24 * 60 * 60 * 1000))
   } else if (loan.badDebtDate) {
     totalWeeks = Math.ceil((new Date(loan.badDebtDate).getTime() - signDate.getTime()) / (7 * 24 * 60 * 60 * 1000))
@@ -224,7 +224,7 @@ export const generatePaymentChronology = (loan: LoanData): PaymentChronologyItem
   // Agregar pagos que estén fuera del período de semanas regulares
   const regularPayments = chronology.filter((item) => item.type === 'PAYMENT')
   const regularPaymentIds = new Set(regularPayments.map((p) => p.id))
-  const isClosedLoan = !!loan.finishedDate && (loan.status === 'FINISHED' || loan.status === 'RENOVATED')
+  const isClosedLoan = !!loan.finishedDate && loan.status === 'FINISHED'
 
   sortedPayments.forEach((payment: any) => {
     const paymentId = `payment-${payment.id}`
