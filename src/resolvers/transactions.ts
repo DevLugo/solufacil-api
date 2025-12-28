@@ -12,6 +12,7 @@ export const transactionResolvers = {
         accountId?: string
         routeId?: string
         sourceType?: SourceType
+        sourceTypes?: SourceType[]
         entryType?: AccountEntryType
         fromDate?: Date
         toDate?: Date
@@ -30,7 +31,9 @@ export const transactionResolvers = {
       if (args.routeId) {
         where.snapshotRouteId = args.routeId
       }
-      if (args.sourceType) {
+      if (args.sourceTypes && args.sourceTypes.length > 0) {
+        where.sourceType = { in: args.sourceTypes }
+      } else if (args.sourceType) {
         where.sourceType = args.sourceType
       }
       if (args.entryType) {
@@ -411,6 +414,31 @@ export const transactionResolvers = {
       if (!parent.destinationAccountId) return null
       return context.prisma.account.findUnique({
         where: { id: parent.destinationAccountId },
+      })
+    },
+
+    route: async (
+      parent: { snapshotRouteId?: string | null },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      if (!parent.snapshotRouteId) return null
+      return context.prisma.route.findUnique({
+        where: { id: parent.snapshotRouteId },
+      })
+    },
+
+    lead: async (
+      parent: { snapshotLeadId?: string | null },
+      _args: unknown,
+      context: GraphQLContext
+    ) => {
+      if (!parent.snapshotLeadId) return null
+      return context.prisma.employee.findUnique({
+        where: { id: parent.snapshotLeadId },
+        include: {
+          personalDataRelation: true,
+        },
       })
     },
   },

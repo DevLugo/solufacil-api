@@ -3,7 +3,6 @@ import { Decimal } from 'decimal.js'
 import type { PrismaClient, PaymentMethod } from '@solufacil/database'
 import { PaymentRepository } from '../repositories/PaymentRepository'
 import { LoanRepository } from '../repositories/LoanRepository'
-import { TransactionRepository } from '../repositories/TransactionRepository'
 import { AccountRepository } from '../repositories/AccountRepository'
 import { BalanceService } from './BalanceService'
 import { calculatePaymentProfit } from '@solufacil/business-logic'
@@ -61,14 +60,12 @@ export interface UpdateLeadPaymentReceivedInput {
 export class PaymentService {
   private paymentRepository: PaymentRepository
   private loanRepository: LoanRepository
-  private transactionRepository: TransactionRepository
   private accountRepository: AccountRepository
   private balanceService: BalanceService
 
   constructor(private prisma: PrismaClient) {
     this.paymentRepository = new PaymentRepository(prisma)
     this.loanRepository = new LoanRepository(prisma)
-    this.transactionRepository = new TransactionRepository(prisma)
     this.accountRepository = new AccountRepository(prisma)
     this.balanceService = new BalanceService(prisma)
   }
@@ -124,42 +121,38 @@ export class PaymentService {
       // Obtener cuenta del lead
       const leadAccount = await this.getLeadAccount(loan.lead || '', tx)
 
-      // Crear transacción de ingreso
-      const incomeSource = input.paymentMethod === 'CASH'
-        ? 'CASH_LOAN_PAYMENT'
-        : 'BANK_LOAN_PAYMENT'
+      // Crear AccountEntry para el pago (CREDIT)
+      const balanceService = new BalanceService(tx as any)
+      const sourceType = input.paymentMethod === 'CASH'
+        ? 'LOAN_PAYMENT_CASH'
+        : 'LOAN_PAYMENT_BANK'
 
-      await this.transactionRepository.create(
-        {
-          amount: paymentAmount,
-          date: input.receivedAt,
-          type: 'INCOME',
-          incomeSource,
-          profitAmount,
-          returnToCapital,
-          sourceAccountId: leadAccount.id,
-          loanId: loan.id,
-          loanPaymentId: payment.id,
-          leadId: loan.lead || undefined,
-          routeId: loan.snapshotRouteId || undefined,
-        },
-        tx
-      )
+      await balanceService.createEntry({
+        accountId: leadAccount.id,
+        entryType: 'CREDIT',
+        amount: paymentAmount,
+        sourceType: sourceType as any,
+        loanId: loan.id,
+        loanPaymentId: payment.id,
+        snapshotLeadId: loan.lead || undefined,
+        snapshotRouteId: loan.snapshotRouteId || undefined,
+        profitAmount,
+        returnToCapital,
+        entryDate: input.receivedAt,
+      })
 
-      // Crear transacción de comisión si aplica
+      // Crear AccountEntry para la comisión si aplica (DEBIT)
       if (comission.greaterThan(0)) {
-        await this.transactionRepository.create(
-          {
-            amount: comission,
-            date: input.receivedAt,
-            type: 'EXPENSE',
-            expenseSource: 'LOAN_PAYMENT_COMISSION',
-            sourceAccountId: leadAccount.id,
-            loanPaymentId: payment.id,
-            leadId: loan.lead || undefined,
-          },
-          tx
-        )
+        await balanceService.createEntry({
+          accountId: leadAccount.id,
+          entryType: 'DEBIT',
+          amount: comission,
+          sourceType: 'PAYMENT_COMMISSION',
+          loanPaymentId: payment.id,
+          snapshotLeadId: loan.lead || undefined,
+          snapshotRouteId: loan.snapshotRouteId || undefined,
+          entryDate: input.receivedAt,
+        })
       }
 
       // Actualizar métricas del préstamo
@@ -477,69 +470,7 @@ export class PaymentService {
         })
       }
 
-      // Actualizar transacciones asociadas (incluyendo recálculo de profitAmount)
-      if (input.amount || input.paymentMethod) {
-        const incomeSource = (input.paymentMethod || existingPayment.paymentMethod) === 'CASH'
-          ? 'CASH_LOAN_PAYMENT'
-          : 'BANK_LOAN_PAYMENT'
-
-        // Recalcular profitAmount y returnToCapital si cambió el monto
-        const totalProfit = new Decimal(loan.profitAmount.toString())
-        const totalDebt = new Decimal(loan.totalDebtAcquired.toString())
-        const isBadDebt = !!loan.badDebtDate
-
-        const { profitAmount, returnToCapital } = calculatePaymentProfit(
-          newAmount,
-          totalProfit,
-          totalDebt,
-          isBadDebt
-        )
-
-        await tx.transaction.updateMany({
-          where: {
-            loanPayment: id,
-            type: 'INCOME',
-          },
-          data: {
-            amount: newAmount,
-            incomeSource,
-            profitAmount,
-            returnToCapital,
-          },
-        })
-      }
-
-      // Actualizar transacción de comisión
-      if (input.comission !== undefined) {
-        if (newComission.isZero()) {
-          // Eliminar transacción de comisión si existe
-          await tx.transaction.deleteMany({
-            where: {
-              loanPayment: id,
-              type: 'EXPENSE',
-              expenseSource: 'LOAN_PAYMENT_COMISSION',
-            },
-          })
-        } else {
-          // Actualizar o crear transacción de comisión
-          const existingComissionTx = await tx.transaction.findFirst({
-            where: {
-              loanPayment: id,
-              type: 'EXPENSE',
-              expenseSource: 'LOAN_PAYMENT_COMISSION',
-            },
-          })
-
-          if (existingComissionTx) {
-            await tx.transaction.update({
-              where: { id: existingComissionTx.id },
-              data: { amount: newComission },
-            })
-          }
-          // Note: If there was no comission tx before and now there is, we don't create it
-          // because the original payment flow handles that
-        }
-      }
+      // Note: AccountEntry records are managed by BalanceService through updateLeadPaymentReceived
 
       // Ajustar balance: amountDiff (INCOME) - comissionDiff (EXPENSE)
       const netBalanceChange = amountDiff.minus(comissionDiff)
@@ -566,9 +497,9 @@ export class PaymentService {
     const comission = new Decimal(existingPayment.comission.toString())
 
     return this.prisma.$transaction(async (tx) => {
-      // Eliminar transacciones asociadas primero
-      await tx.transaction.deleteMany({
-        where: { loanPayment: id },
+      // Eliminar AccountEntry records asociados
+      await tx.accountEntry.deleteMany({
+        where: { loanPaymentId: id },
       })
 
       // Eliminar el pago
@@ -654,12 +585,7 @@ export class PaymentService {
       // 2. Delete all existing AccountEntry for this LPR (this reverses all balance changes)
       await balanceService.deleteEntriesByLeadPaymentReceived(id, tx)
 
-      // 3. Delete all existing Transaction for this LPR (cleanup)
-      await tx.transaction.deleteMany({
-        where: { leadPaymentReceived: id },
-      })
-
-      // 4. Process payments: delete/update/create LoanPayment records
+      // 3. Process payments: delete/update/create LoanPayment records
       const existingPaymentsMap = new Map(
         existingRecord.payments.map(p => [p.id, p])
       )

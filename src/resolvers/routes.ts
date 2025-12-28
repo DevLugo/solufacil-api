@@ -171,11 +171,20 @@ export const routeResolvers = {
     },
 
     transactions: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {
-      return context.prisma.transaction.findMany({
-        where: { route: parent.id },
-        orderBy: { date: 'desc' },
+      // Read from AccountEntry instead of Transaction
+      const entries = await context.prisma.accountEntry.findMany({
+        where: { snapshotRouteId: parent.id },
+        orderBy: { entryDate: 'desc' },
         take: 50,
       })
+      // Return entries - the Transaction resolver will handle field mapping
+      return entries.map(e => ({
+        ...e,
+        date: e.entryDate,
+        sourceAccount: e.accountId,
+        route: e.snapshotRouteId,
+        lead: e.snapshotLeadId,
+      }))
     },
 
     locations: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {

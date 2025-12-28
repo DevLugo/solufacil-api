@@ -12,7 +12,6 @@ export const testData = {
   loanIds: [] as string[],
   loantypeIds: [] as string[],
   leadPaymentReceivedIds: [] as string[],
-  transactionIds: [] as string[],
   loanPaymentIds: [] as string[],
   personalDataIds: [] as string[],
   accountEntryIds: [] as string[],
@@ -27,7 +26,6 @@ beforeEach(async () => {
   testData.loanIds = []
   testData.loantypeIds = []
   testData.leadPaymentReceivedIds = []
-  testData.transactionIds = []
   testData.loanPaymentIds = []
   testData.personalDataIds = []
   testData.accountEntryIds = []
@@ -42,12 +40,6 @@ afterEach(async () => {
     if (testData.accountEntryIds.length > 0) {
       await prisma.accountEntry.deleteMany({
         where: { id: { in: testData.accountEntryIds } }
-      })
-    }
-
-    if (testData.transactionIds.length > 0) {
-      await prisma.transaction.deleteMany({
-        where: { id: { in: testData.transactionIds } }
       })
     }
 

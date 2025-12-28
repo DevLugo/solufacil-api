@@ -94,6 +94,11 @@ enum SourceType {
   EXTERNAL_SALARY
   VIATIC
   TRAVEL_EXPENSES
+  EMPLOYEE_EXPENSE
+  GENERAL_EXPENSE
+  CAR_PAYMENT
+  BANK_EXPENSE
+  OTHER_EXPENSE
   FALCO_LOSS
   FALCO_COMPENSATORY
   INITIAL_BALANCE
@@ -278,6 +283,8 @@ type AccountEntry {
   loan: Loan
   loanPayment: LoanPayment
   destinationAccount: Account
+  route: Route
+  lead: Employee
   createdAt: DateTime!
 }
 
@@ -975,6 +982,7 @@ type Query {
     accountId: ID
     routeId: ID
     sourceType: SourceType
+    sourceTypes: [SourceType!]
     entryType: AccountEntryType
     fromDate: DateTime
     toDate: DateTime

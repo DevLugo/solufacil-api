@@ -166,11 +166,19 @@ export const employeeResolvers = {
     },
 
     transactions: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {
-      return context.prisma.transaction.findMany({
-        where: { lead: parent.id },
-        orderBy: { date: 'desc' },
+      // Read from AccountEntry instead of Transaction
+      const entries = await context.prisma.accountEntry.findMany({
+        where: { snapshotLeadId: parent.id },
+        orderBy: { entryDate: 'desc' },
         take: 50,
       })
+      return entries.map(e => ({
+        ...e,
+        date: e.entryDate,
+        sourceAccount: e.accountId,
+        route: e.snapshotRouteId,
+        lead: e.snapshotLeadId,
+      }))
     },
 
     commissionPayments: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {

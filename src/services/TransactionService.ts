@@ -1,7 +1,6 @@
 import { GraphQLError } from 'graphql'
 import { Decimal } from 'decimal.js'
 import type { PrismaClient, TransactionType, SourceType } from '@solufacil/database'
-import { TransactionRepository } from '../repositories/TransactionRepository'
 import { AccountRepository } from '../repositories/AccountRepository'
 import { BalanceService } from './BalanceService'
 
@@ -64,24 +63,31 @@ function mapToSourceType(type: TransactionType, incomeSource?: string, expenseSo
 }
 
 export class TransactionService {
-  private transactionRepository: TransactionRepository
   private accountRepository: AccountRepository
   private balanceService: BalanceService
 
   constructor(private prisma: PrismaClient) {
-    this.transactionRepository = new TransactionRepository(prisma)
     this.accountRepository = new AccountRepository(prisma)
     this.balanceService = new BalanceService(prisma)
   }
 
   async findById(id: string) {
-    const transaction = await this.transactionRepository.findById(id)
-    if (!transaction) {
-      throw new GraphQLError('Transaction not found', {
+    const entry = await this.prisma.accountEntry.findUnique({
+      where: { id },
+      include: {
+        account: true,
+        loan: { include: { borrowerRelation: { include: { personalDataRelation: true } } } },
+        loanPayment: true,
+      },
+    })
+
+    if (!entry) {
+      throw new GraphQLError('Entry not found', {
         extensions: { code: 'NOT_FOUND' },
       })
     }
-    return transaction
+
+    return this.mapEntryToTransaction(entry)
   }
 
   async findMany(options?: {
@@ -93,7 +99,164 @@ export class TransactionService {
     limit?: number
     offset?: number
   }) {
-    return this.transactionRepository.findMany(options)
+    const where: any = {}
+
+    // Map TransactionType to SourceTypes
+    if (options?.type) {
+      const sourceTypes = this.getSourceTypesForTransactionType(options.type)
+      if (sourceTypes.length > 0) {
+        where.sourceType = { in: sourceTypes }
+      }
+    }
+
+    if (options?.routeId) {
+      where.snapshotRouteId = options.routeId
+    }
+
+    if (options?.accountId) {
+      where.OR = [
+        { accountId: options.accountId },
+        { destinationAccountId: options.accountId },
+      ]
+    }
+
+    if (options?.fromDate || options?.toDate) {
+      where.entryDate = {}
+      if (options?.fromDate) {
+        where.entryDate.gte = options.fromDate
+      }
+      if (options?.toDate) {
+        where.entryDate.lte = options.toDate
+      }
+    }
+
+    const [entries, totalCount] = await Promise.all([
+      this.prisma.accountEntry.findMany({
+        where,
+        take: options?.limit ?? 50,
+        skip: options?.offset ?? 0,
+        orderBy: { entryDate: 'desc' },
+        include: {
+          account: { select: { id: true, name: true, type: true } },
+          loan: {
+            select: {
+              id: true,
+              amountGived: true,
+              borrower: true,
+              borrowerRelation: { select: { id: true, personalData: true, personalDataRelation: { select: { id: true, fullName: true } } } },
+            },
+          },
+          loanPayment: { select: { id: true, amount: true, comission: true, paymentMethod: true } },
+        },
+      }),
+      this.prisma.accountEntry.count({ where }),
+    ])
+
+    const transactions = await Promise.all(entries.map(entry => this.mapEntryToTransaction(entry)))
+    return { transactions, totalCount }
+  }
+
+  private getSourceTypesForTransactionType(type: TransactionType): SourceType[] {
+    switch (type) {
+      case 'INCOME':
+        return ['LOAN_PAYMENT_CASH', 'LOAN_PAYMENT_BANK']
+      case 'EXPENSE':
+        return [
+          'LOAN_GRANT', 'LOAN_GRANT_COMMISSION', 'PAYMENT_COMMISSION',
+          'GASOLINE', 'GASOLINE_TOKA', 'NOMINA_SALARY', 'EXTERNAL_SALARY',
+          'VIATIC', 'TRAVEL_EXPENSES', 'EMPLOYEE_EXPENSE', 'GENERAL_EXPENSE',
+          'CAR_PAYMENT', 'BANK_EXPENSE', 'OTHER_EXPENSE', 'FALCO_LOSS'
+        ]
+      case 'TRANSFER':
+        return ['TRANSFER_OUT', 'TRANSFER_IN']
+      default:
+        return []
+    }
+  }
+
+  private async mapEntryToTransaction(entry: any) {
+    const { type, incomeSource, expenseSource } = this.mapSourceTypeToLegacy(entry.sourceType)
+
+    // Fetch route and lead if we have snapshot IDs
+    let routeRelation = null
+    let leadRelation = null
+
+    if (entry.snapshotRouteId) {
+      routeRelation = await this.prisma.route.findUnique({
+        where: { id: entry.snapshotRouteId },
+        select: { id: true, name: true },
+      })
+    }
+
+    if (entry.snapshotLeadId) {
+      leadRelation = await this.prisma.employee.findUnique({
+        where: { id: entry.snapshotLeadId },
+        select: { id: true, personalData: true, personalDataRelation: { select: { id: true, fullName: true } } },
+      })
+    }
+
+    // Fetch destination account if it's a transfer
+    let destinationAccountRelation = null
+    if (entry.destinationAccountId) {
+      destinationAccountRelation = await this.prisma.account.findUnique({
+        where: { id: entry.destinationAccountId },
+        select: { id: true, name: true, type: true },
+      })
+    }
+
+    return {
+      id: entry.id,
+      amount: entry.amount,
+      date: entry.entryDate,
+      type,
+      incomeSource,
+      expenseSource,
+      description: entry.description,
+      profitAmount: entry.profitAmount,
+      returnToCapital: entry.returnToCapital,
+      snapshotLeadId: entry.snapshotLeadId,
+      snapshotRouteId: entry.snapshotRouteId,
+      sourceAccount: entry.accountId,
+      destinationAccount: entry.destinationAccountId,
+      loan: entry.loanId,
+      loanPayment: entry.loanPaymentId,
+      route: entry.snapshotRouteId,
+      lead: entry.snapshotLeadId,
+      createdAt: entry.createdAt,
+      updatedAt: entry.createdAt,
+      sourceAccountRelation: entry.account,
+      destinationAccountRelation,
+      loanRelation: entry.loan,
+      loanPaymentRelation: entry.loanPayment,
+      routeRelation,
+      leadRelation,
+    }
+  }
+
+  private mapSourceTypeToLegacy(sourceType: SourceType): { type: TransactionType; incomeSource?: string; expenseSource?: string } {
+    switch (sourceType) {
+      case 'LOAN_PAYMENT_CASH': return { type: 'INCOME', incomeSource: 'CASH_LOAN_PAYMENT' }
+      case 'LOAN_PAYMENT_BANK': return { type: 'INCOME', incomeSource: 'BANK_LOAN_PAYMENT' }
+      case 'LOAN_GRANT': return { type: 'EXPENSE', expenseSource: 'LOAN_GRANTED' }
+      case 'LOAN_GRANT_COMMISSION': return { type: 'EXPENSE', expenseSource: 'LOAN_GRANTED_COMISSION' }
+      case 'PAYMENT_COMMISSION': return { type: 'EXPENSE', expenseSource: 'LOAN_PAYMENT_COMISSION' }
+      case 'GASOLINE': return { type: 'EXPENSE', expenseSource: 'GASOLINE' }
+      case 'GASOLINE_TOKA': return { type: 'EXPENSE', expenseSource: 'GASOLINE_TOKA' }
+      case 'NOMINA_SALARY': return { type: 'EXPENSE', expenseSource: 'NOMINA_SALARY' }
+      case 'EXTERNAL_SALARY': return { type: 'EXPENSE', expenseSource: 'EXTERNAL_SALARY' }
+      case 'VIATIC': return { type: 'EXPENSE', expenseSource: 'VIATIC' }
+      case 'TRAVEL_EXPENSES': return { type: 'EXPENSE', expenseSource: 'TRAVEL_EXPENSES' }
+      case 'EMPLOYEE_EXPENSE': return { type: 'EXPENSE', expenseSource: 'EMPLOYEE_EXPENSE' }
+      case 'GENERAL_EXPENSE': return { type: 'EXPENSE', expenseSource: 'GENERAL_EXPENSE' }
+      case 'CAR_PAYMENT': return { type: 'EXPENSE', expenseSource: 'CAR_PAYMENT' }
+      case 'BANK_EXPENSE': return { type: 'EXPENSE', expenseSource: 'BANK_EXPENSE' }
+      case 'OTHER_EXPENSE': return { type: 'EXPENSE', expenseSource: 'OTHER_EXPENSE' }
+      case 'FALCO_LOSS': return { type: 'EXPENSE', expenseSource: 'FALCO_LOSS' }
+      case 'FALCO_COMPENSATORY': return { type: 'INCOME', incomeSource: 'FALCO_COMPENSATORY' }
+      case 'TRANSFER_OUT':
+      case 'TRANSFER_IN': return { type: 'TRANSFER' }
+      default: return { type: 'EXPENSE', expenseSource: 'OTRO' }
+    }
   }
 
   async create(input: CreateTransactionInput) {
@@ -265,22 +428,20 @@ export class TransactionService {
   }
 
   /**
-   * @deprecated Este método opera sobre Transaction legacy.
-   * Las nuevas operaciones usan AccountEntry via BalanceService.
-   * Solo usar para editar transacciones creadas antes de la migración.
+   * Update an AccountEntry and adjust balances accordingly.
    */
   async update(id: string, input: UpdateTransactionInput) {
-    console.warn('[DEPRECATED] TransactionService.update() - Use AccountEntry for new operations')
-
-    // Obtener transacción actual
-    const existingTransaction = await this.transactionRepository.findById(id)
-    if (!existingTransaction) {
-      throw new GraphQLError('Transaction not found', {
+    // Get existing entry
+    const existingEntry = await this.prisma.accountEntry.findUnique({
+      where: { id },
+    })
+    if (!existingEntry) {
+      throw new GraphQLError('Entry not found', {
         extensions: { code: 'NOT_FOUND' },
       })
     }
 
-    // Si se está cambiando la cuenta, validar que existe
+    // Validate new account if changing
     if (input.sourceAccountId) {
       const accountExists = await this.accountRepository.exists(input.sourceAccountId)
       if (!accountExists) {
@@ -290,95 +451,99 @@ export class TransactionService {
       }
     }
 
-    const oldSourceAccountId = existingTransaction.sourceAccount
-    const newSourceAccountId = input.sourceAccountId || oldSourceAccountId
+    const oldAccountId = existingEntry.accountId
+    const newAccountId = input.sourceAccountId || oldAccountId
+    const oldAmount = new Decimal(existingEntry.amount.toString())
+    const newAmount = input.amount ? new Decimal(input.amount) : oldAmount
+    const isDebit = existingEntry.entryType === 'DEBIT'
 
     return this.prisma.$transaction(async (tx) => {
-      // Actualizar la transacción
-      const updatedTransaction = await this.transactionRepository.update(
-        id,
-        {
-          amount: input.amount ? new Decimal(input.amount) : undefined,
-          expenseSource: input.expenseSource,
-          incomeSource: input.incomeSource,
-          sourceAccountId: input.sourceAccountId,
+      // Update the entry
+      const updatedEntry = await tx.accountEntry.update({
+        where: { id },
+        data: {
+          amount: newAmount,
+          accountId: newAccountId,
+          description: input.description || existingEntry.description,
         },
-        tx
-      )
+      })
 
-      // Ajustar balances según el cambio
-      const oldAmount = new Decimal(existingTransaction.amount.toString())
-      const newAmount = input.amount ? new Decimal(input.amount) : oldAmount
-      const transactionType = existingTransaction.type
-
-      // Si cambió la cuenta, revertir en la antigua y aplicar en la nueva
-      if (input.sourceAccountId && input.sourceAccountId !== oldSourceAccountId) {
-        // Revertir de la cuenta antigua
-        if (transactionType === 'INCOME') {
-          await this.accountRepository.subtractFromBalance(oldSourceAccountId, oldAmount, tx)
-        } else if (transactionType === 'EXPENSE') {
-          await this.accountRepository.addToBalance(oldSourceAccountId, oldAmount, tx)
-        }
-        // Aplicar a la cuenta nueva
-        if (transactionType === 'INCOME') {
-          await this.accountRepository.addToBalance(newSourceAccountId, newAmount, tx)
-        } else if (transactionType === 'EXPENSE') {
-          await this.accountRepository.subtractFromBalance(newSourceAccountId, newAmount, tx)
+      // Adjust balances
+      if (newAccountId !== oldAccountId) {
+        // Account changed - reverse from old, apply to new
+        if (isDebit) {
+          // DEBIT had subtracted from balance, add it back to old account
+          await this.accountRepository.addToBalance(oldAccountId, oldAmount, tx)
+          // Subtract from new account
+          await this.accountRepository.subtractFromBalance(newAccountId, newAmount, tx)
+        } else {
+          // CREDIT had added to balance, subtract from old account
+          await this.accountRepository.subtractFromBalance(oldAccountId, oldAmount, tx)
+          // Add to new account
+          await this.accountRepository.addToBalance(newAccountId, newAmount, tx)
         }
       } else if (!oldAmount.equals(newAmount)) {
-        // Solo cambió el monto, aplicar la diferencia
+        // Only amount changed, apply difference
         const difference = newAmount.minus(oldAmount)
-        if (transactionType === 'INCOME') {
-          await this.accountRepository.addToBalance(newSourceAccountId, difference, tx)
-        } else if (transactionType === 'EXPENSE') {
-          await this.accountRepository.subtractFromBalance(newSourceAccountId, difference, tx)
+        if (isDebit) {
+          // DEBIT: larger amount = more subtracted
+          await this.accountRepository.subtractFromBalance(newAccountId, difference, tx)
+        } else {
+          // CREDIT: larger amount = more added
+          await this.accountRepository.addToBalance(newAccountId, difference, tx)
         }
       }
 
-      return updatedTransaction
+      return this.mapEntryToTransaction(updatedEntry)
     })
   }
 
   /**
-   * @deprecated Este método opera sobre Transaction legacy.
-   * Las nuevas operaciones usan AccountEntry via BalanceService.
-   * Solo usar para eliminar transacciones creadas antes de la migración.
+   * Delete an AccountEntry and reverse its balance effect.
    */
   async delete(id: string) {
-    console.warn('[DEPRECATED] TransactionService.delete() - Use AccountEntry for new operations')
-
-    // Obtener transacción actual
-    const existingTransaction = await this.transactionRepository.findById(id)
-    if (!existingTransaction) {
-      throw new GraphQLError('Transaction not found', {
+    // Get existing entry
+    const existingEntry = await this.prisma.accountEntry.findUnique({
+      where: { id },
+    })
+    if (!existingEntry) {
+      throw new GraphQLError('Entry not found', {
         extensions: { code: 'NOT_FOUND' },
       })
     }
 
-    const sourceAccountId = existingTransaction.sourceAccount
-    const destinationAccountId = existingTransaction.destinationAccount
-
-    const amount = new Decimal(existingTransaction.amount.toString())
-    const transactionType = existingTransaction.type
+    const accountId = existingEntry.accountId
+    const amount = new Decimal(existingEntry.amount.toString())
+    const isDebit = existingEntry.entryType === 'DEBIT'
 
     return this.prisma.$transaction(async (tx) => {
-      // Eliminar la transacción
-      await this.transactionRepository.delete(id, tx)
+      // Delete the entry
+      await tx.accountEntry.delete({
+        where: { id },
+      })
 
-      // Revertir el efecto en los balances
-      if (transactionType === 'INCOME' && sourceAccountId) {
-        // INCOME sumó al balance, hay que restarlo
-        await this.accountRepository.subtractFromBalance(sourceAccountId, amount, tx)
-      } else if (transactionType === 'EXPENSE' && sourceAccountId) {
-        // EXPENSE restó del balance, hay que sumarlo
-        await this.accountRepository.addToBalance(sourceAccountId, amount, tx)
-      } else if (transactionType === 'TRANSFER') {
-        // TRANSFER restó del origen y sumó al destino, hay que revertir ambos
-        if (sourceAccountId) {
-          await this.accountRepository.addToBalance(sourceAccountId, amount, tx)
-        }
-        if (destinationAccountId) {
-          await this.accountRepository.subtractFromBalance(destinationAccountId, amount, tx)
+      // Reverse the balance effect
+      if (isDebit) {
+        // DEBIT had subtracted from balance, add it back
+        await this.accountRepository.addToBalance(accountId, amount, tx)
+      } else {
+        // CREDIT had added to balance, subtract it
+        await this.accountRepository.subtractFromBalance(accountId, amount, tx)
+      }
+
+      // Handle transfer pair: if this was TRANSFER_OUT, also delete the matching TRANSFER_IN
+      if (existingEntry.sourceType === 'TRANSFER_OUT' && existingEntry.destinationAccountId) {
+        const transferInEntry = await tx.accountEntry.findFirst({
+          where: {
+            sourceType: 'TRANSFER_IN',
+            accountId: existingEntry.destinationAccountId,
+            amount: amount,
+            entryDate: existingEntry.entryDate,
+          },
+        })
+        if (transferInEntry) {
+          await tx.accountEntry.delete({ where: { id: transferInEntry.id } })
+          await this.accountRepository.subtractFromBalance(existingEntry.destinationAccountId, amount, tx)
         }
       }
 

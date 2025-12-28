@@ -127,7 +127,7 @@ export class AccountRepository {
    * @deprecated Use BalanceService.createEntry() with entryType='CREDIT' instead.
    *
    * Este método se mantiene para compatibilidad con código legacy
-   * (TransactionService.update/delete para transacciones antiguas).
+   * (TransactionService.update/delete para AccountEntry existentes).
    *
    * NO usar en código nuevo.
    */
@@ -150,7 +150,7 @@ export class AccountRepository {
    * @deprecated Use BalanceService.createEntry() with entryType='DEBIT' instead.
    *
    * Este método se mantiene para compatibilidad con código legacy
-   * (TransactionService.update/delete para transacciones antiguas).
+   * (TransactionService.update/delete para AccountEntry existentes).
    *
    * NO usar en código nuevo.
    */

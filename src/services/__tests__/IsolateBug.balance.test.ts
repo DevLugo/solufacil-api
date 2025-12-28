@@ -335,14 +335,14 @@ describe('Isolate Bug - Find Source of 76 Peso Discrepancy', () => {
     const loanId = createdLoans[0].id
     testData.loanIds.push(loanId)
 
-    // Check what transactions exist for this loan
-    const transactions = await prisma.transaction.findMany({
-      where: { loan: loanId },
+    // Check what entries exist for this loan
+    const entries = await prisma.accountEntry.findMany({
+      where: { loanId },
     })
 
-    console.log('\nTransactions for this loan:')
-    for (const t of transactions) {
-      console.log(`  - ${t.type}: ${t.amount} (source: ${t.sourceAccount})`)
+    console.log('\nAccountEntry for this loan:')
+    for (const e of entries) {
+      console.log(`  - ${e.sourceType}: ${e.amount} (account: ${e.accountId})`)
     }
 
     // Check loan payments
@@ -362,11 +362,11 @@ describe('Isolate Bug - Find Source of 76 Peso Discrepancy', () => {
     console.log('\n--- Canceling loan ---')
     await loanService.cancelLoanWithAccountRestore(loanId, testEnv.cashAccount.id)
 
-    // Check transactions again
-    const transactionsAfter = await prisma.transaction.findMany({
-      where: { loan: loanId },
+    // Check entries again
+    const entriesAfter = await prisma.accountEntry.findMany({
+      where: { loanId },
     })
-    console.log(`\nTransactions after cancel: ${transactionsAfter.length}`)
+    console.log(`\nAccountEntry after cancel: ${entriesAfter.length}`)
 
     const afterCancel = await getBalance(prisma, testEnv.cashAccount.id)
     console.log(`Cash after cancel: ${afterCancel}`)

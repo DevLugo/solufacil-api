@@ -6,7 +6,6 @@ import { LoantypeRepository } from '../repositories/LoantypeRepository'
 import { BorrowerRepository } from '../repositories/BorrowerRepository'
 import { EmployeeRepository } from '../repositories/EmployeeRepository'
 import { AccountRepository } from '../repositories/AccountRepository'
-import { TransactionRepository } from '../repositories/TransactionRepository'
 import { PaymentRepository } from '../repositories/PaymentRepository'
 import { PersonalDataRepository } from '../repositories/PersonalDataRepository'
 import { BalanceService } from './BalanceService'
@@ -124,7 +123,6 @@ export class LoanService {
   private borrowerRepository: BorrowerRepository
   private employeeRepository: EmployeeRepository
   private accountRepository: AccountRepository
-  private transactionRepository: TransactionRepository
   private paymentRepository: PaymentRepository
   private personalDataRepository: PersonalDataRepository
   private balanceService: BalanceService
@@ -135,7 +133,6 @@ export class LoanService {
     this.borrowerRepository = new BorrowerRepository(prisma)
     this.employeeRepository = new EmployeeRepository(prisma)
     this.accountRepository = new AccountRepository(prisma)
-    this.transactionRepository = new TransactionRepository(prisma)
     this.paymentRepository = new PaymentRepository(prisma)
     this.personalDataRepository = new PersonalDataRepository(prisma)
     this.balanceService = new BalanceService(prisma)

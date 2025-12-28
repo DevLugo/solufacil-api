@@ -346,9 +346,18 @@ export const paymentResolvers = {
     },
 
     transactions: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {
-      return context.prisma.transaction.findMany({
-        where: { loanPayment: parent.id },
+      // Read from AccountEntry instead of Transaction
+      const entries = await context.prisma.accountEntry.findMany({
+        where: { loanPaymentId: parent.id },
+        orderBy: { entryDate: 'desc' },
       })
+      return entries.map(e => ({
+        ...e,
+        date: e.entryDate,
+        sourceAccount: e.accountId,
+        route: e.snapshotRouteId,
+        lead: e.snapshotLeadId,
+      }))
     },
   },
 

@@ -294,9 +294,3 @@ export function trackLoanPayment(id: string) {
   testData.loanPaymentIds.push(id)
 }
 
-/**
- * Track a created Transaction for cleanup
- */
-export function trackTransaction(id: string) {
-  testData.transactionIds.push(id)
-}

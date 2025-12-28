@@ -9,7 +9,7 @@ export interface BulkDateMigrationInput {
 }
 
 export interface BulkDateMigrationPreview {
-  transactionsCount: number
+  accountEntriesCount: number
   loanPaymentsCount: number
   loansCount: number
   totalRecords: number
@@ -18,7 +18,7 @@ export interface BulkDateMigrationPreview {
 export interface BulkDateMigrationResult {
   success: boolean
   message: string
-  transactionsUpdated: number
+  accountEntriesUpdated: number
   loanPaymentsUpdated: number
   loansUpdated: number
   totalUpdated: number
@@ -42,9 +42,9 @@ export class BulkDateMigrationService {
     }
 
     // Build where clauses with optional routeId filter
-    const transactionWhere = {
+    const accountEntryWhere = {
       ...baseCreatedAtFilter,
-      ...(input.routeId && { route: input.routeId }),
+      ...(input.routeId && { snapshotRouteId: input.routeId }),
     }
 
     const loanPaymentWhere = {
@@ -58,17 +58,17 @@ export class BulkDateMigrationService {
     }
 
     // Count records in parallel for performance
-    const [transactionsCount, loanPaymentsCount, loansCount] = await Promise.all([
-      this.prisma.transaction.count({ where: transactionWhere }),
+    const [accountEntriesCount, loanPaymentsCount, loansCount] = await Promise.all([
+      this.prisma.accountEntry.count({ where: accountEntryWhere }),
       this.prisma.loanPayment.count({ where: loanPaymentWhere }),
       this.prisma.loan.count({ where: loanWhere }),
     ])
 
     return {
-      transactionsCount,
+      accountEntriesCount,
       loanPaymentsCount,
       loansCount,
-      totalRecords: transactionsCount + loanPaymentsCount + loansCount,
+      totalRecords: accountEntriesCount + loanPaymentsCount + loansCount,
     }
   }
 
@@ -88,7 +88,7 @@ export class BulkDateMigrationService {
       return {
         success: true,
         message: 'No hay registros para migrar en el rango seleccionado',
-        transactionsUpdated: 0,
+        accountEntriesUpdated: 0,
         loanPaymentsUpdated: 0,
         loansUpdated: 0,
         totalUpdated: 0,
@@ -105,9 +105,9 @@ export class BulkDateMigrationService {
       }
 
       // Build where clauses with optional routeId filter
-      const transactionWhere = {
+      const accountEntryWhere = {
         ...baseCreatedAtFilter,
-        ...(input.routeId && { route: input.routeId }),
+        ...(input.routeId && { snapshotRouteId: input.routeId }),
       }
 
       const loanPaymentWhere = {
@@ -121,10 +121,10 @@ export class BulkDateMigrationService {
       }
 
       // Update all three entity types in parallel
-      const [transactionsResult, loanPaymentsResult, loansResult] = await Promise.all([
-        tx.transaction.updateMany({
-          where: transactionWhere,
-          data: { date: input.newBusinessDate },
+      const [accountEntriesResult, loanPaymentsResult, loansResult] = await Promise.all([
+        tx.accountEntry.updateMany({
+          where: accountEntryWhere,
+          data: { entryDate: input.newBusinessDate },
         }),
         tx.loanPayment.updateMany({
           where: loanPaymentWhere,
@@ -137,19 +137,19 @@ export class BulkDateMigrationService {
       ])
 
       return {
-        transactionsUpdated: transactionsResult.count,
+        accountEntriesUpdated: accountEntriesResult.count,
         loanPaymentsUpdated: loanPaymentsResult.count,
         loansUpdated: loansResult.count,
       }
     })
 
     const totalUpdated =
-      result.transactionsUpdated + result.loanPaymentsUpdated + result.loansUpdated
+      result.accountEntriesUpdated + result.loanPaymentsUpdated + result.loansUpdated
 
     return {
       success: true,
       message: `Se migraron ${totalUpdated} registros correctamente`,
-      transactionsUpdated: result.transactionsUpdated,
+      accountEntriesUpdated: result.accountEntriesUpdated,
       loanPaymentsUpdated: result.loanPaymentsUpdated,
       loansUpdated: result.loansUpdated,
       totalUpdated,
