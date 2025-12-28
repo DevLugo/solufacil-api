@@ -79,6 +79,7 @@ api/
 │   │   ├── reports.ts     # Reportes
 │   │   └── ...
 │   ├── services/          # Logica de negocio
+│   │   ├── BalanceService.ts    # IMPORTANTE: Manejo centralizado de balances
 │   │   ├── LoanService.ts
 │   │   ├── PaymentService.ts
 │   │   ├── AuthService.ts
@@ -168,9 +169,24 @@ Este proyecto usa paquetes del workspace:
 ## Entidades Principales
 
 - **Loans**: Prestamos
-- **Payments**: Pagos
+- **Payments**: Pagos (LoanPayment, LeadPaymentReceived)
 - **Clients/Borrowers**: Clientes
 - **Routes**: Rutas de cobranza
 - **Employees**: Empleados/Cobradores
-- **Transactions**: Transacciones
+- **AccountEntry**: Ledger de movimientos contables (reemplaza Transaction)
+- **Accounts**: Cuentas de efectivo y banco
 - **Documents**: Documentos adjuntos
+
+### Sistema de Balance (AccountEntry)
+
+El balance de cuentas se calcula desde el ledger:
+```
+Balance = SUM(CREDIT) - SUM(DEBIT)
+```
+
+Toda operacion que afecta balance debe usar `BalanceService.createEntry()`:
+- Pagos recibidos → CREDIT (LOAN_PAYMENT_CASH/LOAN_PAYMENT_BANK)
+- Prestamos otorgados → DEBIT (LOAN_GRANT)
+- Comisiones → DEBIT (PAYMENT_COMMISSION/LOAN_GRANT_COMMISSION)
+- Gastos → DEBIT (GASOLINE, NOMINA_SALARY, etc.)
+- Transfers cash→banco → DEBIT(TRANSFER_OUT) + CREDIT(TRANSFER_IN)

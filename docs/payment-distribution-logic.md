@@ -138,8 +138,8 @@ newBankPaid = existingBankPaid + bankDelta + cashToBankDelta
 When payments are deleted, the backend automatically treats this as a distribution change, even if the frontend didn't explicitly send new distribution values. This ensures:
 
 1. **TRANSFER adjustment is applied**: The existing `cashToBank` is factored into `oldCashChange`/`oldBankChange`
-2. **TRANSFER transaction is cleaned up**: If all payments are deleted, the TRANSFER transaction is also deleted
-3. **Balance reversal is correct**: Account balances are properly reversed including the TRANSFER effect
+2. **Transfer entries are cleaned up**: If all payments are deleted, the TRANSFER_OUT/TRANSFER_IN entries are also deleted
+3. **Balance reversal is correct**: Account balances are properly reversed including the transfer effect
 
 **Example - Deleting all payments with TRANSFER**:
 - Before: cash=8000, bank=1000, CASH payments=8700, MONEY_TRANSFER=300, cashToBank=700
@@ -162,13 +162,29 @@ When payments are deleted, the backend automatically treats this as a distributi
 
 ## Balance Account Updates
 
-When distribution changes, the system must also update account balances:
+When distribution changes, the system must also update account balances via `BalanceService`:
 
 1. **CASH account**: Changes by `netCashChange`
 2. **BANK account**: Changes by `netBankChange`
-3. **TRANSFER transaction**: Created/Updated/Deleted based on `cashToBank`
+3. **Transfer entries**: Created/Deleted via AccountEntry with sourceType `TRANSFER_OUT` (DEBIT from cash) and `TRANSFER_IN` (CREDIT to bank)
 
-The TRANSFER transaction represents the leader's deposit of collected cash to the bank.
+The transfer entries represent the leader's deposit of collected cash to the bank.
+
+### AccountEntry Model
+
+All balance changes are recorded in the `AccountEntry` ledger:
+
+```
+Balance = SUM(CREDIT entries) - SUM(DEBIT entries)
+```
+
+| SourceType | EntryType | Description |
+|------------|-----------|-------------|
+| LOAN_PAYMENT_CASH | CREDIT | Cash payment received |
+| LOAN_PAYMENT_BANK | CREDIT | Bank transfer payment received |
+| PAYMENT_COMMISSION | DEBIT | Commission deducted |
+| TRANSFER_OUT | DEBIT | Cash transferred to bank |
+| TRANSFER_IN | CREDIT | Bank receives cash transfer |
 
 ## Summary: Data Flow
 
@@ -204,7 +220,7 @@ User Actions
 ┌─────────────────────┐
 │ Update Backend      │
 │ - LeadPaymentRcvd   │
+│ - AccountEntry      │
 │ - Account Balances  │
-│ - TRANSFER tx       │
 └─────────────────────┘
 ```
