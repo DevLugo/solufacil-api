@@ -975,18 +975,31 @@ export class PaymentService {
         // se creó una transacción TRANSFER de efectivo a banco.
         // Debemos considerar ese ajuste en oldCashChange y oldBankChange.
         const existingBankPaidAmount = new Decimal(existingRecord.bankPaidAmount.toString())
-        existingCashToBank = existingBankPaidAmount.minus(oldBankChange)
+        const rawCashToBank = existingBankPaidAmount.minus(oldBankChange)
+
+        // IMPORTANTE: El efectivo transferido al banco no puede exceder el efectivo disponible
+        // después de la comisión. Si bankPaidAmount fue seteado a un valor mayor que el disponible
+        // (por ejemplo 100 cuando solo había 92 después de comisión), debemos usar el valor real.
+        // Esto evita que netCashChange tenga un excedente de la comisión al eliminar pagos.
+        existingCashToBank = Decimal.min(rawCashToBank, oldCashChange)
+        if (existingCashToBank.lessThan(0)) {
+          existingCashToBank = new Decimal(0)
+        }
 
         console.log('[PaymentService] Transfer adjustment calculation (distribution changed):')
         console.log('[PaymentService]   existingBankPaidAmount:', existingBankPaidAmount.toString())
         console.log('[PaymentService]   oldBankChange (from MONEY_TRANSFER payments):', oldBankChange.toString())
-        console.log('[PaymentService]   existingCashToBank (efectivo que fue al banco):', existingCashToBank.toString())
+        console.log('[PaymentService]   rawCashToBank (sin cap):', rawCashToBank.toString())
+        console.log('[PaymentService]   oldCashChange (disponible):', oldCashChange.toString())
+        console.log('[PaymentService]   existingCashToBank (con cap):', existingCashToBank.toString())
 
         if (existingCashToBank.greaterThan(0)) {
           oldCashChange = oldCashChange.minus(existingCashToBank)
-          oldBankChange = oldBankChange.plus(existingCashToBank)
+          // Para oldBankChange, usar el valor REAL de bankPaidAmount para que la reversión
+          // del banco sea correcta (el banco SÍ recibió el monto completo via bankDelta)
+          oldBankChange = existingBankPaidAmount
           console.log('[PaymentService]   -> Adjusted oldCashChange:', oldCashChange.toString())
-          console.log('[PaymentService]   -> Adjusted oldBankChange:', oldBankChange.toString())
+          console.log('[PaymentService]   -> Adjusted oldBankChange (usando bankPaidAmount):', oldBankChange.toString())
         }
       } else {
         console.log('[PaymentService] Skipping transfer adjustment (distribution NOT changed, commission-only edit)')
