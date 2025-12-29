@@ -24,6 +24,7 @@ export interface ClientSearchResult {
   activeLoans: number
   finishedLoans: number
   collateralLoans: number
+  pendingDebt: number
 }
 
 export interface ClientHistoryData {
@@ -188,6 +189,26 @@ export class ClientHistoryService {
                 id: true,
                 status: true,
                 signDate: true,
+                pendingAmountStored: true,
+                snapshotRouteName: true,
+                snapshotRoute: {
+                  select: {
+                    id: true,
+                    name: true,
+                    locations: {
+                      select: {
+                        id: true,
+                        name: true,
+                        municipalityRelation: {
+                          select: {
+                            name: true,
+                          },
+                        },
+                      },
+                      take: 1,
+                    },
+                  },
+                },
               },
               orderBy: { signDate: 'desc' },
             },
@@ -251,6 +272,24 @@ export class ClientHistoryService {
       const latestLoan = loans[0]
       const collateralCount = collateralLoansMap.get(pd.id) || 0
 
+      // Calculate pending debt from active loans
+      const pendingDebt = activeLoans.reduce((sum, loan) => {
+        const pending = parseFloat(String(loan.pendingAmountStored || '0'))
+        return sum + (isNaN(pending) ? 0 : pending)
+      }, 0)
+
+      // Get route info from most recent loan (prioritize active loans, then any loan)
+      const loanForRouteInfo = activeLoans[0] || latestLoan
+      const snapshotRoute = loanForRouteInfo?.snapshotRoute
+      const routeLocation = snapshotRoute?.locations?.[0]
+
+      // Route name: use snapshotRouteName or route.name from loan
+      const routeName = loanForRouteInfo?.snapshotRouteName || snapshotRoute?.name || null
+      // Location: from route's location
+      const locationName = routeLocation?.name || null
+      // Municipality: from route's location's municipality
+      const municipalityName = routeLocation?.municipalityRelation?.name || null
+
       return {
         id: pd.id,
         name: pd.fullName,
@@ -259,10 +298,9 @@ export class ClientHistoryService {
         address: primaryAddress
           ? `${primaryAddress.street}, ${primaryAddress.locationRelation?.name || ''}`
           : null,
-        route: primaryAddress?.locationRelation?.routeRelation?.name || null,
-        location: primaryAddress?.locationRelation?.name || null,
-        municipality:
-          primaryAddress?.locationRelation?.municipalityRelation?.name || null,
+        route: routeName,
+        location: locationName,
+        municipality: municipalityName,
         state:
           primaryAddress?.locationRelation?.municipalityRelation?.stateRelation
             ?.name || null,
@@ -273,6 +311,7 @@ export class ClientHistoryService {
         activeLoans: activeLoans.length,
         finishedLoans: finishedLoans.length,
         collateralLoans: collateralCount,
+        pendingDebt,
       }
     })
 

@@ -84,6 +84,7 @@ export const loanResolvers = {
       args: {
         year: number
         weekNumber: number
+        routeId?: string
         locationId?: string
         limit?: number
         offset?: number

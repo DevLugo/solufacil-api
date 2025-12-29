@@ -438,6 +438,7 @@ type ClientSearchResult {
   activeLoans: Int!
   finishedLoans: Int!
   collateralLoans: Int!
+  pendingDebt: Float!
 }
 
 type ClientHistoryData {
@@ -951,6 +952,7 @@ type Query {
   loansByWeekAndLocation(
     year: Int!
     weekNumber: Int!
+    routeId: ID
     locationId: ID
     limit: Int
     offset: Int

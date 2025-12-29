@@ -109,7 +109,42 @@ export class LoanRepository {
     }
 
     if (options?.routeId) {
-      where.snapshotRouteId = options.routeId
+      // Get lead IDs that belong to this route first
+      const leadsInRoute = await this.prisma.employee.findMany({
+        where: {
+          routes: {
+            some: { id: options.routeId },
+          },
+        },
+        select: { id: true },
+      })
+      const leadIdsInRoute = leadsInRoute.map((e) => e.id)
+
+      // Handle both cases:
+      // 1. snapshotRouteId matches the given routeId (older loans with snapshot)
+      // 2. snapshotRouteId is empty/null AND lead is in the route (newer loans)
+      const routeConditions: Prisma.LoanWhereInput[] = [
+        { snapshotRouteId: options.routeId },
+        // Null snapshotRouteId but lead belongs to route
+        {
+          snapshotRouteId: null,
+          lead: { in: leadIdsInRoute },
+        },
+        // Empty string snapshotRouteId but lead belongs to route
+        {
+          snapshotRouteId: '',
+          lead: { in: leadIdsInRoute },
+        },
+      ]
+
+      // If there are already OR conditions (from status), wrap both in AND
+      if (where.OR && where.OR.length > 0) {
+        const existingOr = where.OR
+        delete where.OR
+        where.AND = [{ OR: existingOr }, { OR: routeConditions }]
+      } else {
+        where.OR = routeConditions
+      }
     }
 
     if (options?.fromDate || options?.toDate) {
@@ -123,7 +158,7 @@ export class LoanRepository {
     }
 
     // DEBUG: Log query parameters
-    console.log('[LoanRepository.findMany] where:', JSON.stringify(where), 'limit:', options?.limit ?? 50)
+    console.log('[LoanRepository.findMany] where:', JSON.stringify(where, null, 2), 'limit:', options?.limit ?? 50)
 
     const [loans, totalCount] = await Promise.all([
       this.prisma.loan.findMany({

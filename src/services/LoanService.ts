@@ -166,6 +166,7 @@ export class LoanService {
   async findByWeekAndLocation(options: {
     year: number
     weekNumber: number
+    routeId?: string
     locationId?: string
     limit?: number
     offset?: number
@@ -173,7 +174,11 @@ export class LoanService {
     const weekStart = getWeekStartDate(options.year, options.weekNumber)
     const weekEnd = getWeekEndDate(options.year, options.weekNumber)
 
+    console.log('[LoanService.findByWeekAndLocation] options:', JSON.stringify(options))
+    console.log('[LoanService.findByWeekAndLocation] weekStart:', weekStart, 'weekEnd:', weekEnd)
+
     const { loans } = await this.loanRepository.findMany({
+      routeId: options.routeId,
       locationId: options.locationId,
       fromDate: weekStart,
       toDate: weekEnd,
