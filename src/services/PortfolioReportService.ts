@@ -254,12 +254,12 @@ export class PortfolioReportService {
     const lastCompletedWeek = this.getLastCompletedWeek(weeks)
     const previousWeek = completedWeeks.length > 1 ? completedWeeks[completedWeeks.length - 2] : null
 
-    // OPTIMIZATION: Get all loans and payments for the entire month in ONE query
-    const { loans, allPayments, routeInfoMap } = await this.getActiveLoansWithPaymentsForMonth(
-      periodStart,
-      periodEnd,
-      filters
-    )
+    // OPTIMIZATION: Run main query and renovation KPIs in parallel
+    const [loansResult, renovationKPIs] = await Promise.all([
+      this.getActiveLoansWithPaymentsForMonth(periodStart, periodEnd, filters),
+      this.getRenovationKPIs(periodStart, periodEnd, filters),
+    ])
+    const { loans, allPayments, routeInfoMap } = loansResult
 
     // Build weekly data for ALL weeks (completed and not) by filtering payments in memory
     const weeklyData: WeeklyPortfolioData[] = []
@@ -312,37 +312,35 @@ export class PortfolioReportService {
       paymentsMap = new Map<string, PaymentForCV[]>()
     }
 
-    // Calculate summary using last completed week data
-    const summary = await this.calculateSummaryForMonth(
-      loans,
-      paymentsMap,
-      lastCompletedWeek,
-      previousWeek,
-      periodStart,
-      periodEnd,
-      previousPeriodStart,
-      previousPeriodEnd,
-      promedioCV,
-      completedWeeks.length,
-      weeks.length,
-      filters
-    )
-
     // Use last completed week for route breakdown, or first week if none completed
     const weekForBreakdown = lastCompletedWeek || weeks[0]
-    const byLocation = await this.getRouteBreakdown(
-      loans,
-      paymentsMap,
-      weekForBreakdown,
-      filters,
-      routeInfoMap // OPTIMIZATION: Pass pre-computed route info to avoid extra query
-    )
 
-    const renovationKPIs = await this.getRenovationKPIs(
-      periodStart,
-      periodEnd,
-      filters
-    )
+    // OPTIMIZATION: Calculate summary and route breakdown in parallel
+    const [summary, byLocation] = await Promise.all([
+      this.calculateSummaryForMonth(
+        loans,
+        paymentsMap,
+        lastCompletedWeek,
+        previousWeek,
+        periodStart,
+        periodEnd,
+        previousPeriodStart,
+        previousPeriodEnd,
+        promedioCV,
+        completedWeeks.length,
+        weeks.length,
+        filters
+      ),
+      this.getRouteBreakdown(
+        loans,
+        paymentsMap,
+        weekForBreakdown,
+        filters,
+        routeInfoMap // OPTIMIZATION: Pass pre-computed route info to avoid extra query
+      ),
+    ])
+
+    // renovationKPIs already computed in parallel above
 
     return {
       reportDate: new Date(),
@@ -1171,18 +1169,17 @@ export class PortfolioReportService {
   }
 
   /**
-   * Optimized method to get active loans with all payments for a month period.
-   * Uses a SINGLE query like the original Keystone implementation to minimize DB round-trips.
+   * Optimized method to get active loans with payments for a month period.
    *
-   * IMPORTANTE: Esta función usa la LÓGICA ORIGINAL de Keystone:
-   * - Trae TODOS los préstamos que pudieron estar activos en algún momento del período
-   * - Incluye TODOS los pagos en la misma query (como el original)
-   * - El filtrado real se hace en memoria usando isLoanConsideredOnDate
+   * OPTIMIZACIONES:
+   * 1. Usa raw SQL con JOINs para obtener todo en 2 queries paralelas
+   * 2. Solo trae pagos del período (no todos los históricos)
+   * 3. Usa totalPaid almacenado en lugar de calcularlo
    *
    * @param periodStart - Start date of the period
    * @param periodEnd - End date of the period
    * @param filters - Optional filters
-   * @returns Loans and all their payments in the period
+   * @returns Loans and their payments in the period
    */
   async getActiveLoansWithPaymentsForMonth(
     periodStart: Date,
@@ -1193,186 +1190,144 @@ export class PortfolioReportService {
     allPayments: Map<string, PaymentForCV[]>
     routeInfoMap: Map<string, { routeId: string; routeName: string }>
   }> {
-    // OPTIMIZACIÓN: Solo traer préstamos que PODRÍAN estar activos en el período
-    // Similar al original que usa: 1 año atrás como queryStart
-    const queryStart = new Date(periodStart)
-    queryStart.setFullYear(queryStart.getFullYear() - 1)
-
-    // WHERE optimizado similar al original de Keystone
-    const baseConditions: Record<string, unknown>[] = [
-      // Opción 1: Firmados en el rango extendido
-      {
-        signDate: {
-          gte: queryStart,
-          lte: periodEnd,
-        },
-      },
-      // Opción 2: Finalizados en el rango (para capturar los que terminaron)
-      {
-        finishedDate: {
-          gte: queryStart,
-          lte: periodEnd,
-        },
-      },
-      // Opción 3: Activos (sin finalizar o finalizados después del inicio)
-      {
-        AND: [
-          { signDate: { lte: periodEnd } },
-          {
-            OR: [
-              { finishedDate: null },
-              { finishedDate: { gte: queryStart } },
-            ],
-          },
-        ],
-      },
+    // Build WHERE conditions for raw SQL
+    const conditions: string[] = [
+      `l."signDate" <= $1`,
+      `(l."finishedDate" IS NULL OR l."finishedDate" >= $2)`,
     ]
+    const params: unknown[] = [periodEnd, periodStart]
+    let paramIndex = 3
 
-    const whereClause: Record<string, unknown> = {
-      OR: baseConditions,
-    }
-
-    // Apply route filter
+    // Route filter
     if (filters?.routeIds?.length) {
-      whereClause.AND = [
-        {
-          OR: [
-            { snapshotRouteId: { in: filters.routeIds } },
-            {
-              leadRelation: {
-                routes: {
-                  some: { id: { in: filters.routeIds } },
-                },
-              },
-            },
-          ],
-        },
-      ]
+      const routePlaceholders = filters.routeIds.map((_, i) => `$${paramIndex + i}`).join(', ')
+      conditions.push(`(l."snapshotRouteId" IN (${routePlaceholders}) OR lr.id IN (${routePlaceholders}))`)
+      params.push(...filters.routeIds)
+      paramIndex += filters.routeIds.length
     }
 
-    // Apply loan type filter
+    // Loan type filter
     if (filters?.loantypeIds?.length) {
-      if (whereClause.AND) {
-        (whereClause.AND as Record<string, unknown>[]).push({ loantype: { in: filters.loantypeIds } })
-      } else {
-        whereClause.AND = [{ loantype: { in: filters.loantypeIds } }]
-      }
+      const ltPlaceholders = filters.loantypeIds.map((_, i) => `$${paramIndex + i}`).join(', ')
+      conditions.push(`l.loantype IN (${ltPlaceholders})`)
+      params.push(...filters.loantypeIds)
+      paramIndex += filters.loantypeIds.length
     }
 
-    // ✅ OPTIMIZACIÓN CLAVE: UNA SOLA QUERY como el original de Keystone
-    // Incluir TODOS los pagos en la misma query para evitar round-trips adicionales
-    const dbLoans = await this.prisma.loan.findMany({
-      where: whereClause,
-      select: {
-        id: true,
-        signDate: true,
-        finishedDate: true,
-        renewedDate: true,
-        badDebtDate: true,
-        previousLoan: true,
-        status: true,
-        pendingAmountStored: true,
-        requestedAmount: true,
-        snapshotRouteId: true,
-        // Incluir snapshotRoute para evitar query adicional en getRouteBreakdown
-        snapshotRoute: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        loantypeRelation: {
-          select: {
-            rate: true,
-          },
-        },
-        excludedByCleanupRelation: {
-          select: {
-            id: true,
-            cleanupDate: true,
-          },
-        },
-        leadRelation: {
-          select: {
-            routes: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-          },
-        },
-        // ✅ INCLUIR PAGOS EN LA MISMA QUERY (como el original de Keystone)
-        payments: {
-          select: {
-            id: true,
-            amount: true,
-            receivedAt: true,
-          },
-          orderBy: {
-            receivedAt: 'asc',
-          },
-        },
-      },
-    })
+    const whereClause = conditions.join(' AND ')
 
-    // Procesar en memoria (como el original de Keystone)
+    // Query 1: Loans with route info (single query with JOINs)
+    // Query 2: Payments for the period
+    // Run both in parallel
+    const [loansResult, paymentsResult] = await Promise.all([
+      this.prisma.$queryRawUnsafe<Array<{
+        id: string
+        signDate: Date
+        finishedDate: Date | null
+        renewedDate: Date | null
+        badDebtDate: Date | null
+        previousLoan: string | null
+        status: string
+        pendingAmountStored: string
+        requestedAmount: string
+        totalPaid: string
+        excludedByCleanup: string | null
+        cleanupDate: Date | null
+        snapshotRouteId: string | null
+        snapshotRouteName: string | null
+        leadRouteId: string | null
+        leadRouteName: string | null
+        rate: string | null
+      }>>(`
+        SELECT DISTINCT ON (l.id)
+          l.id,
+          l."signDate",
+          l."finishedDate",
+          l."renewedDate",
+          l."badDebtDate",
+          l."previousLoan",
+          l.status,
+          l."pendingAmountStored"::text,
+          l."requestedAmount"::text,
+          l."totalPaid"::text,
+          l."excludedByCleanup",
+          c."cleanupDate",
+          l."snapshotRouteId",
+          sr.name as "snapshotRouteName",
+          lr.id as "leadRouteId",
+          lr.name as "leadRouteName",
+          lt.rate::text
+        FROM "Loan" l
+        LEFT JOIN "Route" sr ON l."snapshotRouteId" = sr.id
+        LEFT JOIN "Loantype" lt ON l.loantype = lt.id
+        LEFT JOIN "PortfolioCleanup" c ON l."excludedByCleanup" = c.id
+        LEFT JOIN "Employee" e ON l.lead = e.id
+        LEFT JOIN "_RouteEmployees" re ON e.id = re."B"
+        LEFT JOIN "Route" lr ON re."A" = lr.id
+        WHERE ${whereClause}
+        ORDER BY l.id, lr.id
+      `, ...params),
+
+      // Separate query for payments - will be matched by loan ID
+      this.prisma.$queryRawUnsafe<Array<{
+        id: string
+        loan: string
+        amount: string
+        receivedAt: Date
+      }>>(`
+        SELECT p.id, p.loan, p.amount::text, p."receivedAt"
+        FROM "LoanPayment" p
+        INNER JOIN "Loan" l ON p.loan = l.id
+        WHERE p."receivedAt" >= $1 AND p."receivedAt" <= $2
+          AND l."signDate" <= $3
+          AND (l."finishedDate" IS NULL OR l."finishedDate" >= $4)
+          ${filters?.routeIds?.length ? `AND (l."snapshotRouteId" IN (${filters.routeIds.map((_, i) => `$${5 + i}`).join(', ')}) OR EXISTS (
+            SELECT 1 FROM "Employee" e2
+            JOIN "_RouteEmployees" re2 ON e2.id = re2."B"
+            WHERE e2.id = l.lead AND re2."A" IN (${filters.routeIds.map((_, i) => `$${5 + i}`).join(', ')})
+          ))` : ''}
+          ${filters?.loantypeIds?.length ? `AND l.loantype IN (${filters.loantypeIds.map((_, i) => `$${5 + (filters?.routeIds?.length || 0) + i}`).join(', ')})` : ''}
+      `, periodStart, periodEnd, periodEnd, periodStart, ...(filters?.routeIds || []), ...(filters?.loantypeIds || [])),
+    ])
+
+    // Process loans
     const loans: LoanForPortfolio[] = []
-    const allPayments = new Map<string, PaymentForCV[]>()
     const routeInfoMap = new Map<string, { routeId: string; routeName: string }>()
 
-    for (const loan of dbLoans) {
-      // Calcular totalPaid en memoria (como el original)
-      let totalPaid = 0
-      const paymentsInPeriod: PaymentForCV[] = []
-
-      for (const payment of loan.payments) {
-        const amount = new Decimal(payment.amount).toNumber()
-        totalPaid += amount
-
-        // Filtrar pagos del período para CV
-        if (payment.receivedAt >= periodStart && payment.receivedAt <= periodEnd) {
-          paymentsInPeriod.push({
-            id: payment.id,
-            receivedAt: payment.receivedAt,
-            amount,
-          })
-        }
-      }
-
-      // Mapear a LoanForPortfolio
+    for (const loan of loansResult) {
       loans.push({
         id: loan.id,
-        pendingAmountStored: new Decimal(loan.pendingAmountStored).toNumber(),
+        pendingAmountStored: parseFloat(loan.pendingAmountStored),
         signDate: loan.signDate,
         finishedDate: loan.finishedDate,
         renewedDate: loan.renewedDate,
         badDebtDate: loan.badDebtDate,
-        excludedByCleanup: loan.excludedByCleanupRelation?.id || null,
-        cleanupDate: loan.excludedByCleanupRelation?.cleanupDate || null,
+        excludedByCleanup: loan.excludedByCleanup,
+        cleanupDate: loan.cleanupDate,
         previousLoan: loan.previousLoan,
         status: loan.status,
-        requestedAmount: new Decimal(loan.requestedAmount).toNumber(),
-        rate: loan.loantypeRelation?.rate
-          ? new Decimal(loan.loantypeRelation.rate).toNumber()
-          : 0,
-        totalPaid,
+        requestedAmount: parseFloat(loan.requestedAmount),
+        rate: loan.rate ? parseFloat(loan.rate) : 0,
+        totalPaid: parseFloat(loan.totalPaid),
       })
 
-      // Guardar pagos del período
-      if (paymentsInPeriod.length > 0) {
-        allPayments.set(loan.id, paymentsInPeriod)
-      }
-
-      // Crear mapa de info de rutas
-      const leadRoutes = loan.leadRelation?.routes || []
-      const leadRoute = leadRoutes.length > 0 ? leadRoutes[0] : null
-      const { routeId, routeName } = this.getRoutePriorityFromData(
-        loan.snapshotRouteId,
-        loan.snapshotRoute,
-        leadRoute
-      )
+      // Route priority: leadRoute > snapshotRoute > unknown
+      const routeId = loan.leadRouteId || loan.snapshotRouteId || 'unknown'
+      const routeName = loan.leadRouteName || loan.snapshotRouteName || 'Sin ruta'
       routeInfoMap.set(loan.id, { routeId, routeName })
+    }
+
+    // Process payments into Map
+    const allPayments = new Map<string, PaymentForCV[]>()
+    for (const payment of paymentsResult) {
+      if (!allPayments.has(payment.loan)) {
+        allPayments.set(payment.loan, [])
+      }
+      allPayments.get(payment.loan)!.push({
+        id: payment.id,
+        receivedAt: payment.receivedAt,
+        amount: parseFloat(payment.amount),
+      })
     }
 
     return { loans, allPayments, routeInfoMap }
@@ -1729,39 +1684,64 @@ export class PortfolioReportService {
     periodEnd: Date,
     filters?: PortfolioFilters
   ): Promise<RenovationKPIs> {
-    const whereClause: any = {}
+    // Build conditions
+    const conditions: string[] = [
+      `(
+        (l."renewedDate" >= $1 AND l."renewedDate" <= $2)
+        OR (l."finishedDate" >= $1 AND l."finishedDate" <= $2 AND l."renewedDate" IS NULL)
+      )`,
+    ]
+    const params: unknown[] = [periodStart, periodEnd]
+    let paramIndex = 3
 
     if (filters?.routeIds?.length) {
-      whereClause.snapshotRouteId = { in: filters.routeIds }
+      const placeholders = filters.routeIds.map((_, i) => `$${paramIndex + i}`).join(', ')
+      conditions.push(`l."snapshotRouteId" IN (${placeholders})`)
+      params.push(...filters.routeIds)
+      paramIndex += filters.routeIds.length
     }
+
     if (filters?.loantypeIds?.length) {
-      whereClause.loantype = { in: filters.loantypeIds }
+      const placeholders = filters.loantypeIds.map((_, i) => `$${paramIndex + i}`).join(', ')
+      conditions.push(`l.loantype IN (${placeholders})`)
+      params.push(...filters.loantypeIds)
     }
 
-    const loans = await this.prisma.loan.findMany({
-      where: {
-        ...whereClause,
-        OR: [
-          // Loans with renewedDate in period
-          {
-            renewedDate: {
-              gte: periodStart,
-              lte: periodEnd,
-            },
-          },
-          // Loans that finished in period without renewal (renewedDate is null)
-          {
-            finishedDate: {
-              gte: periodStart,
-              lte: periodEnd,
-            },
-            renewedDate: null,
-          },
-        ],
-      },
-    })
+    const loans = await this.prisma.$queryRawUnsafe<Array<{
+      id: string
+      signDate: Date
+      finishedDate: Date | null
+      renewedDate: Date | null
+      badDebtDate: Date | null
+      previousLoan: string | null
+      status: string
+      pendingAmountStored: string
+    }>>(`
+      SELECT
+        l.id,
+        l."signDate",
+        l."finishedDate",
+        l."renewedDate",
+        l."badDebtDate",
+        l."previousLoan",
+        l.status,
+        l."pendingAmountStored"::text
+      FROM "Loan" l
+      WHERE ${conditions.join(' AND ')}
+    `, ...params)
 
-    const portfolioLoans = loans.map((loan) => this.toLoanForPortfolio(loan))
+    const portfolioLoans: LoanForPortfolio[] = loans.map((loan) => ({
+      id: loan.id,
+      pendingAmountStored: parseFloat(loan.pendingAmountStored),
+      signDate: loan.signDate,
+      finishedDate: loan.finishedDate,
+      renewedDate: loan.renewedDate,
+      badDebtDate: loan.badDebtDate,
+      excludedByCleanup: null,
+      previousLoan: loan.previousLoan,
+      status: loan.status,
+    }))
+
     return calculateRenovationKPIs(portfolioLoans, periodStart, periodEnd)
   }
 }
