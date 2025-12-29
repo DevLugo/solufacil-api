@@ -41,15 +41,22 @@ const SOURCE_DB_URL = process.env.SOURCE_DATABASE_URL || process.env.DATABASE_UR
 const TARGET_DB_URL = process.env.TARGET_DATABASE_URL || process.env.DATABASE_URL
 const SAME_DATABASE = SOURCE_DB_URL === TARGET_DB_URL
 
-const BATCH_SIZE = 1000
+const BATCH_SIZE = 5000  // Increased for better performance
+const INSERT_BATCH_SIZE = 100  // Rows per multi-row INSERT statement
 
 const args = process.argv.slice(2)
 const DRY_RUN = args.includes('--dry-run')
 const COUNT_ONLY = args.includes('--count')
 
-// Connection pools
-const sourcePool = new Pool({ connectionString: SOURCE_DB_URL })
-const targetPool = SAME_DATABASE ? sourcePool : new Pool({ connectionString: TARGET_DB_URL })
+// Connection pools with optimized settings for migrations
+const poolConfig = {
+  max: 10,  // More connections for parallel operations
+  idleTimeoutMillis: 60000,
+  connectionTimeoutMillis: 30000,
+}
+
+const sourcePool = new Pool({ connectionString: SOURCE_DB_URL, ...poolConfig })
+const targetPool = SAME_DATABASE ? sourcePool : new Pool({ connectionString: TARGET_DB_URL, ...poolConfig })
 
 interface MigrationResult {
   table: string
@@ -500,6 +507,65 @@ function transformRow(tableName: string, row: Record<string, any>, fkSets: Recor
   return result
 }
 
+/**
+ * Executes a batch INSERT with multiple rows in a single statement.
+ * Much faster than row-by-row inserts over network.
+ */
+async function executeBatchInsert(
+  client: PoolClient,
+  tableName: string,
+  columns: string[],
+  rows: Record<string, any>[]
+): Promise<{ inserted: number; errors: number; lastError: string }> {
+  if (rows.length === 0) return { inserted: 0, errors: 0, lastError: '' }
+
+  const quotedColumns = columns.map(c => `"${c}"`).join(', ')
+  let inserted = 0
+  let errors = 0
+  let lastError = ''
+
+  // Process in smaller batches for the multi-row INSERT
+  for (let i = 0; i < rows.length; i += INSERT_BATCH_SIZE) {
+    const batch = rows.slice(i, i + INSERT_BATCH_SIZE)
+    const values: any[] = []
+    const valuePlaceholders: string[] = []
+
+    batch.forEach((row, rowIndex) => {
+      const rowPlaceholders = columns.map((_, colIndex) => {
+        const paramIndex = rowIndex * columns.length + colIndex + 1
+        return `$${paramIndex}`
+      })
+      valuePlaceholders.push(`(${rowPlaceholders.join(', ')})`)
+      columns.forEach(col => values.push(row[col]))
+    })
+
+    try {
+      await client.query(
+        `INSERT INTO "${TARGET_SCHEMA}"."${tableName}" (${quotedColumns}) VALUES ${valuePlaceholders.join(', ')}`,
+        values
+      )
+      inserted += batch.length
+    } catch (err) {
+      // If batch fails, try row-by-row to salvage what we can
+      for (const row of batch) {
+        try {
+          const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ')
+          await client.query(
+            `INSERT INTO "${TARGET_SCHEMA}"."${tableName}" (${quotedColumns}) VALUES (${placeholders})`,
+            columns.map(col => row[col])
+          )
+          inserted++
+        } catch (rowErr) {
+          errors++
+          lastError = rowErr instanceof Error ? rowErr.message : String(rowErr)
+        }
+      }
+    }
+  }
+
+  return { inserted, errors, lastError }
+}
+
 async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> {
   const sourceClient = await sourcePool.connect()
   const targetClient = await targetPool.connect()
@@ -530,8 +596,6 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
 
     // Build insert columns - common columns + missing NOT NULL columns
     const insertColumns = [...commonColumns, ...missingNotNull]
-    const quotedInsertColumns = insertColumns.map(c => `"${c}"`).join(', ')
-    const placeholders = insertColumns.map((_, i) => `$${i + 1}`).join(', ')
 
     // Load FK reference sets
     const fkSets: Record<string, Set<string>> = {}
@@ -561,18 +625,21 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
         `SELECT ${quotedSourceColumns} FROM "${SOURCE_SCHEMA}"."${tableName}" ORDER BY "id" LIMIT ${BATCH_SIZE} OFFSET ${offset}`
       )
 
+      // Transform all rows first, then batch insert
+      const transformedRows: Record<string, any>[] = []
+      const now = new Date()
+
       for (const row of batch.rows) {
         const transformed = transformRow(tableName, row, fkSets)
         if (!transformed) continue
 
         // Replace placeholder with actual default User ID for DocumentPhoto
         if (tableName === 'DocumentPhoto' && transformed.uploadedBy === '__NEEDS_DEFAULT_USER__') {
-          if (!defaultUserId) continue // Skip if no default user available
+          if (!defaultUserId) continue
           transformed.uploadedBy = defaultUserId
         }
 
         // Add default values for missing NOT NULL columns
-        const now = new Date()
         for (const col of missingNotNull) {
           if (col === 'createdAt' || col === 'updatedAt') {
             transformed[col] = transformed[col] || now
@@ -581,29 +648,27 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
           }
         }
 
-        try {
-          await targetClient.query(
-            `INSERT INTO "${TARGET_SCHEMA}"."${tableName}" (${quotedInsertColumns}) VALUES (${placeholders})`,
-            insertColumns.map(col => transformed[col])
-          )
-          insertedCount++
-        } catch (err) {
-          errorCount++
-          lastError = err instanceof Error ? err.message : String(err)
-          // Log first few errors for debugging
-          if (errorCount <= 3) {
-            console.error(`\n   ⚠️  ${tableName} INSERT error: ${lastError}`)
-          }
-        }
+        transformedRows.push(transformed)
+      }
+
+      // Execute batch insert
+      const batchResult = await executeBatchInsert(targetClient, tableName, insertColumns, transformedRows)
+      insertedCount += batchResult.inserted
+      errorCount += batchResult.errors
+      if (batchResult.lastError) lastError = batchResult.lastError
+
+      // Log first few errors
+      if (batchResult.errors > 0 && errorCount <= 3) {
+        console.error(`\n   ⚠️  ${tableName} INSERT error: ${lastError}`)
       }
 
       offset += BATCH_SIZE
-      process.stdout.write(`\r   ${tableName}... ${Math.min(offset, sourceCount)}/${sourceCount}`)
+      process.stdout.write(`\r   ${tableName}... ${Math.min(offset, sourceCount)}/${sourceCount} (${insertedCount} insertados)`)
     }
 
     // Segundo paso para Loan: actualizar previousLoan ahora que todos los loans existen
     if (tableName === 'Loan') {
-      process.stdout.write(`\r   ${tableName}... actualizando previousLoan...`)
+      process.stdout.write(`\r   ${tableName}... actualizando previousLoan...                    `)
       try {
         // Get all loans with previousLoan in source
         const loansWithPrevious = await sourceClient.query(`
@@ -614,22 +679,31 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
         // Get existing loan IDs in target
         const targetLoanIds = await getExistingIds(targetClient, TARGET_SCHEMA, 'Loan')
 
-        let updateCount = 0
+        // Batch update previousLoan
+        const updates: { id: string; previousLoan: string }[] = []
         for (const row of loansWithPrevious.rows) {
-          // Only update if both loan and previousLoan exist in target
           if (targetLoanIds.has(row.id) && targetLoanIds.has(row.previousLoan)) {
+            updates.push({ id: row.id, previousLoan: row.previousLoan })
+          }
+        }
+
+        // Execute updates in batches
+        let updateCount = 0
+        for (let i = 0; i < updates.length; i += INSERT_BATCH_SIZE) {
+          const batch = updates.slice(i, i + INSERT_BATCH_SIZE)
+          for (const { id, previousLoan } of batch) {
             try {
               await targetClient.query(
                 `UPDATE "${TARGET_SCHEMA}"."Loan" SET "previousLoan" = $1 WHERE id = $2`,
-                [row.previousLoan, row.id]
+                [previousLoan, id]
               )
               updateCount++
             } catch {
-              // Ignore errors - previousLoan might already be set or constraint issue
+              // Ignore errors
             }
           }
         }
-        process.stdout.write(`\r   ${tableName}... ${updateCount} previousLoan actualizados`)
+        process.stdout.write(`\r   ${tableName}... ${insertedCount} insertados, ${updateCount} previousLoan actualizados`)
       } catch (err) {
         console.error(`\n   ⚠️  Error actualizando previousLoan: ${err instanceof Error ? err.message : String(err)}`)
       }
