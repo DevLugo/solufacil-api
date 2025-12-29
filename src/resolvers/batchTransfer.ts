@@ -24,14 +24,14 @@ export interface DistributeMoneyInput {
 
 // Map AccountEntry to Transaction format for GraphQL
 function mapEntryToTransaction(entry: any) {
-  // Determine transaction type based on sourceType
-  const isIncome = ['TRANSFER_IN', 'PAYMENT', 'INCOME', 'CREDIT'].includes(entry.sourceType)
+  // Determine transaction type based on entryType (CREDIT = income, DEBIT = expense)
+  const isIncome = entry.entryType === 'CREDIT'
 
   return {
     id: entry.id,
     amount: entry.amount,
     date: entry.entryDate,
-    type: isIncome ? 'INCOME' : 'OUTCOME',
+    type: isIncome ? 'INCOME' : 'EXPENSE',
     incomeSource: entry.description || null,
     expenseSource: entry.description || null,
     description: entry.description || null,
