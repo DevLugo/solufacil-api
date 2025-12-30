@@ -1270,14 +1270,6 @@ input RenewLoanInput {
   loantypeId: ID!
 }
 
-input CreateLoanPaymentInput {
-  loanId: ID!
-  amount: Decimal!
-  comission: Decimal
-  receivedAt: DateTime!
-  paymentMethod: PaymentMethod!
-}
-
 input UpdateLoanPaymentInput {
   amount: Decimal
   comission: Decimal
@@ -1538,7 +1530,6 @@ type Mutation {
   updatePhone(input: UpdatePhoneInput!): Phone! @auth
 
   # Payments
-  createLoanPayment(input: CreateLoanPaymentInput!): LoanPayment! @auth
   updateLoanPayment(id: ID!, input: UpdateLoanPaymentInput!): LoanPayment! @auth
   deleteLoanPayment(id: ID!): LoanPayment! @auth
   createLeadPaymentReceived(input: CreateLeadPaymentReceivedInput!): LeadPaymentReceived! @auth

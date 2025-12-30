@@ -206,25 +206,6 @@ export const paymentResolvers = {
   },
 
   Mutation: {
-    createLoanPayment: async (
-      _parent: unknown,
-      args: {
-        input: {
-          loanId: string
-          amount: string
-          comission?: string
-          receivedAt: Date
-          paymentMethod: PaymentMethod
-        }
-      },
-      context: GraphQLContext
-    ) => {
-      authenticateUser(context)
-
-      const paymentService = new PaymentService(context.prisma)
-      return paymentService.createLoanPayment(args.input)
-    },
-
     createLeadPaymentReceived: async (
       _parent: unknown,
       args: {

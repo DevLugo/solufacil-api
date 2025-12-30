@@ -7,14 +7,6 @@ import { AccountRepository } from '../repositories/AccountRepository'
 import { BalanceService } from './BalanceService'
 import { calculatePaymentProfit } from '@solufacil/business-logic'
 
-export interface CreateLoanPaymentInput {
-  loanId: string
-  amount: string | number
-  comission?: string | number
-  receivedAt: Date
-  paymentMethod: PaymentMethod
-}
-
 export interface CreateLeadPaymentReceivedInput {
   leadId: string
   agentId: string
@@ -72,119 +64,6 @@ export class PaymentService {
 
   async findByLoanId(loanId: string, options?: { limit?: number; offset?: number }) {
     return this.paymentRepository.findByLoanId(loanId, options)
-  }
-
-  async createLoanPayment(input: CreateLoanPaymentInput) {
-    // Obtener el préstamo
-    const loan = await this.loanRepository.findById(input.loanId)
-    if (!loan) {
-      throw new GraphQLError('Loan not found', {
-        extensions: { code: 'NOT_FOUND' },
-      })
-    }
-
-    const paymentAmount = new Decimal(input.amount)
-    // Use commission from input, otherwise default to loantype's loanPaymentComission
-    const comission = input.comission !== undefined
-      ? new Decimal(input.comission)
-      : loan.loantypeRelation?.loanPaymentComission
-        ? new Decimal(loan.loantypeRelation.loanPaymentComission.toString())
-        : new Decimal(0)
-
-    // Calcular profit del pago
-    const totalProfit = new Decimal(loan.profitAmount.toString())
-    const totalDebt = new Decimal(loan.totalDebtAcquired.toString())
-    const isBadDebt = !!loan.badDebtDate
-
-    const { profitAmount, returnToCapital } = calculatePaymentProfit(
-      paymentAmount,
-      totalProfit,
-      totalDebt,
-      isBadDebt
-    )
-
-    // Ejecutar en transacción
-    return this.prisma.$transaction(async (tx) => {
-      // Crear el pago
-      const payment = await this.paymentRepository.create(
-        {
-          amount: paymentAmount,
-          comission,
-          receivedAt: input.receivedAt,
-          paymentMethod: input.paymentMethod,
-          type: 'PAYMENT',
-          loan: input.loanId,
-        },
-        tx
-      )
-
-      // Obtener cuenta del lead
-      const leadAccount = await this.getLeadAccount(loan.lead || '', tx)
-
-      // Crear AccountEntry para el pago (CREDIT)
-      const balanceService = new BalanceService(tx as any)
-      const sourceType = input.paymentMethod === 'CASH'
-        ? 'LOAN_PAYMENT_CASH'
-        : 'LOAN_PAYMENT_BANK'
-
-      await balanceService.createEntry({
-        accountId: leadAccount.id,
-        entryType: 'CREDIT',
-        amount: paymentAmount,
-        sourceType: sourceType as any,
-        loanId: loan.id,
-        loanPaymentId: payment.id,
-        snapshotLeadId: loan.lead || undefined,
-        snapshotRouteId: loan.snapshotRouteId || undefined,
-        profitAmount,
-        returnToCapital,
-        entryDate: input.receivedAt,
-      })
-
-      // Crear AccountEntry para la comisión si aplica (DEBIT)
-      if (comission.greaterThan(0)) {
-        await balanceService.createEntry({
-          accountId: leadAccount.id,
-          entryType: 'DEBIT',
-          amount: comission,
-          sourceType: 'PAYMENT_COMMISSION',
-          loanPaymentId: payment.id,
-          snapshotLeadId: loan.lead || undefined,
-          snapshotRouteId: loan.snapshotRouteId || undefined,
-          entryDate: input.receivedAt,
-        })
-      }
-
-      // Actualizar métricas del préstamo
-      const currentTotalPaid = new Decimal(loan.totalPaid.toString())
-      const currentPending = new Decimal(loan.pendingAmountStored.toString())
-
-      const updatedTotalPaid = currentTotalPaid.plus(paymentAmount)
-      const updatedPending = currentPending.minus(paymentAmount)
-
-      const updateData: Parameters<typeof this.loanRepository.update>[1] = {
-        totalPaid: updatedTotalPaid,
-        pendingAmountStored: updatedPending.isNegative() ? new Decimal(0) : updatedPending,
-        comissionAmount: new Decimal(loan.comissionAmount.toString()).plus(comission),
-      }
-
-      // Si ya está pagado, marcar como FINISHED
-      if (updatedPending.lessThanOrEqualTo(0)) {
-        updateData.status = 'FINISHED'
-        updateData.finishedDate = new Date()
-      }
-
-      await tx.loan.update({
-        where: { id: loan.id },
-        data: updateData,
-      })
-
-      // Actualizar balance: sumar pago, restar comisión
-      const netPaymentAmount = paymentAmount.minus(comission)
-      await this.accountRepository.addToBalance(leadAccount.id, netPaymentAmount, tx)
-
-      return payment
-    })
   }
 
   async createLeadPaymentReceived(input: CreateLeadPaymentReceivedInput) {
