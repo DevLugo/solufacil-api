@@ -9,7 +9,7 @@ export interface BulkDateMigrationInput {
 }
 
 export interface BulkDateMigrationPreview {
-  accountEntriesCount: number
+  transactionsCount: number
   loanPaymentsCount: number
   loansCount: number
   totalRecords: number
@@ -18,7 +18,7 @@ export interface BulkDateMigrationPreview {
 export interface BulkDateMigrationResult {
   success: boolean
   message: string
-  accountEntriesUpdated: number
+  transactionsUpdated: number
   loanPaymentsUpdated: number
   loansUpdated: number
   totalUpdated: number
@@ -58,17 +58,17 @@ export class BulkDateMigrationService {
     }
 
     // Count records in parallel for performance
-    const [accountEntriesCount, loanPaymentsCount, loansCount] = await Promise.all([
+    const [transactionsCount, loanPaymentsCount, loansCount] = await Promise.all([
       this.prisma.accountEntry.count({ where: accountEntryWhere }),
       this.prisma.loanPayment.count({ where: loanPaymentWhere }),
       this.prisma.loan.count({ where: loanWhere }),
     ])
 
     return {
-      accountEntriesCount,
+      transactionsCount,
       loanPaymentsCount,
       loansCount,
-      totalRecords: accountEntriesCount + loanPaymentsCount + loansCount,
+      totalRecords: transactionsCount + loanPaymentsCount + loansCount,
     }
   }
 
@@ -88,7 +88,7 @@ export class BulkDateMigrationService {
       return {
         success: true,
         message: 'No hay registros para migrar en el rango seleccionado',
-        accountEntriesUpdated: 0,
+        transactionsUpdated: 0,
         loanPaymentsUpdated: 0,
         loansUpdated: 0,
         totalUpdated: 0,
@@ -121,7 +121,7 @@ export class BulkDateMigrationService {
       }
 
       // Update all three entity types in parallel
-      const [accountEntriesResult, loanPaymentsResult, loansResult] = await Promise.all([
+      const [transactionsResult, loanPaymentsResult, loansResult] = await Promise.all([
         tx.accountEntry.updateMany({
           where: accountEntryWhere,
           data: { entryDate: input.newBusinessDate },
@@ -137,19 +137,19 @@ export class BulkDateMigrationService {
       ])
 
       return {
-        accountEntriesUpdated: accountEntriesResult.count,
+        transactionsUpdated: transactionsResult.count,
         loanPaymentsUpdated: loanPaymentsResult.count,
         loansUpdated: loansResult.count,
       }
     })
 
     const totalUpdated =
-      result.accountEntriesUpdated + result.loanPaymentsUpdated + result.loansUpdated
+      result.transactionsUpdated + result.loanPaymentsUpdated + result.loansUpdated
 
     return {
       success: true,
       message: `Se migraron ${totalUpdated} registros correctamente`,
-      accountEntriesUpdated: result.accountEntriesUpdated,
+      transactionsUpdated: result.transactionsUpdated,
       loanPaymentsUpdated: result.loanPaymentsUpdated,
       loansUpdated: result.loansUpdated,
       totalUpdated,
@@ -163,14 +163,6 @@ export class BulkDateMigrationService {
     // Validate date range
     if (input.startCreatedAt >= input.endCreatedAt) {
       throw new GraphQLError('La fecha de inicio debe ser anterior a la fecha de fin', {
-        extensions: { code: 'BAD_USER_INPUT' },
-      })
-    }
-
-    // Prevent future dates
-    const now = new Date()
-    if (input.startCreatedAt > now || input.endCreatedAt > now) {
-      throw new GraphQLError('Las fechas de createdAt no pueden ser futuras', {
         extensions: { code: 'BAD_USER_INPUT' },
       })
     }
