@@ -66,6 +66,95 @@ export class PaymentService {
     return this.paymentRepository.findByLoanId(loanId, options)
   }
 
+  /**
+   * Recalcula totalPaid y pendingAmountStored desde la fuente de verdad (suma de pagos).
+   * Similar a cómo calculamos el balance de cuentas desde AccountEntry.
+   * Esto evita inconsistencias por operaciones incrementales.
+   */
+  private async recalculateLoanMetrics(
+    loanId: string,
+    tx: PrismaClient | any
+  ): Promise<{ totalPaid: Decimal; pendingAmountStored: Decimal; totalComissions: Decimal }> {
+    // Obtener el préstamo con su deuda total
+    const loan = await tx.loan.findUnique({
+      where: { id: loanId },
+      select: {
+        totalDebtAcquired: true,
+        comissionAmount: true,
+      },
+    })
+
+    if (!loan) {
+      throw new GraphQLError('Loan not found', { extensions: { code: 'NOT_FOUND' } })
+    }
+
+    // Calcular suma de todos los pagos del préstamo
+    const paymentsAggregate = await tx.loanPayment.aggregate({
+      where: { loan: loanId },
+      _sum: {
+        amount: true,
+        comission: true,
+      },
+    })
+
+    const totalPaid = new Decimal(paymentsAggregate._sum.amount?.toString() || '0')
+    const totalComissions = new Decimal(paymentsAggregate._sum.comission?.toString() || '0')
+    const totalDebt = new Decimal(loan.totalDebtAcquired.toString())
+
+    // pendingAmountStored = totalDebtAcquired - totalPaid (mínimo 0)
+    const pendingAmountStored = Decimal.max(totalDebt.minus(totalPaid), new Decimal(0))
+
+    return { totalPaid, pendingAmountStored, totalComissions }
+  }
+
+  /**
+   * Actualiza las métricas del préstamo recalculándolas desde los pagos.
+   * También actualiza el status a FINISHED si pendingAmountStored <= 0.
+   *
+   * @param loanId - ID del préstamo
+   * @param tx - Transacción de Prisma
+   * @param finishedDate - Fecha de finalización (si aplica)
+   * @param baseComission - Comisión base del préstamo (comisión de otorgamiento)
+   */
+  private async updateLoanMetricsFromPayments(
+    loanId: string,
+    tx: PrismaClient | any,
+    finishedDate?: Date,
+    baseComission?: Decimal
+  ): Promise<void> {
+    const { totalPaid, pendingAmountStored, totalComissions } = await this.recalculateLoanMetrics(loanId, tx)
+
+    const isFinished = pendingAmountStored.lessThanOrEqualTo(0)
+
+    // Obtener la comisión base del préstamo si no se proporcionó
+    // (comisión de otorgamiento que no está en los pagos)
+    let loanGrantComission = baseComission
+    if (!loanGrantComission) {
+      const loan = await tx.loan.findUnique({
+        where: { id: loanId },
+        select: { loantypeRelation: { select: { loanGrantedComission: true } } },
+      })
+      // La comisión de otorgamiento ya está en loan.comissionAmount inicial
+      // Aquí solo sumamos las comisiones de los pagos
+    }
+
+    await tx.loan.update({
+      where: { id: loanId },
+      data: {
+        totalPaid,
+        pendingAmountStored,
+        ...(isFinished && {
+          status: 'FINISHED',
+          finishedDate: finishedDate || new Date(),
+        }),
+        ...(!isFinished && {
+          status: 'ACTIVE',
+          finishedDate: null,
+        }),
+      },
+    })
+  }
+
   async createLeadPaymentReceived(input: CreateLeadPaymentReceivedInput) {
     const expectedAmount = new Decimal(input.expectedAmount)
     const paidAmount = new Decimal(input.paidAmount)
@@ -201,23 +290,8 @@ export class PaymentService {
           }, tx)
         }
 
-        // Actualizar métricas del préstamo
-        const currentTotalPaid = new Decimal(loan.totalPaid.toString())
-        const currentPending = new Decimal(loan.pendingAmountStored.toString())
-        const updatedPending = currentPending.minus(paymentAmount)
-
-        await tx.loan.update({
-          where: { id: loan.id },
-          data: {
-            totalPaid: currentTotalPaid.plus(paymentAmount),
-            pendingAmountStored: updatedPending.isNegative() ? new Decimal(0) : updatedPending,
-            comissionAmount: { increment: comissionAmount },
-            ...(updatedPending.lessThanOrEqualTo(0) && {
-              status: 'FINISHED',
-              finishedDate: paymentDate,
-            }),
-          },
-        })
+        // Recalcular métricas del préstamo desde la fuente de verdad (pagos)
+        await this.updateLoanMetricsFromPayments(loan.id, tx, paymentDate)
       }
 
       // 4. Calcular si el líder depositó efectivo al banco
@@ -324,29 +398,9 @@ export class PaymentService {
         tx
       )
 
-      // Actualizar métricas del préstamo si cambió el monto
+      // Recalcular métricas del préstamo desde la fuente de verdad (pagos)
       if (!amountDiff.isZero()) {
-        const currentTotalPaid = new Decimal(loan.totalPaid.toString())
-        const currentPending = new Decimal(loan.pendingAmountStored.toString())
-
-        await tx.loan.update({
-          where: { id: loan.id },
-          data: {
-            totalPaid: currentTotalPaid.plus(amountDiff),
-            pendingAmountStored: currentPending.minus(amountDiff),
-          },
-        })
-      }
-
-      // Actualizar comisiones del préstamo si cambió
-      if (!comissionDiff.isZero()) {
-        const currentComission = new Decimal(loan.comissionAmount.toString())
-        await tx.loan.update({
-          where: { id: loan.id },
-          data: {
-            comissionAmount: currentComission.plus(comissionDiff),
-          },
-        })
+        await this.updateLoanMetricsFromPayments(loan.id, tx)
       }
 
       // Note: AccountEntry records are managed by BalanceService through updateLeadPaymentReceived
@@ -384,22 +438,8 @@ export class PaymentService {
       // Eliminar el pago
       const deletedPayment = await this.paymentRepository.delete(id, tx)
 
-      // Revertir métricas del préstamo
-      const currentTotalPaid = new Decimal(loan.totalPaid.toString())
-      const currentPending = new Decimal(loan.pendingAmountStored.toString())
-      const currentComission = new Decimal(loan.comissionAmount.toString())
-
-      await tx.loan.update({
-        where: { id: loan.id },
-        data: {
-          totalPaid: currentTotalPaid.minus(amount),
-          pendingAmountStored: currentPending.plus(amount),
-          comissionAmount: currentComission.minus(comission),
-          // Si estaba terminado, volver a activar
-          status: 'ACTIVE',
-          finishedDate: null,
-        },
-      })
+      // Recalcular métricas del préstamo desde la fuente de verdad (pagos)
+      await this.updateLoanMetricsFromPayments(loan.id, tx)
 
       // Revertir balance: restar el pago (INCOME), sumar la comisión (EXPENSE)
       const netRevert = comission.minus(amount)
@@ -482,7 +522,6 @@ export class PaymentService {
 
             if (existingPayment) {
               const oldAmount = new Decimal(existingPayment.amount.toString())
-              const oldComission = new Decimal(existingPayment.comission.toString())
 
               if (paymentInput.isDeleted) {
                 // Delete the payment
@@ -490,18 +529,9 @@ export class PaymentService {
                   where: { id: paymentInput.paymentId },
                 })
 
-                // Revert loan metrics
+                // Recalcular métricas del préstamo desde la fuente de verdad (pagos)
                 const loan = existingPayment.loanRelation
-                await tx.loan.update({
-                  where: { id: loan.id },
-                  data: {
-                    totalPaid: { decrement: oldAmount },
-                    pendingAmountStored: { increment: oldAmount },
-                    comissionAmount: { decrement: oldComission },
-                    status: 'ACTIVE',
-                    finishedDate: null,
-                  },
-                })
+                await this.updateLoanMetricsFromPayments(loan.id, tx)
               } else {
                 // Update the payment
                 const paymentComission = paymentInput.comission !== undefined
@@ -517,20 +547,12 @@ export class PaymentService {
                   },
                 })
 
-                // Update loan metrics if changed
+                // Recalcular métricas del préstamo si cambió el monto
                 const amountDiff = paymentAmount.minus(oldAmount)
-                const comissionDiff = paymentComission.minus(oldComission)
 
-                if (!amountDiff.isZero() || !comissionDiff.isZero()) {
+                if (!amountDiff.isZero()) {
                   const loan = existingPayment.loanRelation
-                  await tx.loan.update({
-                    where: { id: loan.id },
-                    data: {
-                      totalPaid: { increment: amountDiff },
-                      pendingAmountStored: { decrement: amountDiff },
-                      comissionAmount: { increment: comissionDiff },
-                    },
-                  })
+                  await this.updateLoanMetricsFromPayments(loan.id, tx)
                 }
               }
             }
@@ -549,7 +571,9 @@ export class PaymentService {
               {
                 amount: paymentAmount,
                 comission: actualCommission,
-                receivedAt: new Date(),
+                // Use the LeadPaymentReceived's date, not current date
+                // This ensures the payment is associated with the correct day
+                receivedAt: existingRecord.createdAt,
                 paymentMethod: paymentInput.paymentMethod,
                 type: 'PAYMENT',
                 loan: paymentInput.loanId,
@@ -558,23 +582,8 @@ export class PaymentService {
               tx
             )
 
-            // Update loan metrics
-            const currentTotalPaid = new Decimal(loan.totalPaid.toString())
-            const currentPending = new Decimal(loan.pendingAmountStored.toString())
-            const updatedPending = currentPending.minus(paymentAmount)
-
-            await tx.loan.update({
-              where: { id: loan.id },
-              data: {
-                totalPaid: currentTotalPaid.plus(paymentAmount),
-                pendingAmountStored: updatedPending.isNegative() ? new Decimal(0) : updatedPending,
-                comissionAmount: { increment: actualCommission },
-                ...(updatedPending.lessThanOrEqualTo(0) && {
-                  status: 'FINISHED',
-                  finishedDate: new Date(),
-                }),
-              },
-            })
+            // Recalcular métricas del préstamo desde la fuente de verdad (pagos)
+            await this.updateLoanMetricsFromPayments(loan.id, tx)
           }
         }
       }

@@ -1296,6 +1296,89 @@ async function runDiagnostics(): Promise<void> {
 }
 
 // ============================================================================
+// FIX NULL SNAPSHOT ROUTE IDS
+// ============================================================================
+
+/**
+ * Fixes loans with NULL snapshotRouteId by getting the route from the lead's assigned routes.
+ * This ensures all loans have a proper snapshotRouteId for reporting purposes.
+ */
+async function fixNullSnapshotRouteIds(): Promise<void> {
+  console.log('\n🔧 Corrigiendo préstamos con snapshotRouteId NULL...\n')
+  const client = await targetPool.connect()
+
+  try {
+    // Count loans with NULL snapshotRouteId
+    const countResult = await client.query(`
+      SELECT COUNT(*) as count FROM "${TARGET_SCHEMA}"."Loan"
+      WHERE "snapshotRouteId" IS NULL OR "snapshotRouteId" = ''
+    `)
+    const nullCount = parseInt(countResult.rows[0].count)
+
+    if (nullCount === 0) {
+      console.log('   ✅ No hay préstamos con snapshotRouteId NULL')
+      return
+    }
+
+    console.log(`   📊 Préstamos con snapshotRouteId NULL: ${nullCount}`)
+
+    // Update loans by getting route from lead's assigned routes
+    // Join: Loan -> Employee (lead) -> _RouteEmployees -> Route
+    const updateResult = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."Loan" l
+      SET
+        "snapshotRouteId" = subq.route_id,
+        "snapshotRouteName" = COALESCE(l."snapshotRouteName", subq.route_name, '')
+      FROM (
+        SELECT DISTINCT ON (l2.id)
+          l2.id as loan_id,
+          r.id as route_id,
+          r.name as route_name
+        FROM "${TARGET_SCHEMA}"."Loan" l2
+        JOIN "${TARGET_SCHEMA}"."_RouteEmployees" re ON re."A" = l2.lead
+        JOIN "${TARGET_SCHEMA}"."Route" r ON r.id = re."B"
+        WHERE (l2."snapshotRouteId" IS NULL OR l2."snapshotRouteId" = '')
+        ORDER BY l2.id, r.name
+      ) subq
+      WHERE l.id = subq.loan_id
+    `)
+
+    const updatedCount = updateResult.rowCount || 0
+    console.log(`   ✅ ${updatedCount} préstamos actualizados con snapshotRouteId del lead`)
+
+    // Check remaining loans with NULL snapshotRouteId (lead has no route assigned)
+    const remainingResult = await client.query(`
+      SELECT COUNT(*) as count FROM "${TARGET_SCHEMA}"."Loan"
+      WHERE "snapshotRouteId" IS NULL OR "snapshotRouteId" = ''
+    `)
+    const remainingCount = parseInt(remainingResult.rows[0].count)
+
+    if (remainingCount > 0) {
+      console.log(`   ⚠️  ${remainingCount} préstamos aún sin snapshotRouteId (lead sin ruta asignada)`)
+
+      // List some examples
+      const examples = await client.query(`
+        SELECT l.id, pd."fullName" as borrower_name, e_pd."fullName" as lead_name
+        FROM "${TARGET_SCHEMA}"."Loan" l
+        LEFT JOIN "${TARGET_SCHEMA}"."Borrower" b ON b.id = l.borrower
+        LEFT JOIN "${TARGET_SCHEMA}"."PersonalData" pd ON pd.id = b."personalData"
+        LEFT JOIN "${TARGET_SCHEMA}"."Employee" e ON e.id = l.lead
+        LEFT JOIN "${TARGET_SCHEMA}"."PersonalData" e_pd ON e_pd.id = e."personalData"
+        WHERE l."snapshotRouteId" IS NULL OR l."snapshotRouteId" = ''
+        LIMIT 5
+      `)
+
+      for (const row of examples.rows) {
+        console.log(`      - Préstamo ${row.id.substring(0, 12)}... (${row.borrower_name || 'N/A'}, lead: ${row.lead_name || 'N/A'})`)
+      }
+    }
+
+  } finally {
+    client.release()
+  }
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -1448,6 +1531,9 @@ async function main() {
 
   // Step 2: Balance reconciliation - create BALANCE_ADJUSTMENT entries to match Account.amount
   await reconcileBalances()
+
+  // Step 3: Fix loans with NULL snapshotRouteId - assign from lead's route
+  await fixNullSnapshotRouteIds()
 
   console.log('\n' + '='.repeat(60))
   console.log('📊 RESUMEN')

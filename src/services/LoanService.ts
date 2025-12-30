@@ -428,8 +428,15 @@ export class LoanService {
       })
     }
 
+    // Validar que el lead tenga una ruta asignada
     const routeId = lead.routes?.[0]?.id
     const routeName = lead.routes?.[0]?.name
+    if (!routeId) {
+      throw new GraphQLError('El líder no tiene una ruta asignada. Por favor asigne una ruta al líder antes de crear préstamos.', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      })
+    }
+
     const snapshot = createLoanSnapshot(
       lead.id,
       lead.personalDataRelation?.fullName || '',
@@ -756,18 +763,19 @@ export class LoanService {
           }
         }
 
-        // Search for existing LPR from the same day and lead to reuse
-        const today = new Date()
-        today.setHours(0, 0, 0, 0)
-        const tomorrow = new Date(today)
-        tomorrow.setDate(tomorrow.getDate() + 1)
+        // Search for existing LPR from the same day (signDate) and lead to reuse
+        // Important: Use signDate, not current date, to correctly associate with the payment day
+        const signDateStart = new Date(input.signDate)
+        signDateStart.setHours(0, 0, 0, 0)
+        const signDateEnd = new Date(signDateStart)
+        signDateEnd.setDate(signDateEnd.getDate() + 1)
 
         const existingLPR = await tx.leadPaymentReceived.findFirst({
           where: {
             lead: input.leadId,
             createdAt: {
-              gte: today,
-              lt: tomorrow,
+              gte: signDateStart,
+              lt: signDateEnd,
             },
           },
         })
@@ -797,8 +805,9 @@ export class LoanService {
           })
           leadPaymentReceivedId = existingLPR.id
         } else {
-          // Create new LPR if none exists for today
+          // Create new LPR if none exists for the sign date
           console.log('[LoanService] Creating new LeadPaymentReceived for first payments:', {
+            signDate: input.signDate,
             totalAmount: totalAmount.toString(),
             totalCashPaid: totalCashPaid.toString(),
             totalBankPaid: totalBankPaid.toString(),
@@ -814,6 +823,8 @@ export class LoanService {
               paymentStatus: 'COMPLETE',
               lead: input.leadId,
               agent: input.leadId,
+              // Use signDate, not current date, for correct day association
+              createdAt: input.signDate,
             },
           })
           leadPaymentReceivedId = newLPR.id

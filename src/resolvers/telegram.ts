@@ -3,6 +3,8 @@ import type { GraphQLContext } from '../context'
 import { UserRole } from '@solufacil/database'
 import { TelegramService } from '../services/TelegramService'
 import { requireAnyRole } from '../middleware/auth'
+import PDFDocument from 'pdfkit'
+import path from 'path'
 
 export interface TelegramUserFiltersInput {
   isActive?: boolean
@@ -643,49 +645,365 @@ export const telegramResolvers = {
       let successCount = 0
 
       // Build report message based on type
-      let message = ''
-      if (config.reportType === 'NOTIFICACION_TIEMPO_REAL') {
-        message = `<b>📊 Notification Report</b>\n\n`
-        message += `Routes: ${config.routes.map((r) => r.name).join(', ') || 'All'}\n`
-        message += `Generated: ${new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })}`
-      } else if (config.reportType === 'CREDITOS_CON_ERRORES') {
+      // Note: reportType may be stored in lowercase in the database
+      const reportTypeLower = config.reportType.toLowerCase()
+      const routeNames = config.routes.map((r) => r.name).join(', ') || 'Todas'
+      const generatedDate = new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' })
+
+      if (reportTypeLower === 'notificacion_tiempo_real') {
+        // Send simple message for real-time notifications
+        const message = `<b>📊 Reporte de Notificaciones</b>\n\n` +
+          `<b>Rutas:</b> ${routeNames}\n` +
+          `<b>Generado:</b> ${generatedDate}`
+
+        for (const recipient of config.telegramRecipients) {
+          try {
+            await telegramService.sendMessage(recipient.chatId, message)
+            successCount++
+            await context.prisma.telegramUser.update({
+              where: { id: recipient.id },
+              data: { reportsReceived: { increment: 1 }, lastActivity: new Date() },
+            })
+          } catch (error) {
+            errors.push(`Error enviando a ${recipient.name}: ${error instanceof Error ? error.message : 'Error desconocido'}`)
+          }
+        }
+      } else if (reportTypeLower === 'creditos_con_errores') {
+        // Generate PDF with documents that have errors
         const routeIds = config.routes.map((r) => r.id)
-        const whereClause: any = {
+
+        // Build where clause - include documents with errors/missing
+        // If routes are configured, filter by those routes OR include docs with NULL snapshotRouteId
+        let whereClause: any = {
           OR: [{ isError: true }, { isMissing: true }],
         }
 
         if (routeIds.length > 0) {
-          whereClause.loanRelation = {
-            snapshotRouteId: { in: routeIds },
+          // Include documents where:
+          // 1. The loan's snapshotRouteId is in the configured routes, OR
+          // 2. The loan's snapshotRouteId is NULL (to not miss any documents)
+          whereClause = {
+            AND: [
+              { OR: [{ isError: true }, { isMissing: true }] },
+              {
+                OR: [
+                  { loanRelation: { snapshotRouteId: { in: routeIds } } },
+                  { loanRelation: { snapshotRouteId: null } },
+                ],
+              },
+            ],
           }
         }
 
-        const docsWithErrors = await context.prisma.documentPhoto.count({
+        // Fetch documents with errors including loan and client info
+        const docsWithErrors = await context.prisma.documentPhoto.findMany({
           where: whereClause,
+          include: {
+            loanRelation: {
+              include: {
+                borrowerRelation: {
+                  include: {
+                    personalDataRelation: true,
+                  },
+                },
+                snapshotRoute: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
         })
 
-        message = `<b>📋 Documents with Errors Report</b>\n\n`
-        message += `Documents with issues: ${docsWithErrors}\n`
-        message += `Routes: ${config.routes.map((r) => r.name).join(', ') || 'All'}\n`
-        message += `Generated: ${new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' })}`
-      }
+        if (docsWithErrors.length === 0) {
+          // No errors, send message only
+          const message = `<b>✅ Reporte de Créditos con Errores</b>\n\n` +
+            `No hay documentos con errores o faltantes.\n\n` +
+            `<b>Rutas:</b> ${routeNames}\n` +
+            `<b>Generado:</b> ${generatedDate}`
 
-      // Send to all recipients
-      for (const recipient of config.telegramRecipients) {
-        try {
-          await telegramService.sendMessage(recipient.chatId, message)
-          successCount++
+          for (const recipient of config.telegramRecipients) {
+            try {
+              await telegramService.sendMessage(recipient.chatId, message)
+              successCount++
+              await context.prisma.telegramUser.update({
+                where: { id: recipient.id },
+                data: { reportsReceived: { increment: 1 }, lastActivity: new Date() },
+              })
+            } catch (error) {
+              errors.push(`Error enviando a ${recipient.name}: ${error instanceof Error ? error.message : 'Error desconocido'}`)
+            }
+          }
+        } else {
+          // Helper functions - Use Mexico timezone to avoid UTC date shift issues
+          const getMexicoDate = (d: Date): Date => {
+            // Convert to Mexico timezone string and parse back
+            const mexicoStr = d.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })
+            return new Date(mexicoStr)
+          }
 
-          // Update recipient stats
-          await context.prisma.telegramUser.update({
-            where: { id: recipient.id },
-            data: {
-              reportsReceived: { increment: 1 },
-              lastActivity: new Date(),
-            },
+          const getIsoMonday = (d: Date): Date => {
+            const mexicoDate = getMexicoDate(d)
+            // getDay() returns 0 for Sunday, 1 for Monday, etc.
+            // We want Monday as start of week
+            const dayOfWeek = mexicoDate.getDay()
+            const daysToSubtract = dayOfWeek === 0 ? 6 : dayOfWeek - 1 // Sunday = go back 6 days, otherwise go back (day - 1)
+            const monday = new Date(mexicoDate)
+            monday.setDate(mexicoDate.getDate() - daysToSubtract)
+            monday.setHours(0, 0, 0, 0)
+            return monday
+          }
+
+          const formatWeekRange = (monday: Date): string => {
+            const sunday = new Date(monday)
+            sunday.setDate(monday.getDate() + 6)
+            const formatDay = (d: Date) => d.toLocaleDateString('es-MX', {
+              day: 'numeric',
+              month: 'long',
+              year: 'numeric',
+              timeZone: 'America/Mexico_City'
+            })
+            return `${formatDay(monday)} - ${formatDay(sunday)}`
+          }
+
+          const getWeekKey = (date: Date): string => {
+            const monday = getIsoMonday(date)
+            // Use local date format to avoid UTC conversion issues
+            const year = monday.getFullYear()
+            const month = String(monday.getMonth() + 1).padStart(2, '0')
+            const day = String(monday.getDate()).padStart(2, '0')
+            return `${year}-${month}-${day}`
+          }
+
+          // Group documents by week
+          const docsByWeek = new Map<string, typeof docsWithErrors>()
+          for (const doc of docsWithErrors) {
+            const weekKey = getWeekKey(doc.createdAt)
+            if (!docsByWeek.has(weekKey)) {
+              docsByWeek.set(weekKey, [])
+            }
+            docsByWeek.get(weekKey)!.push(doc)
+          }
+
+          // Sort weeks descending (most recent first)
+          const sortedWeeks = Array.from(docsByWeek.keys()).sort((a, b) => b.localeCompare(a))
+
+          // Generate PDF
+          const pdfBuffer = await new Promise<Buffer>((resolve, reject) => {
+            const chunks: Buffer[] = []
+            const doc = new PDFDocument({
+              size: 'LETTER',
+              margin: 30,
+              bufferPages: true,
+            })
+
+            doc.on('data', (chunk) => chunks.push(chunk))
+            doc.on('end', () => resolve(Buffer.concat(chunks)))
+            doc.on('error', reject)
+
+            const pageWidth = doc.page.width - 60
+            const marginLeft = 30
+
+            // Brand colors
+            const primaryOrange = '#F26522'
+            const lightOrange = '#FFF5F0'
+            const darkGray = '#333333'
+
+            // Column configuration
+            const colWidths = [150, 80, 100, 55, pageWidth - 385]
+            const headers = ['CLIENTE', 'RUTA', 'TIPO', 'ESTADO', 'DESCRIPCIÓN']
+            const headerHeight = 20
+            const rowHeight = 14
+
+            // Draw table headers function
+            const drawTableHeaders = (y: number): number => {
+              // Header background with orange accent
+              doc.rect(marginLeft, y, pageWidth, headerHeight).fillAndStroke(lightOrange, primaryOrange)
+              doc.fillColor(darkGray).fontSize(7).font('Helvetica-Bold')
+
+              let xPos = marginLeft
+              headers.forEach((header, i) => {
+                doc.text(header, xPos + 3, y + 6, { width: colWidths[i] - 6 })
+                xPos += colWidths[i]
+              })
+
+              // Vertical lines
+              doc.lineWidth(0.5)
+              xPos = marginLeft
+              colWidths.forEach((width) => {
+                doc.moveTo(xPos, y).lineTo(xPos, y + headerHeight).stroke(primaryOrange)
+                xPos += width
+              })
+              doc.moveTo(xPos, y).lineTo(xPos, y + headerHeight).stroke(primaryOrange)
+
+              return y + headerHeight
+            }
+
+            // Draw data row function
+            const drawDataRow = (data: string[], y: number, isAlt: boolean): number => {
+              // Alternating row background
+              if (isAlt) {
+                doc.rect(marginLeft, y, pageWidth, rowHeight).fill('#fafafa')
+              }
+
+              // Row border
+              doc.lineWidth(0.3).rect(marginLeft, y, pageWidth, rowHeight).stroke('#e0e0e0')
+
+              doc.fillColor('#000000').fontSize(7).font('Helvetica')
+
+              let xPos = marginLeft
+              data.forEach((cell, i) => {
+                doc.text(cell, xPos + 3, y + 3, { width: colWidths[i] - 6, lineBreak: false })
+                xPos += colWidths[i]
+              })
+
+              // Vertical lines
+              xPos = marginLeft
+              colWidths.forEach((width) => {
+                doc.moveTo(xPos, y).lineTo(xPos, y + rowHeight).stroke('#e0e0e0')
+                xPos += width
+              })
+              doc.moveTo(xPos, y).lineTo(xPos, y + rowHeight).stroke('#e0e0e0')
+
+              return y + rowHeight
+            }
+
+            // === HEADER ===
+            const headerY = 25
+
+            // Logo on the right
+            try {
+              const logoPath = path.join(process.cwd(), '../web/public/solufacil.png')
+              doc.image(logoPath, doc.page.width - 130, 10, { width: 100 })
+            } catch (err) {
+              console.warn('Logo not found, skipping')
+            }
+
+            // Title on the left
+            doc.fontSize(14).font('Helvetica-Bold').fillColor(primaryOrange)
+              .text('Reporte de Créditos con Errores', marginLeft, headerY)
+
+            // Subtitle
+            doc.fontSize(10).font('Helvetica').fillColor(darkGray)
+              .text(`Generado: ${generatedDate}`, marginLeft, headerY + 20)
+
+            // Details row
+            const detailsY = headerY + 45
+            doc.fontSize(8).fillColor('gray').text('Rutas:', marginLeft, detailsY)
+            doc.fillColor('black').text(routeNames, marginLeft + 40, detailsY)
+
+            // Stats
+            const errorCount = docsWithErrors.filter(d => d.isError).length
+            const missingCount = docsWithErrors.filter(d => d.isMissing).length
+            const statsY = detailsY + 15
+            doc.fontSize(8).fillColor('black')
+            doc.text(`Total de documentos: ${docsWithErrors.length}`, marginLeft, statsY)
+            doc.text(`Con error: ${errorCount}`, marginLeft + 150, statsY)
+            doc.text(`Faltantes: ${missingCount}`, marginLeft + 280, statsY)
+            doc.text(`Semanas: ${sortedWeeks.length}`, marginLeft + 400, statsY)
+
+            // === DOCUMENTS BY WEEK ===
+            let currentY = statsY + 25
+            const pageHeight = doc.page.height - 50
+
+            for (const weekKey of sortedWeeks) {
+              const weekDocs = docsByWeek.get(weekKey)!
+              const monday = new Date(weekKey)
+              const weekRange = formatWeekRange(monday)
+
+              // Check if we need a new page for week header
+              if (currentY + 60 > pageHeight) {
+                doc.addPage()
+                currentY = 30
+              }
+
+              // Week section header (orange bar)
+              doc.rect(marginLeft, currentY, pageWidth, 18).fillAndStroke(primaryOrange, primaryOrange)
+              doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold')
+              doc.text(`Semana: ${weekRange}`, marginLeft + 8, currentY + 5)
+              doc.text(`(${weekDocs.length} documentos)`, marginLeft + pageWidth - 110, currentY + 5)
+              doc.fillColor('#000000')
+              currentY += 20
+
+              // Table headers
+              currentY = drawTableHeaders(currentY)
+
+              // Data rows
+              let rowIndex = 0
+              for (const docItem of weekDocs) {
+                // Check if we need a new page
+                if (currentY + rowHeight > pageHeight) {
+                  doc.addPage()
+                  currentY = 30
+
+                  // Repeat week header on new page
+                  doc.rect(marginLeft, currentY, pageWidth, 16).fillAndStroke(primaryOrange, primaryOrange)
+                  doc.fillColor('#ffffff').fontSize(8).font('Helvetica-Bold')
+                  doc.text(`${weekRange} (continuación)`, marginLeft + 8, currentY + 4)
+                  doc.fillColor('#000000')
+                  currentY += 18
+                  currentY = drawTableHeaders(currentY)
+                }
+
+                const clientName = docItem.loanRelation?.borrowerRelation?.personalDataRelation?.fullName || 'Sin cliente'
+                const routeName = docItem.loanRelation?.snapshotRoute?.name || docItem.loanRelation?.snapshotRouteName || 'Sin ruta'
+                const docType = docItem.documentType || 'N/A'
+                const status = docItem.isError ? 'Error' : 'Faltante'
+                const description = docItem.errorDescription || '-'
+
+                const rowData = [
+                  clientName.length > 30 ? clientName.substring(0, 27) + '...' : clientName,
+                  routeName.length > 15 ? routeName.substring(0, 12) + '...' : routeName,
+                  docType.length > 18 ? docType.substring(0, 15) + '...' : docType,
+                  status,
+                  description.length > 50 ? description.substring(0, 47) + '...' : description
+                ]
+
+                currentY = drawDataRow(rowData, currentY, rowIndex % 2 === 1)
+                rowIndex++
+              }
+
+              currentY += 12 // Space between weeks
+            }
+
+            // Add page numbers to all pages
+            const totalPages = doc.bufferedPageRange().count
+            for (let i = 0; i < totalPages; i++) {
+              doc.switchToPage(i)
+              doc.fontSize(8).font('Helvetica').fillColor('#666666')
+              doc.text(
+                `Página ${i + 1} de ${totalPages}`,
+                doc.page.width - 100,
+                doc.page.height - 35,
+                { align: 'right' }
+              )
+            }
+
+            doc.end()
           })
-        } catch (error) {
-          errors.push(`Error sending to ${recipient.name}: ${error instanceof Error ? error.message : 'Unknown error'}`)
+
+          // Send PDF to all recipients
+          const caption = `<b>📋 Reporte de Créditos con Errores</b>\n\n` +
+            `<b>Total:</b> ${docsWithErrors.length} documentos con problemas\n` +
+            `<b>Rutas:</b> ${routeNames}\n` +
+            `<b>Generado:</b> ${generatedDate}`
+
+          const filename = `creditos_con_errores_${new Date().toISOString().split('T')[0]}.pdf`
+
+          for (const recipient of config.telegramRecipients) {
+            try {
+              await telegramService.sendDocument(recipient.chatId, pdfBuffer, {
+                filename,
+                caption,
+                parseMode: 'HTML',
+              })
+              successCount++
+              await context.prisma.telegramUser.update({
+                where: { id: recipient.id },
+                data: { reportsReceived: { increment: 1 }, lastActivity: new Date() },
+              })
+            } catch (error) {
+              errors.push(`Error enviando a ${recipient.name}: ${error instanceof Error ? error.message : 'Error desconocido'}`)
+            }
+          }
         }
       }
 
