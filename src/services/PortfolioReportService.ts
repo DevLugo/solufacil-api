@@ -409,77 +409,191 @@ export class PortfolioReportService {
    * - pagandoPromedio: Average clients "al corriente" across completed weeks
    * - cvPromedio: Average clients in CV across completed weeks
    *
-   * This calls getLocalityReport for EACH route to ensure the KPIs match
-   * exactly what the user sees when they click on a route card.
+   * OPTIMIZED: Fetches all data ONCE and processes in memory.
+   * A loan belongs to a route if: snapshotRouteId matches OR lead has that route assigned.
    */
   async getRouteKPIs(
     year: number,
     month: number,
     filters?: PortfolioFilters
   ): Promise<{ routeId: string; routeName: string; clientesTotal: number; pagandoPromedio: number; cvPromedio: number }[]> {
-    // First, get all routes that have active loans
-    const routes = await this.prisma.$queryRawUnsafe<Array<{
-      id: string
-      name: string
-    }>>(`
-      SELECT DISTINCT r.id, r.name
-      FROM "Route" r
-      WHERE EXISTS (
-        SELECT 1 FROM "Loan" l
-        JOIN "Employee" e ON l.lead = e.id
-        JOIN "_RouteEmployees" re ON e.id = re."B"
-        WHERE re."A" = r.id
-          AND l."pendingAmountStored" > 0
-          AND l."badDebtDate" IS NULL
-          AND l."excludedByCleanup" IS NULL
-          AND l."renewedDate" IS NULL
-          AND l."finishedDate" IS NULL
-      )
-      OR EXISTS (
-        SELECT 1 FROM "Loan" l
-        WHERE l."snapshotRouteId" = r.id
-          AND l."pendingAmountStored" > 0
-          AND l."badDebtDate" IS NULL
-          AND l."excludedByCleanup" IS NULL
-          AND l."renewedDate" IS NULL
-          AND l."finishedDate" IS NULL
-      )
-      ORDER BY r.name
-    `)
+    const weeks = getWeeksInMonth(year, month - 1)
+    if (weeks.length === 0) return []
 
-    if (routes.length === 0) {
-      return []
+    const completedWeeks = this.getCompletedWeeks(weeks)
+    if (completedWeeks.length === 0) return []
+
+    const lastCompletedWeek = completedWeeks[completedWeeks.length - 1]
+
+    // OPTIMIZATION: Single query to get all loans with ALL their route associations
+    // This includes both snapshotRouteId and lead's routes (M:M relation)
+    const loansWithRoutes = await this.prisma.loan.findMany({
+      where: {
+        signDate: { lte: lastCompletedWeek.end },
+        badDebtDate: null,
+        excludedByCleanup: null,
+        AND: [
+          { OR: [{ finishedDate: null }, { finishedDate: { gte: lastCompletedWeek.start } }] },
+          { OR: [{ renewedDate: null }, { renewedDate: { gte: lastCompletedWeek.start } }] },
+        ],
+        ...(filters?.loantypeIds?.length && { loantype: { in: filters.loantypeIds } }),
+      },
+      include: {
+        snapshotRoute: true,
+        leadRelation: {
+          include: {
+            routes: true,
+          },
+        },
+        loantypeRelation: true,
+        payments: {
+          where: { receivedAt: { lte: lastCompletedWeek.end } },
+          orderBy: { receivedAt: 'asc' },
+        },
+      },
+    })
+
+    // Build a map of loanId -> all routes this loan belongs to
+    const loanRoutesMap = new Map<string, Set<string>>()
+    const routeNames = new Map<string, string>()
+
+    for (const loan of loansWithRoutes) {
+      const routes = new Set<string>()
+
+      // Add snapshotRouteId if exists
+      if (loan.snapshotRouteId) {
+        routes.add(loan.snapshotRouteId)
+        if (loan.snapshotRoute) {
+          routeNames.set(loan.snapshotRouteId, loan.snapshotRoute.name)
+        }
+      }
+
+      // Add all lead's routes
+      if (loan.leadRelation?.routes) {
+        for (const route of loan.leadRelation.routes) {
+          routes.add(route.id)
+          routeNames.set(route.id, route.name)
+        }
+      }
+
+      loanRoutesMap.set(loan.id, routes)
     }
 
-    // Call getLocalityReport for each route in parallel
-    // This ensures the KPIs match exactly what's shown in drill-down
-    const routeReports = await Promise.all(
-      routes.map(async (route) => {
-        const routeFilters: PortfolioFilters = {
-          ...filters,
-          routeIds: [route.id],
-        }
-        const report = await this.getLocalityReport(year, month, routeFilters)
-        return {
-          routeId: route.id,
-          routeName: route.name,
-          totals: report.totals,
-        }
-      })
-    )
+    // Convert loans to LoanForPortfolio format
+    const loansForPortfolio = loansWithRoutes.map((loan) => {
+      const rate = loan.loantypeRelation?.rate ? new Decimal(loan.loantypeRelation.rate).toNumber() : 0
+      const requestedAmount = new Decimal(loan.requestedAmount).toNumber()
+      const totalDebt = requestedAmount * (1 + rate)
 
-    // Build result from route reports
+      return {
+        id: loan.id,
+        pendingAmountStored: new Decimal(loan.pendingAmountStored).toNumber(),
+        signDate: loan.signDate,
+        finishedDate: loan.finishedDate,
+        renewedDate: loan.renewedDate,
+        badDebtDate: loan.badDebtDate,
+        excludedByCleanup: loan.excludedByCleanup,
+        previousLoan: loan.previousLoan,
+        status: loan.status,
+        rate,
+        requestedAmount,
+        totalPaid: new Decimal(loan.totalPaid).toNumber(),
+        weekDuration: loan.loantypeRelation?.weekDuration ?? 16,
+        totalDebt,
+        payments: this.toPaymentsForCV(loan.payments),
+      }
+    })
+
+    // Create payments map
+    const allPaymentsMap = new Map<string, PaymentForCV[]>()
+    for (const loan of loansForPortfolio) {
+      allPaymentsMap.set(loan.id, loan.payments)
+    }
+
+    // Get all unique routes
+    const allRouteIds = new Set<string>()
+    for (const routes of loanRoutesMap.values()) {
+      for (const routeId of routes) {
+        allRouteIds.add(routeId)
+      }
+    }
+
+    // Calculate metrics per route
+    const routeStats = new Map<string, {
+      weeklyAlCorriente: number[]
+      weeklyEnCV: number[]
+      lastWeekActivos: number
+    }>()
+
+    // Process each completed week
+    for (const week of completedWeeks) {
+      // Filter loans active during this week
+      const activeLoansThisWeek = loansForPortfolio.filter((loan) => {
+        const signedBeforeWeekEnd = loan.signDate <= week.end
+        const notFinishedBeforeWeekStart = loan.finishedDate === null || loan.finishedDate >= week.start
+        const notRenewedBeforeWeekStart = loan.renewedDate === null || loan.renewedDate >= week.start
+        const stillActiveAtWeekEnd = (loan.finishedDate === null || loan.finishedDate > week.end) &&
+                                      (loan.renewedDate === null || loan.renewedDate > week.end)
+        return signedBeforeWeekEnd && notFinishedBeforeWeekStart && notRenewedBeforeWeekStart && stillActiveAtWeekEnd
+      })
+
+      const isLastWeek = week.weekNumber === lastCompletedWeek.weekNumber
+
+      // For each route, calculate stats
+      for (const routeId of allRouteIds) {
+        // Filter loans that belong to this route
+        const routeLoans = activeLoansThisWeek.filter((loan) => {
+          const loanRoutes = loanRoutesMap.get(loan.id)
+          return loanRoutes?.has(routeId)
+        })
+
+        if (routeLoans.length === 0) continue
+
+        // Create payments map for these loans
+        const routePaymentsMap = new Map<string, PaymentForCV[]>()
+        for (const loan of routeLoans) {
+          routePaymentsMap.set(loan.id, allPaymentsMap.get(loan.id) || [])
+        }
+
+        // Calculate CV status
+        const status = countClientsStatus(routeLoans, routePaymentsMap, week, true)
+
+        if (!routeStats.has(routeId)) {
+          routeStats.set(routeId, {
+            weeklyAlCorriente: [],
+            weeklyEnCV: [],
+            lastWeekActivos: 0,
+          })
+        }
+
+        const stats = routeStats.get(routeId)!
+        stats.weeklyAlCorriente.push(status.alCorriente)
+        stats.weeklyEnCV.push(status.enCV)
+
+        if (isLastWeek) {
+          stats.lastWeekActivos = status.totalActivos
+        }
+      }
+    }
+
+    // Build result
     const result: { routeId: string; routeName: string; clientesTotal: number; pagandoPromedio: number; cvPromedio: number }[] = []
 
-    for (const routeReport of routeReports) {
-      // Only include routes that have data
-      if (routeReport.totals.totalClientesActivos > 0) {
+    for (const [routeId, stats] of routeStats) {
+      if (stats.lastWeekActivos > 0) {
+        const alCorrientePromedio = stats.weeklyAlCorriente.length > 0
+          ? stats.weeklyAlCorriente.reduce((a, b) => a + b, 0) / stats.weeklyAlCorriente.length
+          : 0
+        const cvPromedio = stats.weeklyEnCV.length > 0
+          ? stats.weeklyEnCV.reduce((a, b) => a + b, 0) / stats.weeklyEnCV.length
+          : 0
+
         result.push({
-          routeId: routeReport.routeId,
-          routeName: routeReport.routeName,
-          clientesTotal: routeReport.totals.totalClientesActivos,
-          pagandoPromedio: Math.round(routeReport.totals.alCorrientePromedio * 100) / 100,
-          cvPromedio: Math.round(routeReport.totals.cvPromedio * 100) / 100,
+          routeId,
+          routeName: routeNames.get(routeId) || 'Sin ruta',
+          clientesTotal: stats.lastWeekActivos,
+          pagandoPromedio: Math.round(alCorrientePromedio * 100) / 100,
+          cvPromedio: Math.round(cvPromedio * 100) / 100,
         })
       }
     }
@@ -581,6 +695,8 @@ export class PortfolioReportService {
   /**
    * Gets a locality report with weekly breakdown
    * Groups loans by borrower's locality (from their address)
+   *
+   * OPTIMIZATION: Fetches all weeks data in parallel instead of sequentially
    */
   async getLocalityReport(
     year: number,
@@ -592,6 +708,14 @@ export class PortfolioReportService {
     if (weeks.length === 0) {
       throw new Error(`No weeks found for ${year}-${month}`)
     }
+
+    // OPTIMIZATION: Fetch all weeks data in parallel
+    const weeksData = await Promise.all(
+      weeks.map(async (week) => {
+        const loansWithLocality = await this.getLoansWithBorrowerLocality(week, filters)
+        return { week, loansWithLocality, isCompleted: this.isWeekCompleted(week) }
+      })
+    )
 
     // Map to store locality data: localityId -> { info, weeklyData[] }
     const localitiesMap = new Map<
@@ -605,16 +729,8 @@ export class PortfolioReportService {
       }
     >()
 
-    // Process each week
-    for (const week of weeks) {
-      // Only calculate CV for completed weeks
-      const isCompleted = this.isWeekCompleted(week)
-
-      const loansWithLocality = await this.getLoansWithBorrowerLocality(
-        week,
-        filters
-      )
-
+    // Process each week's data (now in memory)
+    for (const { week, loansWithLocality, isCompleted } of weeksData) {
       // Group loans by locality
       const loansByLocality = new Map<
         string,
