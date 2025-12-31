@@ -80,6 +80,7 @@ async function startServer() {
   const pdfExportService = new PdfExportService(prisma)
   const listadoPDFService = new ListadoPDFService(prisma)
   const badDebtPDFService = new BadDebtPDFService(prisma)
+  const leaderBirthdayPDFService = new LeaderBirthdayPDFService(prisma)
 
   // Handle preflight OPTIONS request for PDF export
   app.options('/api/export-client-history-pdf', cors(corsOptions))
@@ -212,8 +213,6 @@ async function startServer() {
   )
 
   // Leader Birthdays PDF export endpoint
-  const leaderBirthdayPDFService = new LeaderBirthdayPDFService(prisma)
-
   app.options('/api/export-leader-birthdays-pdf', cors(corsOptions))
 
   app.get(

@@ -183,9 +183,9 @@ export class LeaderBirthdayPDFService {
     return calculateRowHeight(
       doc,
       [
-        { text: leader.fullName, width: COLUMN_WIDTHS.name - 4 },
-        { text: leader.locationName, width: COLUMN_WIDTHS.location - 4 },
-        { text: leader.routeName, width: COLUMN_WIDTHS.route - 4 },
+        { text: leader.fullName || '', width: COLUMN_WIDTHS.name - 4 },
+        { text: leader.locationName || '', width: COLUMN_WIDTHS.location - 4 },
+        { text: leader.routeName || '', width: COLUMN_WIDTHS.route - 4 },
       ],
       PDF_FONT_SIZES.tableCell,
       PDF_LAYOUT.minRowHeight
@@ -230,7 +230,7 @@ export class LeaderBirthdayPDFService {
     x += COLUMN_WIDTHS.num
 
     // Name (multi-line)
-    drawMultiLineCell(doc, leader.fullName, x, y, COLUMN_WIDTHS.name, PDF_COLORS.black, PDF_FONT_SIZES.tableCell)
+    drawMultiLineCell(doc, leader.fullName || 'Sin nombre', x, y, COLUMN_WIDTHS.name, PDF_COLORS.black, PDF_FONT_SIZES.tableCell)
     x += COLUMN_WIDTHS.name
 
     // Birthday
@@ -248,11 +248,11 @@ export class LeaderBirthdayPDFService {
     x += COLUMN_WIDTHS.phone
 
     // Location
-    drawCell(doc, leader.locationName, x, centerY, COLUMN_WIDTHS.location, PDF_COLORS.black, PDF_FONT_SIZES.tableCell)
+    drawCell(doc, leader.locationName || '-', x, centerY, COLUMN_WIDTHS.location, PDF_COLORS.black, PDF_FONT_SIZES.tableCell)
     x += COLUMN_WIDTHS.location
 
     // Route
-    drawCell(doc, leader.routeName, x, centerY, COLUMN_WIDTHS.route, PDF_COLORS.textMuted, PDF_FONT_SIZES.tableCell)
+    drawCell(doc, leader.routeName || '-', x, centerY, COLUMN_WIDTHS.route, PDF_COLORS.textMuted, PDF_FONT_SIZES.tableCell)
 
     return y + rowHeight
   }
