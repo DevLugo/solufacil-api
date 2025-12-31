@@ -91,6 +91,10 @@ export interface LoanForPortfolio {
   rate?: number
   /** Total pagado hasta la fecha (para calcular monto pendiente real) */
   totalPaid?: number
+  /** Duración del préstamo en semanas (para calcular pago semanal esperado) */
+  weekDuration?: number
+  /** Deuda total (amountGived + profitAmount) */
+  totalDebt?: number
 }
 
 /**
@@ -228,14 +232,18 @@ export interface LocationBreakdown {
   routeId?: string
   /** Nombre de la ruta (opcional) */
   routeName?: string
-  /** Clientes activos en esta localidad */
+  /** Clientes activos en esta localidad (última semana completada) */
   clientesActivos: number
-  /** Clientes al corriente */
+  /** Clientes al corriente (última semana completada) */
   clientesAlCorriente: number
-  /** Clientes en CV */
+  /** Clientes en CV (última semana completada) */
   clientesEnCV: number
   /** Balance de clientes */
   balance: number
+  /** Promedio de clientes pagando en semanas completadas */
+  pagandoPromedio?: number
+  /** Promedio de CV en semanas completadas */
+  cvPromedio?: number
 }
 
 /**

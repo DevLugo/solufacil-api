@@ -264,12 +264,19 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
           AND EXISTS (SELECT 1 FROM "${tgt}"."Loantype" WHERE id = l.loantype);
 
         -- Segundo paso: Actualizar previousLoan ahora que todos los préstamos existen
+        -- Usa ROW_NUMBER para evitar duplicados (unique constraint en previousLoan)
         UPDATE "${tgt}"."Loan" tgt
-        SET "previousLoan" = src."previousLoan"
-        FROM "${src}"."Loan" src
-        WHERE tgt.id = src.id
-          AND src."previousLoan" IS NOT NULL
-          AND EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = src."previousLoan")`
+        SET "previousLoan" = ranked.prev_loan
+        FROM (
+          SELECT id, "previousLoan" as prev_loan,
+            ROW_NUMBER() OVER (PARTITION BY "previousLoan" ORDER BY "createdAt" DESC) as rn
+          FROM "${src}"."Loan"
+          WHERE "previousLoan" IS NOT NULL
+            AND EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = "${src}"."Loan"."previousLoan")
+        ) ranked
+        WHERE tgt.id = ranked.id
+          AND ranked.rn = 1
+          AND NOT EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE "previousLoan" = ranked.prev_loan)`
 
     case 'LoanPayment':
       return `INSERT INTO "${tgt}"."LoanPayment" (id, amount, comission, "receivedAt", "paymentMethod", type, "oldLoanId", loan, "leadPaymentReceived", "createdAt", "updatedAt")
@@ -295,24 +302,23 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
         FROM "${src}"."CommissionPayment"`
 
     case 'Transaction':
+      // Solo migrar transacciones que tengan sourceAccount válido (requerido en nuevo schema)
+      // Las transacciones INCOME sin sourceAccount se convierten a AccountEntry en otro paso
       return `INSERT INTO "${tgt}"."Transaction" (id, amount, date, type, description, "incomeSource", "expenseSource", "snapshotLeadId", "snapshotRouteId", "expenseGroupId", "profitAmount", "returnToCapital", loan, "loanPayment", "sourceAccount", "destinationAccount", route, lead, "leadPaymentReceived", "createdAt", "updatedAt")
         SELECT t.id, COALESCE(t.amount, 0), t.date, t.type::text::"${tgt}"."TransactionType", COALESCE(t.description, ''), t."incomeSource", t."expenseSource", COALESCE(t."snapshotLeadId", ''), COALESCE(t."snapshotRouteId", ''), t."expenseGroupId", COALESCE(t."profitAmount", 0), COALESCE(t."returnToCapital", 0),
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."LoanPayment" WHERE id = t."loanPayment") THEN t."loanPayment" ELSE NULL END,
-          CASE WHEN t."sourceAccount" IS NOT NULL AND t."sourceAccount" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."sourceAccount") THEN t."sourceAccount"
-               WHEN t."destinationAccount" IS NOT NULL AND t."destinationAccount" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."destinationAccount") THEN t."destinationAccount"
-          END,
+          t."sourceAccount",
           CASE WHEN t."destinationAccount" IS NOT NULL AND t."destinationAccount" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."destinationAccount") THEN t."destinationAccount" ELSE NULL END,
           t.route,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = t.lead) THEN t.lead ELSE NULL END,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."LeadPaymentReceived" WHERE id = t."leadPaymentReceived") THEN t."leadPaymentReceived" ELSE NULL END,
           t."createdAt", COALESCE(t."updatedAt", t."createdAt", NOW())
         FROM "${src}"."Transaction" t
-        WHERE t.date IS NOT NULL AND (
-          (t."sourceAccount" IS NOT NULL AND t."sourceAccount" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."sourceAccount"))
-          OR (t.type = 'INCOME' AND t."destinationAccount" IS NOT NULL AND t."destinationAccount" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."destinationAccount"))
-          OR (t.type = 'INCOME' AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '') AND (t."destinationAccount" IS NULL OR t."destinationAccount" = ''))
-        )`
+        WHERE t.date IS NOT NULL
+          AND t."sourceAccount" IS NOT NULL
+          AND t."sourceAccount" != ''
+          AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."sourceAccount")`
 
     case 'AccountEntry':
       return `INSERT INTO "${tgt}"."AccountEntry" (
@@ -918,10 +924,91 @@ async function convertTransactionsToEntries(): Promise<number> {
     const debitCount = result.rowCount || 0
     console.log(`   ✅ ${debitCount} entries DEBIT/CREDIT creados desde Transaction`)
 
-    // Crear AccountEntry desde transacciones INCOME de producción
-    // (estas transacciones no tienen sourceAccount, por eso no se migraron a Transaction local)
+    // Crear AccountEntry desde transacciones INCOME sin sourceAccount
+    // (estas transacciones no se migraron a Transaction porque sourceAccount es requerido)
     // Los datos de profitAmount y returnToCapital están en estas transacciones
-    if (!SAME_DATABASE) {
+    if (SAME_DATABASE) {
+      // SAME_DATABASE mode: leer desde SOURCE_SCHEMA
+      console.log('   📊 Creando entries desde transacciones INCOME del origen...')
+
+      // Obtener mapeo de rutas a cuentas EMPLOYEE_CASH_FUND
+      const routeAccountsResult = await client.query(`
+        SELECT r.id as route_id, r.name as route_name, a.id as account_id
+        FROM "${TARGET_SCHEMA}"."Route" r
+        JOIN "${TARGET_SCHEMA}"."_RouteAccounts" ra ON ra."B" = r.id
+        JOIN "${TARGET_SCHEMA}"."Account" a ON a.id = ra."A"
+        WHERE a.type = 'EMPLOYEE_CASH_FUND'
+      `)
+      const routeToAccount = new Map(routeAccountsResult.rows.map((r: any) => [r.route_id, r.account_id]))
+
+      // Obtener cuenta BANK
+      const bankResult = await client.query(`
+        SELECT id FROM "${TARGET_SCHEMA}"."Account" WHERE type = 'BANK' LIMIT 1
+      `)
+      const bankAccountId = bankResult.rows[0]?.id
+
+      // Insertar entries directamente con SQL (más rápido)
+      const incomeResult = await client.query(`
+        INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+          id, "accountId", amount, "entryType", "sourceType",
+          "profitAmount", "returnToCapital",
+          "snapshotLeadId", "snapshotRouteId",
+          "entryDate", description,
+          "loanId", "loanPaymentId", "leadPaymentReceivedId",
+          "syncId", "createdAt"
+        )
+        SELECT
+          gen_random_uuid()::text,
+          CASE
+            WHEN lp."paymentMethod" = 'MONEY_TRANSFER' THEN $1
+            ELSE ra.account_id
+          END,
+          ABS(t.amount),
+          'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType",
+          CASE
+            WHEN t."incomeSource" = 'MONEY_INVESMENT' THEN 'MONEY_INVESTMENT'
+            WHEN t."incomeSource" = 'MULTA' THEN 'MULTA'
+            WHEN lp."paymentMethod" = 'MONEY_TRANSFER' THEN 'LOAN_PAYMENT_BANK'
+            ELSE 'LOAN_PAYMENT_CASH'
+          END::"${TARGET_SCHEMA}"."SourceType",
+          CASE
+            WHEN t."incomeSource" = 'MONEY_INVESMENT' THEN 0
+            WHEN t."incomeSource" = 'MULTA' THEN ABS(t.amount)
+            ELSE COALESCE(t."profitAmount", 0)
+          END,
+          CASE
+            WHEN t."incomeSource" IN ('MONEY_INVESMENT', 'MULTA') THEN 0
+            ELSE COALESCE(t."returnToCapital", 0)
+          END,
+          COALESCE(t."snapshotLeadId", ''),
+          COALESCE(t."snapshotRouteId", ''),
+          t.date,
+          COALESCE(t.description, ''),
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."LoanPayment" WHERE id = t."loanPayment") THEN t."loanPayment" ELSE NULL END,
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."LeadPaymentReceived" WHERE id = t."leadPaymentReceived") THEN t."leadPaymentReceived" ELSE NULL END,
+          gen_random_uuid()::text,
+          t."createdAt"
+        FROM "${SOURCE_SCHEMA}"."Transaction" t
+        LEFT JOIN "${SOURCE_SCHEMA}"."LoanPayment" lp ON lp.id = t."loanPayment"
+        LEFT JOIN (
+          SELECT r.id as route_id, a.id as account_id
+          FROM "${TARGET_SCHEMA}"."Route" r
+          JOIN "${TARGET_SCHEMA}"."_RouteAccounts" ra ON ra."B" = r.id
+          JOIN "${TARGET_SCHEMA}"."Account" a ON a.id = ra."A"
+          WHERE a.type = 'EMPLOYEE_CASH_FUND'
+        ) ra ON ra.route_id = t."snapshotRouteId"
+        WHERE t.type = 'INCOME'
+          AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '')
+          AND (
+            (lp."paymentMethod" = 'MONEY_TRANSFER' AND $1 IS NOT NULL)
+            OR (COALESCE(lp."paymentMethod", 'CASH') != 'MONEY_TRANSFER' AND ra.account_id IS NOT NULL)
+          )
+      `, [bankAccountId])
+
+      console.log(`   ✅ ${incomeResult.rowCount || 0} entries INCOME creados desde origen`)
+
+    } else {
       console.log('   📊 Creando entries desde transacciones INCOME de producción...')
       const sourceClient = await sourcePool.connect()
       try {

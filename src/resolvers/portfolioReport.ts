@@ -117,6 +117,7 @@ function serializeLocalityReport(report: LocalityReport) {
         totalReintegros: locality.summary.totalReintegros,
         totalFinalizados: locality.summary.totalFinalizados,
         balance: locality.summary.balance,
+        alCorrientePromedio: locality.summary.alCorrientePromedio,
         cvPromedio: locality.summary.cvPromedio,
         porcentajePagando: locality.summary.porcentajePagando,
       },
@@ -130,6 +131,7 @@ function serializeLocalityReport(report: LocalityReport) {
       totalReintegros: report.totals.totalReintegros,
       totalFinalizados: report.totals.totalFinalizados,
       balance: report.totals.balance,
+      alCorrientePromedio: report.totals.alCorrientePromedio,
       cvPromedio: report.totals.cvPromedio,
       porcentajePagando: report.totals.porcentajePagando,
     },
@@ -172,6 +174,23 @@ export const portfolioReportResolvers = {
         args.filters || undefined
       )
       return serializePortfolioReport(report)
+    },
+
+    portfolioRouteKPIs: async (
+      _parent: unknown,
+      args: {
+        year: number
+        month: number
+        filters?: PortfolioFilters
+      },
+      context: GraphQLContext
+    ) => {
+      const service = new PortfolioReportService(context.prisma)
+      return service.getRouteKPIs(
+        args.year,
+        args.month,
+        args.filters || undefined
+      )
     },
 
     activeClientsWithCVStatus: async (

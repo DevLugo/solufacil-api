@@ -261,19 +261,33 @@ export class PortfolioReportService {
     ])
     const { loans, allPayments, routeInfoMap } = loansResult
 
-    // Build weekly data for ALL weeks (completed and not) by filtering payments in memory
+    // Build weekly data for ALL weeks (completed and not)
+    // IMPORTANT: Pass ALL payments to countClientsStatus - it internally filters by week
+    // This is needed for calculating surplus (overpayments from previous weeks)
     const weeklyData: WeeklyPortfolioData[] = []
     let totalCVFromCompletedWeeks = 0
+
+    // Track per-route stats for each completed week (for calculating averages)
+    const routeWeeklyStats = new Map<string, { alCorriente: number[], enCV: number[], lastWeekClientes: number, lastWeekAlCorriente: number, lastWeekCV: number }>()
+
+    // Group loans by route once (for per-route calculations)
+    const loansByRoute = new Map<string, LoanForPortfolio[]>()
+    for (const loan of loans) {
+      const routeInfo = routeInfoMap.get(loan.id)
+      const routeId = routeInfo?.routeId || 'unknown'
+      if (!loansByRoute.has(routeId)) {
+        loansByRoute.set(routeId, [])
+      }
+      loansByRoute.get(routeId)!.push(loan)
+    }
 
     for (const week of weeks) {
       const isCompleted = this.isWeekCompleted(week)
 
-      // Filter payments for this specific week from the allPayments map
-      const weekPaymentsMap = this.filterPaymentsByWeek(allPayments, week)
-
       // Use historical calculation for completed weeks (past weeks)
       // This uses date-based active status instead of current pendingAmountStored
-      const weekStatus = countClientsStatus(loans, weekPaymentsMap, week, isCompleted)
+      // Pass ALL payments - calculateCVContribution needs them for surplus calculation
+      const weekStatus = countClientsStatus(loans, allPayments, week, isCompleted)
       const weekBalance = calculateClientBalance(
         loans,
         week.start,
@@ -283,6 +297,28 @@ export class PortfolioReportService {
       // Only count CV from completed weeks for the average
       if (isCompleted) {
         totalCVFromCompletedWeeks += weekStatus.enCV
+      }
+
+      // Calculate per-route stats for this week (for averages)
+      if (isCompleted) {
+        for (const [routeId, routeLoans] of loansByRoute) {
+          const routePaymentsMap = new Map<string, PaymentForCV[]>()
+          for (const loan of routeLoans) {
+            routePaymentsMap.set(loan.id, allPayments.get(loan.id) || [])
+          }
+          const routeStatus = countClientsStatus(routeLoans, routePaymentsMap, week, true)
+
+          if (!routeWeeklyStats.has(routeId)) {
+            routeWeeklyStats.set(routeId, { alCorriente: [], enCV: [], lastWeekClientes: 0, lastWeekAlCorriente: 0, lastWeekCV: 0 })
+          }
+          const stats = routeWeeklyStats.get(routeId)!
+          stats.alCorriente.push(routeStatus.alCorriente)
+          stats.enCV.push(routeStatus.enCV)
+          // Update last week values (will be the values from the last completed week)
+          stats.lastWeekClientes = routeStatus.totalActivos
+          stats.lastWeekAlCorriente = routeStatus.alCorriente
+          stats.lastWeekCV = routeStatus.enCV
+        }
       }
 
       weeklyData.push({
@@ -299,27 +335,15 @@ export class PortfolioReportService {
       ? Math.round(totalCVFromCompletedWeeks / completedWeeks.length)
       : 0
 
-    // Use payments from the last completed week for summary calculation
-    let paymentsMap: Map<string, PaymentForCV[]>
-
-    if (lastCompletedWeek) {
-      // Filter payments for the last completed week
-      paymentsMap = this.filterPaymentsByWeek(allPayments, lastCompletedWeek)
-    } else if (weeks.length > 0) {
-      // If no completed weeks, use first week
-      paymentsMap = this.filterPaymentsByWeek(allPayments, weeks[0])
-    } else {
-      paymentsMap = new Map<string, PaymentForCV[]>()
-    }
-
     // Use last completed week for route breakdown, or first week if none completed
     const weekForBreakdown = lastCompletedWeek || weeks[0]
 
     // OPTIMIZATION: Calculate summary and route breakdown in parallel
+    // Pass ALL payments - calculateCVContribution needs them for surplus calculation
     const [summary, byLocation] = await Promise.all([
       this.calculateSummaryForMonth(
         loans,
-        paymentsMap,
+        allPayments,
         lastCompletedWeek,
         previousWeek,
         periodStart,
@@ -331,12 +355,13 @@ export class PortfolioReportService {
         weeks.length,
         filters
       ),
-      this.getRouteBreakdown(
+      this.getRouteBreakdownWithAverages(
         loans,
-        paymentsMap,
+        allPayments,
         weekForBreakdown,
         filters,
-        routeInfoMap // OPTIMIZATION: Pass pre-computed route info to avoid extra query
+        routeInfoMap,
+        routeWeeklyStats // Pass per-route weekly stats for averages
       ),
     ])
 
@@ -352,6 +377,91 @@ export class PortfolioReportService {
       byLocation,
       renovationKPIs,
     }
+  }
+
+  /**
+   * Gets simplified route KPIs - only 3 metrics per route:
+   * - clientesTotal: Total active clients in the route (from last completed week)
+   * - pagandoPromedio: Average clients "al corriente" across completed weeks
+   * - cvPromedio: Average clients in CV across completed weeks
+   *
+   * This calls getLocalityReport for EACH route to ensure the KPIs match
+   * exactly what the user sees when they click on a route card.
+   */
+  async getRouteKPIs(
+    year: number,
+    month: number,
+    filters?: PortfolioFilters
+  ): Promise<{ routeId: string; routeName: string; clientesTotal: number; pagandoPromedio: number; cvPromedio: number }[]> {
+    // First, get all routes that have active loans
+    const routes = await this.prisma.$queryRawUnsafe<Array<{
+      id: string
+      name: string
+    }>>(`
+      SELECT DISTINCT r.id, r.name
+      FROM "Route" r
+      WHERE EXISTS (
+        SELECT 1 FROM "Loan" l
+        JOIN "Employee" e ON l.lead = e.id
+        JOIN "_RouteEmployees" re ON e.id = re."B"
+        WHERE re."A" = r.id
+          AND l."pendingAmountStored" > 0
+          AND l."badDebtDate" IS NULL
+          AND l."excludedByCleanup" IS NULL
+          AND l."renewedDate" IS NULL
+          AND l."finishedDate" IS NULL
+      )
+      OR EXISTS (
+        SELECT 1 FROM "Loan" l
+        WHERE l."snapshotRouteId" = r.id
+          AND l."pendingAmountStored" > 0
+          AND l."badDebtDate" IS NULL
+          AND l."excludedByCleanup" IS NULL
+          AND l."renewedDate" IS NULL
+          AND l."finishedDate" IS NULL
+      )
+      ORDER BY r.name
+    `)
+
+    if (routes.length === 0) {
+      return []
+    }
+
+    // Call getLocalityReport for each route in parallel
+    // This ensures the KPIs match exactly what's shown in drill-down
+    const routeReports = await Promise.all(
+      routes.map(async (route) => {
+        const routeFilters: PortfolioFilters = {
+          ...filters,
+          routeIds: [route.id],
+        }
+        const report = await this.getLocalityReport(year, month, routeFilters)
+        return {
+          routeId: route.id,
+          routeName: route.name,
+          totals: report.totals,
+        }
+      })
+    )
+
+    // Build result from route reports
+    const result: { routeId: string; routeName: string; clientesTotal: number; pagandoPromedio: number; cvPromedio: number }[] = []
+
+    for (const routeReport of routeReports) {
+      // Only include routes that have data
+      if (routeReport.totals.totalClientesActivos > 0) {
+        result.push({
+          routeId: routeReport.routeId,
+          routeName: routeReport.routeName,
+          clientesTotal: routeReport.totals.totalClientesActivos,
+          pagandoPromedio: Math.round(routeReport.totals.alCorrientePromedio * 100) / 100,
+          cvPromedio: Math.round(routeReport.totals.cvPromedio * 100) / 100,
+        })
+      }
+    }
+
+    // Sort by clientesTotal descending
+    return result.sort((a, b) => b.clientesTotal - a.clientesTotal)
   }
 
   /**
@@ -519,6 +629,14 @@ export class PortfolioReportService {
           badDebtDate: loan.badDebtDate,
           excludedByCleanup: loan.excludedByCleanup,
           previousLoan: loan.previousLoan,
+          // Fields needed for isLoanConsideredOnDate and CV calculation
+          status: loan.status,
+          rate: loan.rate,
+          requestedAmount: loan.requestedAmount,
+          totalPaid: loan.totalPaid,
+          weekDuration: loan.weekDuration,
+          totalDebt: loan.totalDebt,
+          // Movement flags
           isNew: loan.isNew,
           isRenewed: loan.isRenewed,
           isReintegro: loan.isReintegro,
@@ -554,11 +672,13 @@ export class PortfolioReportService {
           badDebtDate: l.badDebtDate,
           excludedByCleanup: l.excludedByCleanup,
           previousLoan: l.previousLoan,
-          // Campos necesarios para isLoanConsideredOnDate
+          // Campos necesarios para isLoanConsideredOnDate y CV calculation
           status: l.status,
           rate: l.rate,
           requestedAmount: l.requestedAmount,
           totalPaid: l.totalPaid,
+          weekDuration: l.weekDuration,
+          totalDebt: l.totalDebt,
         }))
 
         // Create payments map only for active loans
@@ -630,42 +750,54 @@ export class PortfolioReportService {
         ? completedWeeksData[completedWeeksData.length - 1]
         : null
 
+
       const totalNuevos = weeklyData.reduce((sum, w) => sum + w.nuevos, 0)
       const totalRenovados = weeklyData.reduce((sum, w) => sum + w.renovados, 0)
       const totalReintegros = weeklyData.reduce((sum, w) => sum + w.reintegros, 0)
       const totalFinalizados = weeklyData.reduce((sum, w) => sum + w.finalizados, 0)
       const totalBalance = weeklyData.reduce((sum, w) => sum + w.balance, 0)
 
-      // Averages only from completed weeks
+      // Averages only from completed weeks (with null safety)
       const alCorrientePromedio =
         completedWeeksData.length > 0
-          ? completedWeeksData.reduce((sum, w) => sum + w.clientesAlCorriente, 0) / completedWeeksData.length
+          ? completedWeeksData.reduce((sum, w) => sum + (w.clientesAlCorriente ?? 0), 0) / completedWeeksData.length
           : 0
 
       const cvPromedio =
         completedWeeksData.length > 0
-          ? completedWeeksData.reduce((sum, w) => sum + w.clientesEnCV, 0) / completedWeeksData.length
+          ? completedWeeksData.reduce((sum, w) => sum + (w.clientesEnCV ?? 0), 0) / completedWeeksData.length
           : 0
 
       // Use last completed week for activos/alCorriente, or last week data if none completed
-      const summaryWeekData = lastCompletedWeekData || weeklyData[weeklyData.length - 1]
+      // If weeklyData is empty, use a default object with zeros
+      const summaryWeekData = lastCompletedWeekData || weeklyData[weeklyData.length - 1] || {
+        clientesActivos: 0,
+        clientesAlCorriente: 0,
+        clientesEnCV: 0,
+      }
       const porcentajePagando =
         summaryWeekData.clientesActivos > 0
           ? (summaryWeekData.clientesAlCorriente / summaryWeekData.clientesActivos) * 100
           : 0
 
+      // Ensure all values are valid numbers (not NaN or undefined)
+      const safeNumber = (val: number | undefined | null): number => {
+        if (val === undefined || val === null || Number.isNaN(val)) return 0
+        return val
+      }
+
       const summary: LocalitySummary = {
-        totalClientesActivos: summaryWeekData.clientesActivos,
-        totalClientesAlCorriente: summaryWeekData.clientesAlCorriente,
-        totalClientesEnCV: summaryWeekData.clientesEnCV, // Use last completed week's CV (consistent with detail modal)
-        totalNuevos,
-        totalRenovados,
-        totalReintegros,
-        totalFinalizados,
-        balance: totalBalance,
-        alCorrientePromedio,
-        cvPromedio,
-        porcentajePagando,
+        totalClientesActivos: safeNumber(summaryWeekData.clientesActivos),
+        totalClientesAlCorriente: safeNumber(summaryWeekData.clientesAlCorriente),
+        totalClientesEnCV: safeNumber(summaryWeekData.clientesEnCV), // Use last completed week's CV (consistent with detail modal)
+        totalNuevos: safeNumber(totalNuevos),
+        totalRenovados: safeNumber(totalRenovados),
+        totalReintegros: safeNumber(totalReintegros),
+        totalFinalizados: safeNumber(totalFinalizados),
+        balance: safeNumber(totalBalance),
+        alCorrientePromedio: safeNumber(alCorrientePromedio),
+        cvPromedio: safeNumber(cvPromedio),
+        porcentajePagando: safeNumber(porcentajePagando),
       }
 
       localities.push({
@@ -893,12 +1025,42 @@ export class PortfolioReportService {
     weekRange: WeekRange,
     filters?: PortfolioFilters
   ) {
-    const baseWhereClause = this.buildActiveLoansWhereClause(filters, {
-      useRouteOrCondition: true,  // Include loans by lead's routes too
-      includeLocationFilter: true,
-    })
+    // Build date-based where clause for historical analysis
+    // This matches getActiveLoansWithPaymentsForMonth logic:
+    // - Loans signed before or during the week
+    // - Loans not finished before the week started (or still active)
+    // - Loans not renewed before the week started (or never renewed)
+    // - Loans not marked as bad debt or excluded by cleanup
+    const baseWhereClause: Record<string, unknown> = {
+      signDate: { lte: weekRange.end },
+      badDebtDate: null,
+      excludedByCleanup: null,
+      AND: [
+        { OR: [{ finishedDate: null }, { finishedDate: { gte: weekRange.start } }] },
+        { OR: [{ renewedDate: null }, { renewedDate: { gte: weekRange.start } }] },
+      ],
+    }
 
-    // Query 1: Get active loans
+    // Apply route filter with OR condition (snapshotRouteId OR lead's routes)
+    if (filters?.routeIds?.length) {
+      baseWhereClause.OR = [
+        { snapshotRouteId: { in: filters.routeIds } },
+        {
+          leadRelation: {
+            routes: {
+              some: { id: { in: filters.routeIds } },
+            },
+          },
+        },
+      ]
+    }
+
+    // Apply loan type filter
+    if (filters?.loantypeIds?.length) {
+      baseWhereClause.loantype = { in: filters.loantypeIds }
+    }
+
+    // Query 1: Get active loans for the week
     const activeLoans = await this.prisma.loan.findMany({
       where: baseWhereClause,
       include: {
@@ -922,6 +1084,8 @@ export class PortfolioReportService {
             },
           },
         },
+        // Include loantype to get the rate for CV calculation
+        loantypeRelation: true,
         payments: {
           where: {
             receivedAt: {
@@ -993,15 +1157,38 @@ export class PortfolioReportService {
       const location = address?.locationRelation
       const locationRoute = location?.routeRelation
 
-      // Get lead's assigned route (first one)
-      const leadRoute = loan.leadRelation?.routes?.[0]
+      // Get lead's assigned routes
+      const leadRoutes = loan.leadRelation?.routes || []
+      const leadRoute = leadRoutes[0]
 
-      // Route priority (consistent with getRoutePriorityFromData):
-      // 1. Lead's assigned route (reflects current assignment)
-      // 2. snapshotRouteId (historical)
-      // 3. Lead's locality route (fallback)
-      const routeId = leadRoute?.id || loan.snapshotRouteId || locationRoute?.id || undefined
-      const routeName = leadRoute?.name || loan.snapshotRouteName || locationRoute?.name || undefined
+      // Route assignment logic:
+      // When filtering by route, if the loan matches via lead's route (not snapshotRouteId),
+      // we should use the lead's route that matches the filter.
+      // This ensures localitites are grouped correctly for the selected route.
+      let routeId: string | undefined
+      let routeName: string | undefined
+
+      if (filters?.routeIds?.length) {
+        // Check if any of lead's routes match the filter
+        const matchingLeadRoute = leadRoutes.find(r => filters.routeIds!.includes(r.id))
+        if (matchingLeadRoute) {
+          // Use the matching lead route (current assignment)
+          routeId = matchingLeadRoute.id
+          routeName = matchingLeadRoute.name
+        } else if (loan.snapshotRouteId && filters.routeIds.includes(loan.snapshotRouteId)) {
+          // Loan matched via snapshotRouteId
+          routeId = loan.snapshotRouteId
+          routeName = loan.snapshotRouteName || undefined
+        } else {
+          // Fallback (shouldn't happen if filter is working)
+          routeId = loan.snapshotRouteId || leadRoute?.id || locationRoute?.id || undefined
+          routeName = loan.snapshotRouteName || leadRoute?.name || locationRoute?.name || undefined
+        }
+      } else {
+        // No filter - use original priority (snapshotRouteId first for historical accuracy)
+        routeId = loan.snapshotRouteId || leadRoute?.id || locationRoute?.id || undefined
+        routeName = loan.snapshotRouteName || leadRoute?.name || locationRoute?.name || undefined
+      }
 
       // "Nuevo" = signed this week without a previous loan
       const isNew =
@@ -1018,6 +1205,18 @@ export class PortfolioReportService {
       // Reintegro is a type of renovation
       const isReintegro = isRenewed
 
+      // A loan is "active" at the end of the week if:
+      // - Not finished during or before the week (finishedDate is null or after week end)
+      // - Not renewed during or before the week (renewedDate is null or after week end)
+      const isLoanStillActive =
+        (loan.finishedDate === null || loan.finishedDate > weekRange.end) &&
+        (loan.renewedDate === null || loan.renewedDate > weekRange.end)
+
+      // Calculate totalDebt for CV calculation
+      const amountGived = new Decimal(loan.amountGived).toNumber()
+      const profitAmount = new Decimal(loan.profitAmount).toNumber()
+      const totalDebt = amountGived + profitAmount
+
       return {
         id: loan.id,
         pendingAmountStored: new Decimal(loan.pendingAmountStored).toNumber(),
@@ -1028,10 +1227,13 @@ export class PortfolioReportService {
         excludedByCleanup: loan.excludedByCleanup,
         previousLoan: loan.previousLoan,
         status: loan.status,
-        // Campos necesarios para isLoanConsideredOnDate (cast para evitar error TS)
-        rate: (loan as any).rate ? new Decimal((loan as any).rate).toNumber() : null,
-        requestedAmount: (loan as any).requestedAmount ? new Decimal((loan as any).requestedAmount).toNumber() : null,
-        totalPaid: (loan as any).totalPaid ? new Decimal((loan as any).totalPaid).toNumber() : null,
+        // Campos necesarios para isLoanConsideredOnDate y CV calculation
+        // rate comes from loantypeRelation, requestedAmount and totalPaid are on the Loan table
+        rate: loan.loantypeRelation?.rate ? new Decimal(loan.loantypeRelation.rate).toNumber() : 0,
+        requestedAmount: new Decimal(loan.requestedAmount).toNumber(),
+        totalPaid: new Decimal(loan.totalPaid).toNumber(),
+        weekDuration: loan.loantypeRelation?.weekDuration ?? 16,
+        totalDebt,
         localityId: location?.id,
         localityName: location?.name,
         routeId,
@@ -1040,8 +1242,8 @@ export class PortfolioReportService {
         isNew,
         isRenewed,
         isReintegro,
-        isFinished: false, // Active loans are not finished
-        isActive: true,
+        isFinished: loan.finishedDate !== null && loan.finishedDate <= weekRange.end,
+        isActive: isLoanStillActive,
       }
     })
 
@@ -1055,8 +1257,8 @@ export class PortfolioReportService {
       const location = address?.locationRelation
       const locationRoute = location?.routeRelation
 
-      // Route priority (consistent with getRouteBreakdown):
-      // 1. snapshotRouteId (synced from lead assignment)
+      // Route priority (consistent with Keystone's getActiveLoansReport):
+      // 1. snapshotRouteId (historical, set when loan was created)
       // 2. Lead's locality route (fallback)
       const routeId = loan.snapshotRouteId || locationRoute?.id || undefined
       const routeName = loan.snapshotRouteName || locationRoute?.name || undefined
@@ -1071,10 +1273,13 @@ export class PortfolioReportService {
         excludedByCleanup: loan.excludedByCleanup,
         previousLoan: loan.previousLoan,
         status: loan.status,
-        // Campos necesarios para isLoanConsideredOnDate (cast para evitar error TS)
-        rate: (loan as any).rate ? new Decimal((loan as any).rate).toNumber() : null,
-        requestedAmount: (loan as any).requestedAmount ? new Decimal((loan as any).requestedAmount).toNumber() : null,
-        totalPaid: (loan as any).totalPaid ? new Decimal((loan as any).totalPaid).toNumber() : null,
+        // Campos necesarios para isLoanConsideredOnDate
+        // Finished loans don't need accurate rate/requestedAmount/totalPaid since they're already finished
+        rate: 0,
+        requestedAmount: new Decimal(loan.requestedAmount).toNumber(),
+        totalPaid: new Decimal(loan.totalPaid).toNumber(),
+        weekDuration: 16, // Default, not used for finished loans
+        totalDebt: 0,     // Not used for finished loans
         localityId: location?.id,
         localityName: location?.name,
         routeId,
@@ -1191,9 +1396,18 @@ export class PortfolioReportService {
     routeInfoMap: Map<string, { routeId: string; routeName: string }>
   }> {
     // Build WHERE conditions for raw SQL
+    // These conditions match buildActiveLoansWhereClause but allow historical analysis:
+    // - Loans signed before the period end
+    // - Loans not finished before period start (or still active)
+    // - Loans not renewed before period start (or never renewed)
+    // - Loans not marked as bad debt
+    // - Loans not excluded by cleanup
     const conditions: string[] = [
       `l."signDate" <= $1`,
       `(l."finishedDate" IS NULL OR l."finishedDate" >= $2)`,
+      `(l."renewedDate" IS NULL OR l."renewedDate" >= $2)`,
+      `l."badDebtDate" IS NULL`,
+      `l."excludedByCleanup" IS NULL`,
     ]
     const params: unknown[] = [periodEnd, periodStart]
     let paramIndex = 3
@@ -1238,6 +1452,9 @@ export class PortfolioReportService {
         leadRouteId: string | null
         leadRouteName: string | null
         rate: string | null
+        weekDuration: number | null
+        amountGived: string
+        profitAmount: string
       }>>(`
         SELECT DISTINCT ON (l.id)
           l.id,
@@ -1256,7 +1473,10 @@ export class PortfolioReportService {
           sr.name as "snapshotRouteName",
           lr.id as "leadRouteId",
           lr.name as "leadRouteName",
-          lt.rate::text
+          lt.rate::text,
+          lt."weekDuration",
+          l."amountGived"::text,
+          l."profitAmount"::text
         FROM "Loan" l
         LEFT JOIN "Route" sr ON l."snapshotRouteId" = sr.id
         LEFT JOIN "Loantype" lt ON l.loantype = lt.id
@@ -1268,7 +1488,9 @@ export class PortfolioReportService {
         ORDER BY l.id, lr.id
       `, ...params),
 
-      // Separate query for payments - will be matched by loan ID
+      // Separate query for ALL payments (needed for surplus calculation)
+      // We need payments before each week to calculate surplus, so we get all payments up to periodEnd
+      // Use same loan conditions as the main query
       this.prisma.$queryRawUnsafe<Array<{
         id: string
         loan: string
@@ -1278,16 +1500,19 @@ export class PortfolioReportService {
         SELECT p.id, p.loan, p.amount::text, p."receivedAt"
         FROM "LoanPayment" p
         INNER JOIN "Loan" l ON p.loan = l.id
-        WHERE p."receivedAt" >= $1 AND p."receivedAt" <= $2
-          AND l."signDate" <= $3
-          AND (l."finishedDate" IS NULL OR l."finishedDate" >= $4)
-          ${filters?.routeIds?.length ? `AND (l."snapshotRouteId" IN (${filters.routeIds.map((_, i) => `$${5 + i}`).join(', ')}) OR EXISTS (
+        WHERE p."receivedAt" <= $1
+          AND l."signDate" <= $2
+          AND (l."finishedDate" IS NULL OR l."finishedDate" >= $3)
+          AND (l."renewedDate" IS NULL OR l."renewedDate" >= $3)
+          AND l."badDebtDate" IS NULL
+          AND l."excludedByCleanup" IS NULL
+          ${filters?.routeIds?.length ? `AND (l."snapshotRouteId" IN (${filters.routeIds.map((_, i) => `$${4 + i}`).join(', ')}) OR EXISTS (
             SELECT 1 FROM "Employee" e2
             JOIN "_RouteEmployees" re2 ON e2.id = re2."B"
-            WHERE e2.id = l.lead AND re2."A" IN (${filters.routeIds.map((_, i) => `$${5 + i}`).join(', ')})
+            WHERE e2.id = l.lead AND re2."A" IN (${filters.routeIds.map((_, i) => `$${4 + i}`).join(', ')})
           ))` : ''}
-          ${filters?.loantypeIds?.length ? `AND l.loantype IN (${filters.loantypeIds.map((_, i) => `$${5 + (filters?.routeIds?.length || 0) + i}`).join(', ')})` : ''}
-      `, periodStart, periodEnd, periodEnd, periodStart, ...(filters?.routeIds || []), ...(filters?.loantypeIds || [])),
+          ${filters?.loantypeIds?.length ? `AND l.loantype IN (${filters.loantypeIds.map((_, i) => `$${4 + (filters?.routeIds?.length || 0) + i}`).join(', ')})` : ''}
+      `, periodEnd, periodEnd, periodStart, ...(filters?.routeIds || []), ...(filters?.loantypeIds || [])),
     ])
 
     // Process loans
@@ -1295,9 +1520,18 @@ export class PortfolioReportService {
     const routeInfoMap = new Map<string, { routeId: string; routeName: string }>()
 
     for (const loan of loansResult) {
+      // Calculate totalDebt: amountGived + profitAmount (same as Keystone's loan.total)
+      // Handle null/undefined values that would cause NaN
+      const amountGived = loan.amountGived ? parseFloat(loan.amountGived) : 0
+      const profitAmount = loan.profitAmount ? parseFloat(loan.profitAmount) : 0
+      const requestedAmount = loan.requestedAmount ? parseFloat(loan.requestedAmount) : 0
+      const rate = loan.rate ? parseFloat(loan.rate) : 0
+      // Use amountGived + profitAmount if available, otherwise fallback to requestedAmount * (1 + rate)
+      const totalDebt = (amountGived + profitAmount) || (requestedAmount * (1 + rate))
+
       loans.push({
         id: loan.id,
-        pendingAmountStored: parseFloat(loan.pendingAmountStored),
+        pendingAmountStored: loan.pendingAmountStored ? parseFloat(loan.pendingAmountStored) : 0,
         signDate: loan.signDate,
         finishedDate: loan.finishedDate,
         renewedDate: loan.renewedDate,
@@ -1306,9 +1540,11 @@ export class PortfolioReportService {
         cleanupDate: loan.cleanupDate,
         previousLoan: loan.previousLoan,
         status: loan.status,
-        requestedAmount: parseFloat(loan.requestedAmount),
-        rate: loan.rate ? parseFloat(loan.rate) : 0,
-        totalPaid: parseFloat(loan.totalPaid),
+        requestedAmount, // Use the safe-parsed value from above
+        rate, // Use the safe-parsed value from above
+        totalPaid: loan.totalPaid ? parseFloat(loan.totalPaid) : 0,
+        weekDuration: loan.weekDuration ?? 16,
+        totalDebt,
       })
 
       // Route priority: leadRoute > snapshotRoute > unknown
@@ -1673,6 +1909,83 @@ export class PortfolioReportService {
         clientesAlCorriente: status.alCorriente,
         clientesEnCV: status.enCV,
         balance: balance.balance,
+      })
+    }
+
+    return result.sort((a, b) => b.clientesActivos - a.clientesActivos)
+  }
+
+  /**
+   * Get route breakdown with pre-calculated averages from weekly stats.
+   * This is a more efficient version that uses pre-computed stats.
+   */
+  private async getRouteBreakdownWithAverages(
+    loans: LoanForPortfolio[],
+    paymentsMap: Map<string, PaymentForCV[]>,
+    activeWeek: WeekRange,
+    _filters: PortfolioFilters | undefined,
+    routeInfoMap: Map<string, { routeId: string; routeName: string }>,
+    routeWeeklyStats: Map<string, { alCorriente: number[], enCV: number[], lastWeekClientes: number, lastWeekAlCorriente: number, lastWeekCV: number }>
+  ): Promise<LocationBreakdown[]> {
+    // Group loans by route
+    const loansByRoute = new Map<string, { loans: LoanForPortfolio[]; routeName: string }>()
+
+    for (const loan of loans) {
+      const routeInfo = routeInfoMap.get(loan.id)
+      const routeId = routeInfo?.routeId || 'unknown'
+      const routeName = routeInfo?.routeName || 'Sin ruta'
+
+      if (!loansByRoute.has(routeId)) {
+        loansByRoute.set(routeId, { loans: [], routeName })
+      }
+      loansByRoute.get(routeId)!.loans.push(loan)
+    }
+
+    const result: LocationBreakdown[] = []
+    const isHistorical = this.isWeekCompleted(activeWeek)
+
+    for (const [routeId, data] of loansByRoute) {
+      const routePaymentsMap = new Map<string, PaymentForCV[]>()
+      for (const loan of data.loans) {
+        routePaymentsMap.set(loan.id, paymentsMap.get(loan.id) || [])
+      }
+
+      const status = countClientsStatus(
+        data.loans,
+        routePaymentsMap,
+        activeWeek,
+        isHistorical
+      )
+      const balance = calculateClientBalance(
+        data.loans,
+        activeWeek.start,
+        activeWeek.end
+      )
+
+      // Get pre-calculated stats for averages
+      const stats = routeWeeklyStats.get(routeId)
+      let pagandoPromedio: number | undefined
+      let cvPromedio: number | undefined
+
+      if (stats && stats.alCorriente.length > 0) {
+        // Calculate averages from weekly stats
+        const sumAlCorriente = stats.alCorriente.reduce((a, b) => a + b, 0)
+        const sumEnCV = stats.enCV.reduce((a, b) => a + b, 0)
+        pagandoPromedio = Math.round(sumAlCorriente / stats.alCorriente.length * 100) / 100
+        cvPromedio = Math.round(sumEnCV / stats.enCV.length * 100) / 100
+      }
+
+      result.push({
+        locationId: routeId,
+        locationName: data.routeName,
+        routeId: routeId,
+        routeName: data.routeName,
+        clientesActivos: status.totalActivos,
+        clientesAlCorriente: status.alCorriente,
+        clientesEnCV: status.enCV,
+        balance: balance.balance,
+        pagandoPromedio,
+        cvPromedio,
       })
     }
 

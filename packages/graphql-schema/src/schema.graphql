@@ -652,9 +652,9 @@ type ClientBalanceData {
 
 type PeriodComparison {
   previousClientesActivos: Int!
-  previousClientesEnCV: Int!
+  previousClientesEnCV: Float!
   previousBalance: Int!
-  cvChange: Int!
+  cvChange: Float!
   balanceChange: Int!
 }
 
@@ -663,10 +663,11 @@ type PortfolioSummary {
   clientesActivosInicio: Int
   "Clientes activos al FINAL del período"
   totalClientesActivos: Int!
-  clientesAlCorriente: Int!
-  clientesEnCV: Int!
+  clientesAlCorriente: Float!
+  "Clientes en CV (puede ser decimal por conteo parcial 0.5 para pagos 50-100%)"
+  clientesEnCV: Float!
   "Promedio de clientes en CV de las semanas completadas (solo para reportes mensuales)"
-  promedioCV: Int
+  promedioCV: Float
   "Número de semanas completadas usadas para calcular el promedio"
   semanasCompletadas: Int
   "Total de semanas en el período"
@@ -678,7 +679,8 @@ type PortfolioSummary {
 type WeeklyPortfolioData {
   weekRange: WeekRange!
   clientesActivos: Int!
-  clientesEnCV: Int!
+  "Clientes en CV (puede ser decimal por conteo parcial)"
+  clientesEnCV: Float!
   balance: Int!
   "Si la semana ya está completada (pasó el domingo)"
   isCompleted: Boolean!
@@ -690,9 +692,12 @@ type LocationBreakdown {
   routeId: ID
   routeName: String
   clientesActivos: Int!
-  clientesAlCorriente: Int!
-  clientesEnCV: Int!
+  clientesAlCorriente: Float!
+  clientesEnCV: Float!
   balance: Int!
+  # Averages from completed weeks (for monthly reports)
+  pagandoPromedio: Float
+  cvPromedio: Float
 }
 
 type RenovationKPIs {
@@ -700,6 +705,18 @@ type RenovationKPIs {
   totalCierresSinRenovar: Int!
   tasaRenovacion: Decimal!
   tendencia: Trend!
+}
+
+"KPIs simplificados por ruta - solo 3 métricas clave"
+type RouteKPI {
+  routeId: ID!
+  routeName: String!
+  "Total de clientes activos en la ruta"
+  clientesTotal: Int!
+  "Promedio de clientes pagando (al corriente) en semanas completadas"
+  pagandoPromedio: Float!
+  "Promedio de clientes en CV en semanas completadas"
+  cvPromedio: Float!
 }
 
 type PortfolioReport {
@@ -753,8 +770,8 @@ enum ClientCategory {
 type LocalityWeekData {
   weekRange: WeekRange!
   clientesActivos: Int!
-  clientesAlCorriente: Int!
-  clientesEnCV: Int!
+  clientesAlCorriente: Float!
+  clientesEnCV: Float!
   nuevos: Int!
   renovados: Int!
   reintegros: Int!
@@ -766,8 +783,8 @@ type LocalityWeekData {
 
 type LocalitySummary {
   totalClientesActivos: Int!
-  totalClientesAlCorriente: Int!
-  totalClientesEnCV: Int!
+  totalClientesAlCorriente: Float!
+  totalClientesEnCV: Float!
   totalNuevos: Int!
   totalRenovados: Int!
   totalReintegros: Int!
@@ -1050,6 +1067,8 @@ type Query {
   # Portfolio Report (Reporte de Cartera)
   portfolioReportWeekly(year: Int!, weekNumber: Int!, filters: PortfolioFiltersInput): PortfolioReport! @auth
   portfolioReportMonthly(year: Int!, month: Int!, filters: PortfolioFiltersInput): PortfolioReport! @auth
+  "KPIs simplificados por ruta - retorna solo clientesTotal, pagandoPromedio, cvPromedio por cada ruta"
+  portfolioRouteKPIs(year: Int!, month: Int!, filters: PortfolioFiltersInput): [RouteKPI!]! @auth
   activeClientsWithCVStatus(filters: PortfolioFiltersInput): [ActiveClientStatus!]! @auth
   currentActiveWeek: WeekRange! @auth
 

@@ -130,11 +130,15 @@ export function isLoanConsideredOnDate(
   }
 
   // PUNTO 5: Calcular el monto pendiente real
-  // IMPORTANTE: El original usa defaults de 0 si requestedAmount o rate son null/undefined
-  // NO usa fallback a pendingAmountStored
+  // IMPORTANTE: Usar loan.totalDebt si está disponible y es válido (no NaN, > 0)
+  // Esto es más preciso que recalcular desde requestedAmount * (1 + rate)
   const rate = loan.rate ?? 0
   const requestedAmount = loan.requestedAmount ?? 0
-  const totalDebt = requestedAmount * (1 + rate)
+  const calculatedDebt = requestedAmount * (1 + rate)
+  // Use loan.totalDebt only if it's a valid positive number, otherwise use calculated
+  const totalDebt = (loan.totalDebt && loan.totalDebt > 0 && !Number.isNaN(loan.totalDebt))
+    ? loan.totalDebt
+    : calculatedDebt
   const totalPaid = loan.totalPaid ?? 0
   const realPendingAmount = Math.max(0, totalDebt - totalPaid)
 
@@ -789,12 +793,17 @@ export function countClientsStatus(
     totalActivos++
     const payments = paymentsMap.get(loan.id) || []
 
-    // Verificar si está en CV (sin pagos en la semana y no es préstamo nuevo de esa semana)
-    const inCV = isInCarteraVencidaWithDateCheck(loan, payments, activeWeek, referenceDate, effectiveRenewalMap)
+    // Calcular contribución de CV usando la lógica de Keystone
+    // Considera sobrepago de semanas anteriores y pagos parciales
+    const cvContribution = calculateCVContribution(
+      loan,
+      payments,
+      activeWeek,
+      referenceDate,
+      effectiveRenewalMap
+    )
 
-    if (inCV) {
-      enCV++
-    }
+    enCV += cvContribution
   }
 
   return {
@@ -805,30 +814,137 @@ export function countClientsStatus(
 }
 
 /**
- * Verifica si un préstamo está en CV, usando la lógica original.
- * Un préstamo está en CV si:
- * - Está activo en la fecha de referencia
- * - No fue firmado en la semana activa (grace period)
- * - No recibió ningún pago en la semana activa
+ * Calcula la contribución de CV de un préstamo usando la lógica de Keystone.
+ *
+ * La lógica considera:
+ * - Sobrepago de semanas anteriores que puede cubrir la semana actual
+ * - Pagos parciales: <50% = 1 CV, 50-100% = 0.5 CV
+ * - Semana de otorgamiento (grace period)
+ *
+ * @returns Contribución de CV: 0, 0.5, o 1
  */
-function isInCarteraVencidaWithDateCheck(
+function calculateCVContribution(
   loan: LoanForPortfolio,
   payments: PaymentForCV[],
   activeWeek: WeekRange,
   referenceDate: Date,
   renewalMap: Map<string, LoanRenewalInfo[]>
-): boolean {
+): number {
   // Verificar que está activo en la fecha de referencia
   if (!isLoanConsideredOnDate(loan, referenceDate, renewalMap)) {
-    return false
+    return 0
   }
 
-  // Préstamos firmados en la semana activa tienen grace period
+  // Préstamos firmados en la semana activa tienen grace period (semana de otorgamiento)
   if (isDateInWeek(loan.signDate, activeWeek)) {
-    return false
+    return 0
   }
 
-  // En CV si no hay pagos en la semana
-  const paymentsInWeek = countPaymentsInWeek(payments, activeWeek)
-  return paymentsInWeek === 0
+  // Calcular pago semanal esperado
+  // Use loan.totalDebt only if it's a valid positive number
+  const calculatedDebt = (loan.requestedAmount ?? 0) * (1 + (loan.rate ?? 0))
+  const totalDebt = (loan.totalDebt && loan.totalDebt > 0 && !Number.isNaN(loan.totalDebt))
+    ? loan.totalDebt
+    : calculatedDebt
+  const weekDuration = loan.weekDuration ?? 16
+  const expectedWeekly = weekDuration > 0 ? totalDebt / weekDuration : 0
+
+  if (expectedWeekly <= 0 || Number.isNaN(expectedWeekly)) {
+    return 0 // No se puede calcular CV sin pago esperado válido
+  }
+
+  // Sumar pagos de esta semana
+  let weeklyPaid = 0
+  for (const payment of payments) {
+    const paymentDate = new Date(payment.receivedAt)
+    if (paymentDate >= activeWeek.start && paymentDate <= activeWeek.end) {
+      weeklyPaid += payment.amount
+    }
+  }
+
+  // Calcular pagos antes de esta semana
+  let paidBeforeWeek = 0
+  for (const payment of payments) {
+    const paymentDate = new Date(payment.receivedAt)
+    if (paymentDate < activeWeek.start) {
+      paidBeforeWeek += payment.amount
+    }
+  }
+
+  // Calcular semanas transcurridas desde la firma hasta el inicio de esta semana
+  const signDate = new Date(loan.signDate)
+  const signWeekStart = new Date(signDate)
+  // Encontrar el lunes de la semana de firma
+  while (signWeekStart.getDay() !== 1) {
+    signWeekStart.setDate(signWeekStart.getDate() - 1)
+  }
+  signWeekStart.setHours(0, 0, 0, 0)
+
+  const weeksSinceSign = Math.floor(
+    (activeWeek.start.getTime() - signWeekStart.getTime()) / (7 * 24 * 60 * 60 * 1000)
+  )
+  // Usar semanas COMPLETADAS antes de la semana actual
+  const weeksElapsed = Math.max(0, weeksSinceSign - 1)
+
+  // Calcular lo que debería haberse pagado antes de esta semana
+  const expectedBefore = weeksElapsed > 0 ? weeksElapsed * expectedWeekly : 0
+  // Sobrepago acumulado de semanas anteriores
+  const surplusBefore = paidBeforeWeek - expectedBefore
+
+  // Determinar tipo de cobertura
+  const coversWithSurplus = (surplusBefore + weeklyPaid) >= expectedWeekly
+
+  type CoverageType = 'FULL' | 'COVERED_BY_SURPLUS' | 'PARTIAL' | 'MISS'
+  let coverageType: CoverageType = 'MISS'
+
+  if (weeklyPaid >= expectedWeekly) {
+    coverageType = 'FULL'
+  } else if (coversWithSurplus && weeklyPaid > 0) {
+    coverageType = 'COVERED_BY_SURPLUS'
+  } else if (coversWithSurplus && weeklyPaid === 0) {
+    coverageType = 'COVERED_BY_SURPLUS'
+  } else if (weeklyPaid > 0) {
+    coverageType = 'PARTIAL'
+  }
+
+  // Aplicar reglas de contribución de CV basadas en coverageType
+  if (weeklyPaid === 0) {
+    if (weeksElapsed === 0) {
+      // Primera semana de pago después de otorgamiento
+      if (weeksSinceSign === 0) {
+        // Semana de otorgamiento: no se espera pago
+        return 0
+      } else {
+        // Primera semana de pago: SÍ se espera pago
+        if (coverageType === 'COVERED_BY_SURPLUS') {
+          return 0 // Cubierto por sobrepago
+        } else {
+          return 1 // Sin pago en primera semana
+        }
+      }
+    } else {
+      // Semanas posteriores sin pago
+      if (coverageType === 'COVERED_BY_SURPLUS') {
+        return 0 // Cubierto por sobrepago
+      } else {
+        return 1 // Sin pago
+      }
+    }
+  } else if (expectedWeekly > 0) {
+    if (coverageType === 'FULL') {
+      return 0 // Pago completo
+    } else if (coverageType === 'COVERED_BY_SURPLUS') {
+      return 0 // Pago parcial cubierto por sobrepago
+    } else if (coverageType === 'PARTIAL') {
+      if (weeklyPaid < 0.5 * expectedWeekly) {
+        return 1 // Pago < 50%
+      } else {
+        return 0.5 // Pago 50-100%
+      }
+    } else {
+      return 1 // MISS - sin pago y sin sobrepago
+    }
+  }
+
+  return 0
 }
