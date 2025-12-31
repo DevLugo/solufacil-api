@@ -825,6 +825,8 @@ type LocalityClientDetail {
   daysSinceLastPayment: Int
   loanType: String!
   category: ClientCategory!
+  expectedWeekly: Decimal!
+  paidThisWeek: Decimal!
 }
 
 # Annual Financial Report Types

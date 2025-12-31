@@ -273,6 +273,8 @@ export const portfolioReportResolvers = {
         daysSinceLastPayment: client.daysSinceLastPayment,
         loanType: client.loanType,
         category: client.category,
+        expectedWeekly: client.expectedWeekly.toString(),
+        paidThisWeek: client.paidThisWeek.toString(),
       }))
     },
   },

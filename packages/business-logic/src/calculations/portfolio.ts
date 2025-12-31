@@ -823,7 +823,7 @@ export function countClientsStatus(
  *
  * @returns Contribución de CV: 0, 0.5, o 1
  */
-function calculateCVContribution(
+export function calculateCVContribution(
   loan: LoanForPortfolio,
   payments: PaymentForCV[],
   activeWeek: WeekRange,

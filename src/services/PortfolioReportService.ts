@@ -10,6 +10,8 @@ import {
   countClientsStatus,
   countActiveLoansAtDate,
   isLoanConsideredOnDate,
+  calculateCVContribution,
+  buildRenewalMap,
   type WeekRange,
   type LoanForPortfolio,
   type PaymentForCV,
@@ -330,40 +332,62 @@ export class PortfolioReportService {
       })
     }
 
-    // Calculate average CV from completed weeks
-    const promedioCV = completedWeeks.length > 0
-      ? Math.round(totalCVFromCompletedWeeks / completedWeeks.length)
-      : 0
-
     // Use last completed week for route breakdown, or first week if none completed
     const weekForBreakdown = lastCompletedWeek || weeks[0]
 
-    // OPTIMIZATION: Calculate summary and route breakdown in parallel
-    // Pass ALL payments - calculateCVContribution needs them for surplus calculation
-    const [summary, byLocation] = await Promise.all([
-      this.calculateSummaryForMonth(
-        loans,
-        allPayments,
-        lastCompletedWeek,
-        previousWeek,
-        periodStart,
-        periodEnd,
-        previousPeriodStart,
-        previousPeriodEnd,
-        promedioCV,
-        completedWeeks.length,
-        weeks.length,
-        filters
-      ),
-      this.getRouteBreakdownWithAverages(
-        loans,
-        allPayments,
-        weekForBreakdown,
-        filters,
-        routeInfoMap,
-        routeWeeklyStats // Pass per-route weekly stats for averages
-      ),
-    ])
+    // Get route breakdown for display (kept for byLocation in response)
+    const byLocation = await this.getRouteBreakdownWithAverages(
+      loans,
+      allPayments,
+      weekForBreakdown,
+      filters,
+      routeInfoMap,
+      routeWeeklyStats
+    )
+
+    // Call getRouteKPIs to get totals that match "Por Rutas" tab exactly
+    // This sums per-route totals (same logic as the frontend displays)
+    const routeKPIs = await this.getRouteKPIs(year, month, filters)
+    const totalClientesActivos = routeKPIs.reduce((sum, r) => sum + r.clientesTotal, 0)
+    const pagandoPromedio = routeKPIs.reduce((sum, r) => sum + r.pagandoPromedio, 0)
+    const cvPromedio = routeKPIs.reduce((sum, r) => sum + r.cvPromedio, 0)
+
+    // Calculate clients at the START of the period
+    const startReferenceDate = new Date(periodStart.getTime() - 1)
+    const clientesActivosInicio = countActiveLoansAtDate(loans, startReferenceDate)
+
+    // Client balance for the period
+    const clientBalance = calculateClientBalance(loans, periodStart, periodEnd)
+
+    // Calculate comparison with previous period (approximate, from current loan data)
+    // This avoids a second expensive getLocalityReport call
+    let comparison = null
+    if (previousPeriodStart && previousPeriodEnd && previousWeek) {
+      const prevStatus = countClientsStatus(loans, allPayments, previousWeek, true)
+      const prevBalance = calculateClientBalance(loans, previousPeriodStart, previousPeriodEnd)
+
+      comparison = {
+        previousPeriod: {
+          clientesActivos: prevStatus.totalActivos,
+          clientesEnCV: prevStatus.enCV,
+          balance: prevBalance.balance,
+        },
+        cvChange: Math.round(cvPromedio) - prevStatus.enCV,
+        balanceChange: clientBalance.balance - prevBalance.balance,
+      }
+    }
+
+    const summary: PortfolioSummary = {
+      clientesActivosInicio,
+      totalClientesActivos,
+      clientesAlCorriente: Math.round(pagandoPromedio),
+      clientesEnCV: Math.round(cvPromedio),
+      promedioCV: Math.round(cvPromedio * 100) / 100,
+      semanasCompletadas: completedWeeks.length,
+      totalSemanas: weeks.length,
+      clientBalance,
+      comparison,
+    }
 
     // renovationKPIs already computed in parallel above
 
@@ -874,12 +898,18 @@ export class PortfolioReportService {
 
     // Query loans filtering by LEAD's locality (not borrower's)
     // This is consistent with portfolioByLocality grouping
+    // IMPORTANT: Use HISTORICAL filters based on targetWeek, not current state
+    // This ensures we get loans that were active DURING that week, even if
+    // they have since been finished or renewed
     const whereClause: any = {
-      pendingAmountStored: { gt: 0 },
+      signDate: { lte: targetWeek.end },
       badDebtDate: null,
       excludedByCleanup: null,
-      renewedDate: null,
-      finishedDate: null,
+      // Historical filters: include loans that weren't finished/renewed BEFORE the week started
+      AND: [
+        { OR: [{ finishedDate: null }, { finishedDate: { gte: targetWeek.start } }] },
+        { OR: [{ renewedDate: null }, { renewedDate: { gte: targetWeek.start } }] },
+      ],
     }
 
     // Filter by lead's locality
@@ -928,12 +958,17 @@ export class PortfolioReportService {
           },
         },
         loantypeRelation: true,
+        // IMPORTANT: Include ALL payments up to weekEnd (not just this week's) because
+        // isInCarteraVencida/calculateCVContribution needs the full payment history
+        // to calculate "surplusBefore" (accumulated overpayments from previous weeks)
         payments: {
           where: {
             receivedAt: {
-              gte: targetWeek.start,
               lte: targetWeek.end,
             },
+          },
+          orderBy: {
+            receivedAt: 'asc',
           },
         },
       },
@@ -941,11 +976,57 @@ export class PortfolioReportService {
 
     const result: LocalityClientDetail[] = []
 
+    // Convert all loans to LoanForPortfolio format with ALL fields needed for CV calculation
+    // This includes rate, requestedAmount, totalPaid, weekDuration, totalDebt
+    const loansForPortfolio: LoanForPortfolio[] = loans.map((loan) => {
+      const rate = loan.loantypeRelation?.rate ? new Decimal(loan.loantypeRelation.rate).toNumber() : 0
+      const requestedAmount = new Decimal(loan.requestedAmount).toNumber()
+      // IMPORTANT: Use requestedAmount * (1 + rate) for totalDebt calculation
+      // This matches the logic in calculateCVContribution and ensures correct expectedWeekly
+      // DO NOT use amountGived + profitAmount as profitAmount may include inherited debt
+      const totalDebt = requestedAmount * (1 + rate)
+
+      return {
+        id: loan.id,
+        pendingAmountStored: new Decimal(loan.pendingAmountStored).toNumber(),
+        signDate: loan.signDate,
+        finishedDate: loan.finishedDate,
+        renewedDate: loan.renewedDate,
+        badDebtDate: loan.badDebtDate,
+        excludedByCleanup: loan.excludedByCleanup,
+        previousLoan: loan.previousLoan,
+        status: loan.status,
+        // Fields needed for calculateCVContribution and isLoanConsideredOnDate
+        rate,
+        requestedAmount,
+        totalPaid: new Decimal(loan.totalPaid).toNumber(),
+        weekDuration: loan.loantypeRelation?.weekDuration ?? 16,
+        totalDebt,
+      }
+    })
+    const renewalMap = buildRenewalMap(loansForPortfolio)
+
+    // Create a map for quick lookup
+    const loanForPortfolioMap = new Map(loansForPortfolio.map((l) => [l.id, l]))
+
+    // Reference date: use week end for historical analysis (consistent with countClientsStatus)
+    const referenceDate = targetWeek.end
+
     for (const loan of loans) {
       const personalData = loan.borrowerRelation?.personalDataRelation
-      const loanForPortfolio = this.toLoanForPortfolio(loan)
+      const loanForPortfolio = loanForPortfolioMap.get(loan.id)!
       const payments = this.toPaymentsForCV(loan.payments)
-      const inCV = isInCarteraVencida(loanForPortfolio, payments, targetWeek)
+
+      // Use calculateCVContribution (same as countClientsStatus) to determine CV status
+      // This considers: surplus from previous weeks, partial payments (50% = 0.5 CV), grace period
+      const cvContribution = calculateCVContribution(
+        loanForPortfolio,
+        payments,
+        targetWeek,
+        referenceDate,
+        renewalMap
+      )
+      const inCV = cvContribution > 0
 
       // Determine category
       const isNewInWeek =
@@ -982,13 +1063,24 @@ export class PortfolioReportService {
         continue
       }
 
-      // Calculate days since last payment
+      // Calculate days since last payment (use last payment in the payments array)
       let daysSinceLastPayment: number | null = null
-      const lastPayment = loan.payments[0]
+      const lastPayment = loan.payments[loan.payments.length - 1] // payments are ordered by receivedAt asc
       if (lastPayment) {
         const diffTime = Date.now() - lastPayment.receivedAt.getTime()
         daysSinceLastPayment = Math.floor(diffTime / (1000 * 60 * 60 * 24))
       }
+
+      // Calculate expected weekly payment and paid this week
+      const weekDuration = loan.loantypeRelation?.weekDuration ?? 16
+      const expectedWeekly = loanForPortfolio.totalDebt
+        ? Math.round(loanForPortfolio.totalDebt / weekDuration)
+        : 0
+
+      // Calculate amount paid in the target week
+      const paidThisWeek = payments
+        .filter((p) => p.receivedAt >= targetWeek.start && p.receivedAt <= targetWeek.end)
+        .reduce((sum, p) => sum + p.amount, 0)
 
       result.push({
         loanId: loan.id,
@@ -1001,6 +1093,8 @@ export class PortfolioReportService {
         daysSinceLastPayment,
         loanType: loan.loantypeRelation?.name || 'N/A',
         category: clientCategory,
+        expectedWeekly,
+        paidThisWeek,
       })
     }
 
@@ -1086,12 +1180,17 @@ export class PortfolioReportService {
         },
         // Include loantype to get the rate for CV calculation
         loantypeRelation: true,
+        // IMPORTANT: Include ALL payments (not just this week's) because
+        // calculateCVContribution needs the full payment history to calculate
+        // "surplusBefore" (accumulated overpayments from previous weeks)
         payments: {
           where: {
             receivedAt: {
-              gte: weekRange.start,
               lte: weekRange.end,
             },
+          },
+          orderBy: {
+            receivedAt: 'asc',
           },
         },
       },
@@ -1213,9 +1312,11 @@ export class PortfolioReportService {
         (loan.renewedDate === null || loan.renewedDate > weekRange.end)
 
       // Calculate totalDebt for CV calculation
-      const amountGived = new Decimal(loan.amountGived).toNumber()
-      const profitAmount = new Decimal(loan.profitAmount).toNumber()
-      const totalDebt = amountGived + profitAmount
+      // IMPORTANT: Use requestedAmount * (1 + rate) for correct expectedWeekly calculation
+      // DO NOT use amountGived + profitAmount as profitAmount may include inherited debt
+      const rate = loan.loantypeRelation?.rate ? new Decimal(loan.loantypeRelation.rate).toNumber() : 0
+      const requestedAmount = new Decimal(loan.requestedAmount).toNumber()
+      const totalDebt = requestedAmount * (1 + rate)
 
       return {
         id: loan.id,
@@ -1228,9 +1329,8 @@ export class PortfolioReportService {
         previousLoan: loan.previousLoan,
         status: loan.status,
         // Campos necesarios para isLoanConsideredOnDate y CV calculation
-        // rate comes from loantypeRelation, requestedAmount and totalPaid are on the Loan table
-        rate: loan.loantypeRelation?.rate ? new Decimal(loan.loantypeRelation.rate).toNumber() : 0,
-        requestedAmount: new Decimal(loan.requestedAmount).toNumber(),
+        rate,
+        requestedAmount,
         totalPaid: new Decimal(loan.totalPaid).toNumber(),
         weekDuration: loan.loantypeRelation?.weekDuration ?? 16,
         totalDebt,
@@ -1520,14 +1620,12 @@ export class PortfolioReportService {
     const routeInfoMap = new Map<string, { routeId: string; routeName: string }>()
 
     for (const loan of loansResult) {
-      // Calculate totalDebt: amountGived + profitAmount (same as Keystone's loan.total)
-      // Handle null/undefined values that would cause NaN
-      const amountGived = loan.amountGived ? parseFloat(loan.amountGived) : 0
-      const profitAmount = loan.profitAmount ? parseFloat(loan.profitAmount) : 0
+      // Calculate totalDebt for CV calculation
+      // IMPORTANT: Use requestedAmount * (1 + rate) for correct expectedWeekly calculation
+      // DO NOT use amountGived + profitAmount as profitAmount may include inherited debt
       const requestedAmount = loan.requestedAmount ? parseFloat(loan.requestedAmount) : 0
       const rate = loan.rate ? parseFloat(loan.rate) : 0
-      // Use amountGived + profitAmount if available, otherwise fallback to requestedAmount * (1 + rate)
-      const totalDebt = (amountGived + profitAmount) || (requestedAmount * (1 + rate))
+      const totalDebt = requestedAmount * (1 + rate)
 
       loans.push({
         id: loan.id,

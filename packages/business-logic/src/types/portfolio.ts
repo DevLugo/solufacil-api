@@ -453,4 +453,8 @@ export interface LocalityClientDetail {
   loanType: string
   /** Categoría del cliente */
   category: ClientCategory
+  /** Pago semanal esperado */
+  expectedWeekly: number
+  /** Monto pagado en la semana analizada */
+  paidThisWeek: number
 }
