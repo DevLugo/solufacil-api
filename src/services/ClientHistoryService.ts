@@ -191,19 +191,34 @@ export class ClientHistoryService {
                 signDate: true,
                 pendingAmountStored: true,
                 snapshotRouteName: true,
-                snapshotRoute: {
+                // Get lead's location for correct locality display
+                leadRelation: {
                   select: {
-                    id: true,
-                    name: true,
-                    locations: {
+                    personalDataRelation: {
+                      select: {
+                        addresses: {
+                          select: {
+                            location: true,
+                            locationRelation: {
+                              select: {
+                                id: true,
+                                name: true,
+                                municipalityRelation: {
+                                  select: {
+                                    name: true,
+                                  },
+                                },
+                              },
+                            },
+                          },
+                          take: 1,
+                        },
+                      },
+                    },
+                    routes: {
                       select: {
                         id: true,
                         name: true,
-                        municipalityRelation: {
-                          select: {
-                            name: true,
-                          },
-                        },
                       },
                       take: 1,
                     },
@@ -280,15 +295,19 @@ export class ClientHistoryService {
 
       // Get route info from most recent loan (prioritize active loans, then any loan)
       const loanForRouteInfo = activeLoans[0] || latestLoan
-      const snapshotRoute = loanForRouteInfo?.snapshotRoute
-      const routeLocation = snapshotRoute?.locations?.[0]
+      // Use lead's location for locality display (not route's first location)
+      const leadLocation =
+        loanForRouteInfo?.leadRelation?.personalDataRelation?.addresses?.[0]
+          ?.locationRelation
+      const leadRoute = loanForRouteInfo?.leadRelation?.routes?.[0]
 
-      // Route name: use snapshotRouteName or route.name from loan
-      const routeName = loanForRouteInfo?.snapshotRouteName || snapshotRoute?.name || null
-      // Location: from route's location
-      const locationName = routeLocation?.name || null
-      // Municipality: from route's location's municipality
-      const municipalityName = routeLocation?.municipalityRelation?.name || null
+      // Route name: use snapshotRouteName or lead's current route
+      const routeName =
+        loanForRouteInfo?.snapshotRouteName || leadRoute?.name || null
+      // Location: from lead's address location
+      const locationName = leadLocation?.name || null
+      // Municipality: from lead's location's municipality
+      const municipalityName = leadLocation?.municipalityRelation?.name || null
 
       return {
         id: pd.id,
@@ -533,16 +552,18 @@ export class ClientHistoryService {
         (now.getTime() - signDate.getTime()) / (1000 * 60 * 60 * 24)
       )
 
-      const amountGived = parseFloat(loan.amountGived || '0')
-      const profitAmount = parseFloat(loan.profitAmount || '0')
-      const totalAmountDue = amountGived + profitAmount
-      const totalPaid = parseFloat(loan.totalPaid || '0')
+      const amountGived = parseFloat(loan.amountGived?.toString() || '0')
+      const rate = parseFloat(loan.loantypeRelation?.rate?.toString() || '0')
+      // Calculate interest from rate to ensure correct total (rate is like 0.40 for 40%)
+      const calculatedInterest = amountGived * rate
+      const totalAmountDue = amountGived + calculatedInterest
+      const totalPaid = parseFloat(loan.totalPaid?.toString() || '0')
 
       // Calculate balance progression for payments
       let runningBalance = totalAmountDue
       const payments: LoanPaymentDetail[] = loan.payments.map(
         (p: any, idx: number) => {
-          const amount = parseFloat(p.amount || '0')
+          const amount = parseFloat(p.amount?.toString() || '0')
           const balanceBefore = runningBalance
           runningBalance -= amount
           const balanceAfter = Math.max(0, runningBalance)
@@ -590,7 +611,7 @@ export class ClientHistoryService {
         loanType: loan.loantypeRelation?.name || 'N/A',
         amountRequested: loan.requestedAmount,
         totalAmountDue: totalAmountDue.toString(),
-        interestAmount: profitAmount.toString(),
+        interestAmount: calculatedInterest.toString(),
         totalPaid: loan.totalPaid,
         pendingDebt: loan.pendingAmountStored,
         daysSinceSign,
