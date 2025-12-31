@@ -87,14 +87,8 @@ export function isLoanConsideredOnDate(
     }
   }
 
-  // PUNTO 2: Si fue marcado como badDebt antes de la fecha, NO está activo
-  // NOTA: El original no selecciona badDebtDate, pero si existe y es <= fecha, excluir
-  if (loan.badDebtDate !== null && loan.badDebtDate !== undefined) {
-    const badDebtDateTime = new Date(loan.badDebtDate).getTime()
-    if (badDebtDateTime <= dateTime) {
-      return false
-    }
-  }
+  // PUNTO 2: badDebtDate - REMOVIDO
+  // Los préstamos con badDebtDate ahora se incluyen en los conteos
 
   // PUNTO 3: Si fue marcado como cleanup, NO está activo
   // IMPORTANTE: El original verifica solo si excludedByCleanup existe.

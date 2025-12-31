@@ -58,39 +58,25 @@ export class PortfolioReportService {
   private buildActiveLoansWhereClause(
     filters?: PortfolioFilters,
     options: {
-      /** Use OR condition for route filtering (snapshotRouteId OR lead's routes) */
-      useRouteOrCondition?: boolean
       /** Include location filter based on borrower's address */
       includeLocationFilter?: boolean
     } = {}
   ): Record<string, unknown> {
-    const { useRouteOrCondition = true, includeLocationFilter = false } = options
+    const { includeLocationFilter = false } = options
 
     const whereClause: Record<string, unknown> = {
       pendingAmountStored: { gt: 0 },
-      badDebtDate: null,
       excludedByCleanup: null,
       renewedDate: null,
       finishedDate: null,
     }
 
-    // Apply route filter
+    // Apply route filter - use lead's current route assignment only
     if (filters?.routeIds?.length) {
-      if (useRouteOrCondition) {
-        // Include loans matching snapshotRouteId OR lead's assigned routes
-        whereClause.OR = [
-          { snapshotRouteId: { in: filters.routeIds } },
-          {
-            leadRelation: {
-              routes: {
-                some: { id: { in: filters.routeIds } },
-              },
-            },
-          },
-        ]
-      } else {
-        // Simple filter by snapshotRouteId only
-        whereClause.snapshotRouteId = { in: filters.routeIds }
+      whereClause.leadRelation = {
+        routes: {
+          some: { id: { in: filters.routeIds } },
+        },
       }
     }
 
@@ -410,7 +396,7 @@ export class PortfolioReportService {
    * - cvPromedio: Average clients in CV across completed weeks
    *
    * OPTIMIZED: Fetches all data ONCE and processes in memory.
-   * A loan belongs to a route if: snapshotRouteId matches OR lead has that route assigned.
+   * A loan belongs to a route based on lead's current route assignment.
    */
   async getRouteKPIs(
     year: number,
@@ -425,21 +411,21 @@ export class PortfolioReportService {
 
     const lastCompletedWeek = completedWeeks[completedWeeks.length - 1]
 
-    // OPTIMIZATION: Single query to get all loans with ALL their route associations
-    // This includes both snapshotRouteId and lead's routes (M:M relation)
+    // OPTIMIZATION: Single query to get all loans with their lead's route associations
     const loansWithRoutes = await this.prisma.loan.findMany({
       where: {
         signDate: { lte: lastCompletedWeek.end },
-        badDebtDate: null,
         excludedByCleanup: null,
         AND: [
           { OR: [{ finishedDate: null }, { finishedDate: { gte: lastCompletedWeek.start } }] },
           { OR: [{ renewedDate: null }, { renewedDate: { gte: lastCompletedWeek.start } }] },
         ],
         ...(filters?.loantypeIds?.length && { loantype: { in: filters.loantypeIds } }),
+        ...(filters?.routeIds?.length && {
+          leadRelation: { routes: { some: { id: { in: filters.routeIds } } } },
+        }),
       },
       include: {
-        snapshotRoute: true,
         leadRelation: {
           include: {
             routes: true,
@@ -453,22 +439,14 @@ export class PortfolioReportService {
       },
     })
 
-    // Build a map of loanId -> all routes this loan belongs to
+    // Build a map of loanId -> lead's routes (ignoring snapshotRouteId)
     const loanRoutesMap = new Map<string, Set<string>>()
     const routeNames = new Map<string, string>()
 
     for (const loan of loansWithRoutes) {
       const routes = new Set<string>()
 
-      // Add snapshotRouteId if exists
-      if (loan.snapshotRouteId) {
-        routes.add(loan.snapshotRouteId)
-        if (loan.snapshotRoute) {
-          routeNames.set(loan.snapshotRouteId, loan.snapshotRoute.name)
-        }
-      }
-
-      // Add all lead's routes
+      // Only use lead's current routes (ignore snapshotRouteId for historical accuracy)
       if (loan.leadRelation?.routes) {
         for (const route of loan.leadRelation.routes) {
           routes.add(route.id)
@@ -829,6 +807,7 @@ export class PortfolioReportService {
 
         // Use historical calculation for completed weeks
         const status = countClientsStatus(activeBaseLoanData, activePaymentsMap, week, isCompleted)
+
         const balance = calculateClientBalance(activeBaseLoanData, week.start, week.end)
 
         // Count movements (from all loans, not just active)
@@ -1019,7 +998,6 @@ export class PortfolioReportService {
     // they have since been finished or renewed
     const whereClause: any = {
       signDate: { lte: targetWeek.end },
-      badDebtDate: null,
       excludedByCleanup: null,
       // Historical filters: include loans that weren't finished/renewed BEFORE the week started
       AND: [
@@ -1240,10 +1218,9 @@ export class PortfolioReportService {
     // - Loans signed before or during the week
     // - Loans not finished before the week started (or still active)
     // - Loans not renewed before the week started (or never renewed)
-    // - Loans not marked as bad debt or excluded by cleanup
+    // - Loans not excluded by cleanup
     const baseWhereClause: Record<string, unknown> = {
       signDate: { lte: weekRange.end },
-      badDebtDate: null,
       excludedByCleanup: null,
       AND: [
         { OR: [{ finishedDate: null }, { finishedDate: { gte: weekRange.start } }] },
@@ -1251,18 +1228,13 @@ export class PortfolioReportService {
       ],
     }
 
-    // Apply route filter with OR condition (snapshotRouteId OR lead's routes)
+    // Apply route filter - use lead's current route assignment only
     if (filters?.routeIds?.length) {
-      baseWhereClause.OR = [
-        { snapshotRouteId: { in: filters.routeIds } },
-        {
-          leadRelation: {
-            routes: {
-              some: { id: { in: filters.routeIds } },
-            },
-          },
+      baseWhereClause.leadRelation = {
+        routes: {
+          some: { id: { in: filters.routeIds } },
         },
-      ]
+      }
     }
 
     // Apply loan type filter
@@ -1315,7 +1287,6 @@ export class PortfolioReportService {
     // Query 2: Get loans that finished this week (for "finalizados" count)
     // Build where clause with OR condition for routes
     const finishedLoansWhere: Record<string, unknown> = {
-      badDebtDate: null,
       excludedByCleanup: null,
       renewedDate: null, // Finished without renewal
       finishedDate: {
@@ -1325,18 +1296,13 @@ export class PortfolioReportService {
       ...(filters?.loantypeIds?.length && { loantype: { in: filters.loantypeIds } }),
     }
 
-    // Apply route filter with OR condition
+    // Apply route filter - use lead's current route assignment only
     if (filters?.routeIds?.length) {
-      finishedLoansWhere.OR = [
-        { snapshotRouteId: { in: filters.routeIds } },
-        {
-          leadRelation: {
-            routes: {
-              some: { id: { in: filters.routeIds } },
-            },
-          },
+      finishedLoansWhere.leadRelation = {
+        routes: {
+          some: { id: { in: filters.routeIds } },
         },
-      ]
+      }
     }
 
     const finishedLoans = await this.prisma.loan.findMany({
@@ -1383,26 +1349,22 @@ export class PortfolioReportService {
       let routeId: string | undefined
       let routeName: string | undefined
 
+      // Always use lead's current route assignment (ignore snapshotRouteId)
       if (filters?.routeIds?.length) {
         // Check if any of lead's routes match the filter
         const matchingLeadRoute = leadRoutes.find(r => filters.routeIds!.includes(r.id))
         if (matchingLeadRoute) {
-          // Use the matching lead route (current assignment)
           routeId = matchingLeadRoute.id
           routeName = matchingLeadRoute.name
-        } else if (loan.snapshotRouteId && filters.routeIds.includes(loan.snapshotRouteId)) {
-          // Loan matched via snapshotRouteId
-          routeId = loan.snapshotRouteId
-          routeName = loan.snapshotRouteName || undefined
         } else {
-          // Fallback (shouldn't happen if filter is working)
-          routeId = loan.snapshotRouteId || leadRoute?.id || locationRoute?.id || undefined
-          routeName = loan.snapshotRouteName || leadRoute?.name || locationRoute?.name || undefined
+          // Fallback to first lead route or location route
+          routeId = leadRoute?.id || locationRoute?.id || undefined
+          routeName = leadRoute?.name || locationRoute?.name || undefined
         }
       } else {
-        // No filter - use original priority (snapshotRouteId first for historical accuracy)
-        routeId = loan.snapshotRouteId || leadRoute?.id || locationRoute?.id || undefined
-        routeName = loan.snapshotRouteName || leadRoute?.name || locationRoute?.name || undefined
+        // No filter - use lead's route (not snapshotRouteId)
+        routeId = leadRoute?.id || locationRoute?.id || undefined
+        routeName = leadRoute?.name || locationRoute?.name || undefined
       }
 
       // "Nuevo" = signed this week without a previous loan
@@ -1473,11 +1435,11 @@ export class PortfolioReportService {
       const location = address?.locationRelation
       const locationRoute = location?.routeRelation
 
-      // Route priority (consistent with Keystone's getActiveLoansReport):
-      // 1. snapshotRouteId (historical, set when loan was created)
-      // 2. Lead's locality route (fallback)
-      const routeId = loan.snapshotRouteId || locationRoute?.id || undefined
-      const routeName = loan.snapshotRouteName || locationRoute?.name || undefined
+      // Use lead's current route assignment (ignore snapshotRouteId)
+      const leadRoutes = loan.leadRelation?.routes || []
+      const leadRoute = leadRoutes[0]
+      const routeId = leadRoute?.id || locationRoute?.id || undefined
+      const routeName = leadRoute?.name || locationRoute?.name || undefined
 
       result.push({
         id: loan.id,
@@ -1567,25 +1529,16 @@ export class PortfolioReportService {
   }
 
   /**
-   * Gets route priority based on snapshot and lead data.
-   * Priority: lead's route > snapshotRouteId > 'unknown'
-   * (Prioriza la ruta actual del lead para reflejar cambios de asignación)
+   * Gets route from lead's current assignment.
+   * Only uses lead's route (ignores snapshotRouteId for historical accuracy)
    */
   private getRoutePriority(
-    loan: {
-      snapshotRouteId?: string | null
-      snapshotRoute?: { name: string } | null
-      snapshotRouteName?: string | null
-    },
+    _loan: unknown,
     leadRoute?: { id: string; name: string } | null
   ): { routeId: string; routeName: string } {
     return {
-      routeId: leadRoute?.id || loan.snapshotRouteId || 'unknown',
-      routeName:
-        leadRoute?.name ||
-        loan.snapshotRoute?.name ||
-        loan.snapshotRouteName ||
-        'Sin ruta',
+      routeId: leadRoute?.id || 'unknown',
+      routeName: leadRoute?.name || 'Sin ruta',
     }
   }
 
@@ -1616,22 +1569,20 @@ export class PortfolioReportService {
     // - Loans signed before the period end
     // - Loans not finished before period start (or still active)
     // - Loans not renewed before period start (or never renewed)
-    // - Loans not marked as bad debt
     // - Loans not excluded by cleanup
     const conditions: string[] = [
       `l."signDate" <= $1`,
       `(l."finishedDate" IS NULL OR l."finishedDate" >= $2)`,
       `(l."renewedDate" IS NULL OR l."renewedDate" >= $2)`,
-      `l."badDebtDate" IS NULL`,
       `l."excludedByCleanup" IS NULL`,
     ]
     const params: unknown[] = [periodEnd, periodStart]
     let paramIndex = 3
 
-    // Route filter
+    // Route filter - use lead's current route assignment only
     if (filters?.routeIds?.length) {
       const routePlaceholders = filters.routeIds.map((_, i) => `$${paramIndex + i}`).join(', ')
-      conditions.push(`(l."snapshotRouteId" IN (${routePlaceholders}) OR lr.id IN (${routePlaceholders}))`)
+      conditions.push(`lr.id IN (${routePlaceholders})`)
       params.push(...filters.routeIds)
       paramIndex += filters.routeIds.length
     }
@@ -1720,13 +1671,12 @@ export class PortfolioReportService {
           AND l."signDate" <= $2
           AND (l."finishedDate" IS NULL OR l."finishedDate" >= $3)
           AND (l."renewedDate" IS NULL OR l."renewedDate" >= $3)
-          AND l."badDebtDate" IS NULL
           AND l."excludedByCleanup" IS NULL
-          ${filters?.routeIds?.length ? `AND (l."snapshotRouteId" IN (${filters.routeIds.map((_, i) => `$${4 + i}`).join(', ')}) OR EXISTS (
+          ${filters?.routeIds?.length ? `AND EXISTS (
             SELECT 1 FROM "Employee" e2
             JOIN "_RouteEmployees" re2 ON e2.id = re2."B"
             WHERE e2.id = l.lead AND re2."A" IN (${filters.routeIds.map((_, i) => `$${4 + i}`).join(', ')})
-          ))` : ''}
+          )` : ''}
           ${filters?.loantypeIds?.length ? `AND l.loantype IN (${filters.loantypeIds.map((_, i) => `$${4 + (filters?.routeIds?.length || 0) + i}`).join(', ')})` : ''}
       `, periodEnd, periodEnd, periodStart, ...(filters?.routeIds || []), ...(filters?.loantypeIds || [])),
     ])
@@ -1762,8 +1712,9 @@ export class PortfolioReportService {
       })
 
       // Route priority: leadRoute > snapshotRoute > unknown
-      const routeId = loan.leadRouteId || loan.snapshotRouteId || 'unknown'
-      const routeName = loan.leadRouteName || loan.snapshotRouteName || 'Sin ruta'
+      // Use lead's current route only (ignore snapshotRouteId)
+      const routeId = loan.leadRouteId || 'unknown'
+      const routeName = loan.leadRouteName || 'Sin ruta'
       routeInfoMap.set(loan.id, { routeId, routeName })
     }
 
@@ -1785,21 +1736,16 @@ export class PortfolioReportService {
 
   /**
    * Helper para obtener routeId y routeName de los datos del préstamo
-   * Priority: leadRoute > snapshotRoute > 'unknown'
-   * (Prioriza la ruta actual del lead para reflejar cambios de asignación)
+   * Only uses lead's current route (ignores snapshotRouteId)
    */
   private getRoutePriorityFromData(
-    snapshotRouteId: string | null,
-    snapshotRoute: { id: string; name: string } | null,
+    _snapshotRouteId: string | null,
+    _snapshotRoute: { id: string; name: string } | null,
     leadRoute: { id: string; name: string } | null
   ): { routeId: string; routeName: string } {
-    // Priorizar ruta actual del lead
+    // Only use lead's current route
     if (leadRoute) {
       return { routeId: leadRoute.id, routeName: leadRoute.name }
-    }
-    // Fallback a snapshot route
-    if (snapshotRouteId && snapshotRoute) {
-      return { routeId: snapshotRoute.id, routeName: snapshotRoute.name }
     }
     return { routeId: 'unknown', routeName: 'Sin ruta' }
   }
@@ -1816,18 +1762,13 @@ export class PortfolioReportService {
       signDate: { lte: weekRange.end },
     }
 
-    // Apply route filter
+    // Apply route filter - use lead's current route only
     if (filters?.routeIds?.length) {
-      whereClause.OR = [
-        { snapshotRouteId: { in: filters.routeIds } },
-        {
-          leadRelation: {
-            routes: {
-              some: { id: { in: filters.routeIds } },
-            },
-          },
+      whereClause.leadRelation = {
+        routes: {
+          some: { id: { in: filters.routeIds } },
         },
-      ]
+      }
     }
 
     // Apply loan type filter
@@ -2221,9 +2162,14 @@ export class PortfolioReportService {
     const params: unknown[] = [periodStart, periodEnd]
     let paramIndex = 3
 
+    // Route filter - use lead's current route only
     if (filters?.routeIds?.length) {
       const placeholders = filters.routeIds.map((_, i) => `$${paramIndex + i}`).join(', ')
-      conditions.push(`l."snapshotRouteId" IN (${placeholders})`)
+      conditions.push(`EXISTS (
+        SELECT 1 FROM "Employee" e
+        JOIN "_RouteEmployees" re ON e.id = re."B"
+        WHERE e.id = l.lead AND re."A" IN (${placeholders})
+      )`)
       params.push(...filters.routeIds)
       paramIndex += filters.routeIds.length
     }
