@@ -483,6 +483,8 @@ type ClientSummary {
   currentPendingDebtAsClient: Decimal!
   hasBeenClient: Boolean!
   hasBeenCollateral: Boolean!
+  firstLoanDate: DateTime
+  avgMissedPaymentsPerLoan: Float!
 }
 
 type LoanHistoryDetail {

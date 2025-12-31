@@ -521,6 +521,58 @@ export class ClientHistoryService {
       (l) => l.status === 'ACTIVE'
     )
 
+    // Get first loan date (oldest loan)
+    const allLoanDates = loansAsClient.map((l) => new Date(l.signDate))
+    const firstLoanDate = allLoanDates.length > 0
+      ? new Date(Math.min(...allLoanDates.map((d) => d.getTime())))
+      : null
+
+    // Calculate average missed payments per loan
+    // Analyze week by week: count weeks where no payment was made
+    let avgMissedPaymentsPerLoan = 0
+    if (loansAsClient.length > 0) {
+      const now = new Date()
+      const totalMissed = loansAsClient.reduce((sum, loan) => {
+        const signDate = new Date(loan.signDate)
+        // Use renewedDate if available, otherwise finishedDate, otherwise now
+        const endDate = loan.renewedDate
+          ? new Date(loan.renewedDate)
+          : loan.finishedDate
+          ? new Date(loan.finishedDate)
+          : now
+        const weekDuration = loan.loantypeRelation?.weekDuration || 0
+        const payments = loan.payments || []
+
+        // Calculate weeks elapsed (capped at weekDuration)
+        const msPerWeek = 7 * 24 * 60 * 60 * 1000
+        const weeksElapsed = Math.min(
+          Math.floor((endDate.getTime() - signDate.getTime()) / msPerWeek),
+          weekDuration
+        )
+
+        // Calculate based on amount paid vs expected weekly payment
+        // If someone pays double, that covers 2 weeks
+        const expectedWeeklyPayment = parseFloat(
+          loan.expectedWeeklyPayment?.toString() || '0'
+        )
+        const totalPaidAmount = payments.reduce(
+          (acc: number, p: any) => acc + parseFloat(p.amount?.toString() || '0'),
+          0
+        )
+
+        // How many weeks are covered by the payments made?
+        const weeksCovered =
+          expectedWeeklyPayment > 0
+            ? Math.floor(totalPaidAmount / expectedWeeklyPayment)
+            : payments.length // fallback to count if no expected amount
+
+        const missedWeeks = Math.max(0, weeksElapsed - weeksCovered)
+
+        return sum + missedWeeks
+      }, 0)
+      avgMissedPaymentsPerLoan = totalMissed / loansAsClient.length
+    }
+
     const summary = {
       totalLoansAsClient: loansAsClient.length,
       totalLoansAsCollateral: loansAsCollateral.length,
@@ -537,6 +589,8 @@ export class ClientHistoryService {
         .toString(),
       hasBeenClient: loansAsClient.length > 0,
       hasBeenCollateral: loansAsCollateral.length > 0,
+      firstLoanDate: firstLoanDate?.toISOString() || null,
+      avgMissedPaymentsPerLoan: Math.round(avgMissedPaymentsPerLoan * 10) / 10, // Round to 1 decimal
     }
 
     // Map loans to detail format
@@ -552,11 +606,12 @@ export class ClientHistoryService {
         (now.getTime() - signDate.getTime()) / (1000 * 60 * 60 * 24)
       )
 
-      const amountGived = parseFloat(loan.amountGived?.toString() || '0')
+      const requestedAmount = parseFloat(loan.requestedAmount?.toString() || '0')
       const rate = parseFloat(loan.loantypeRelation?.rate?.toString() || '0')
-      // Calculate interest from rate to ensure correct total (rate is like 0.40 for 40%)
-      const calculatedInterest = amountGived * rate
-      const totalAmountDue = amountGived + calculatedInterest
+      // Calculate total from rate: requestedAmount * (1 + rate)
+      // e.g., 5000 * 1.40 = 7000 for 40% interest
+      const totalAmountDue = requestedAmount * (1 + rate)
+      const interestAmount = requestedAmount * rate
       const totalPaid = parseFloat(loan.totalPaid?.toString() || '0')
 
       // Calculate balance progression for payments
@@ -611,7 +666,7 @@ export class ClientHistoryService {
         loanType: loan.loantypeRelation?.name || 'N/A',
         amountRequested: loan.requestedAmount,
         totalAmountDue: totalAmountDue.toString(),
-        interestAmount: calculatedInterest.toString(),
+        interestAmount: interestAmount.toString(),
         totalPaid: loan.totalPaid,
         pendingDebt: loan.pendingAmountStored,
         daysSinceSign,
