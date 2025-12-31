@@ -50,5 +50,16 @@ export const clientResolvers = {
         { isAdmin }
       )
     },
+
+    getLoanHistoryDetail: async (
+      _parent: unknown,
+      args: { loanId: string },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      const clientHistoryService = new ClientHistoryService(context.prisma)
+      return clientHistoryService.getLoanHistoryDetail(args.loanId)
+    },
   },
 }

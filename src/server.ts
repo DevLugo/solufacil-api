@@ -12,6 +12,8 @@ import { ClientHistoryService } from './services/ClientHistoryService'
 import { PdfService } from './services/PdfService'
 import { ListadoPDFService } from './services/ListadoPDFService'
 import { PdfExportService } from './services/PdfExportService'
+import { BadDebtPDFService } from './services/BadDebtPDFService'
+import { LeaderBirthdayPDFService } from './services/LeaderBirthdayPDFService'
 
 async function startServer() {
   const app = express()
@@ -77,6 +79,7 @@ async function startServer() {
   const pdfService = new PdfService()
   const pdfExportService = new PdfExportService(prisma)
   const listadoPDFService = new ListadoPDFService(prisma)
+  const badDebtPDFService = new BadDebtPDFService(prisma)
 
   // Handle preflight OPTIONS request for PDF export
   app.options('/api/export-client-history-pdf', cors(corsOptions))
@@ -161,6 +164,90 @@ async function startServer() {
       } catch (error) {
         console.error('Error generating listado PDF:', error)
         res.status(500).json({ error: 'Failed to generate PDF' })
+      }
+    }
+  )
+
+  // Bad Debt Clients PDF export endpoint
+  app.options('/api/export-bad-debt-pdf', cors(corsOptions))
+
+  app.get(
+    '/api/export-bad-debt-pdf',
+    cors(corsOptions),
+    async (req, res) => {
+      try {
+        const { routeId, locationId, routeName, locationName } = req.query
+
+        console.log('📄 Generando PDF de clientes morosos')
+        console.log('   Ruta:', routeName || 'Todas')
+        console.log('   Localidad:', locationName || 'Todas')
+
+        const pdfBuffer = await badDebtPDFService.generatePDF({
+          routeId: routeId as string | undefined,
+          locationId: locationId as string | undefined,
+          routeName: routeName as string | undefined,
+          locationName: locationName as string | undefined,
+        })
+
+        // Generate filename
+        const dateStr = new Date().toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\//g, '-')
+        let filename = `clientes_morosos_${dateStr}`
+        if (routeName) filename += `_${(routeName as string).replace(/\s+/g, '_').toLowerCase()}`
+        if (locationName) filename += `_${(locationName as string).replace(/\s+/g, '_').toLowerCase()}`
+        filename += '.pdf'
+
+        res.setHeader('Content-Type', 'application/pdf')
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`)
+        res.send(pdfBuffer)
+
+        console.log('✅ PDF de clientes morosos generado exitosamente')
+      } catch (error) {
+        console.error('❌ Error al generar PDF de clientes morosos:', error)
+        res.status(500).json({
+          error: 'Failed to generate PDF',
+          message: error instanceof Error ? error.message : 'Unknown error'
+        })
+      }
+    }
+  )
+
+  // Leader Birthdays PDF export endpoint
+  const leaderBirthdayPDFService = new LeaderBirthdayPDFService(prisma)
+
+  app.options('/api/export-leader-birthdays-pdf', cors(corsOptions))
+
+  app.get(
+    '/api/export-leader-birthdays-pdf',
+    cors(corsOptions),
+    async (req, res) => {
+      try {
+        const { routeId, routeName } = req.query
+
+        console.log('🎂 Generando PDF de cumpleaños de líderes')
+        console.log('   Ruta:', routeName || 'Todas')
+
+        const pdfBuffer = await leaderBirthdayPDFService.generatePDF({
+          routeId: routeId as string | undefined,
+          routeName: routeName as string | undefined,
+        })
+
+        // Generate filename
+        const dateStr = new Date().toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\//g, '-')
+        let filename = `cumpleanos_lideres_${dateStr}`
+        if (routeName) filename += `_${(routeName as string).replace(/\s+/g, '_').toLowerCase()}`
+        filename += '.pdf'
+
+        res.setHeader('Content-Type', 'application/pdf')
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`)
+        res.send(pdfBuffer)
+
+        console.log('✅ PDF de cumpleaños de líderes generado exitosamente')
+      } catch (error) {
+        console.error('❌ Error al generar PDF de cumpleaños de líderes:', error)
+        res.status(500).json({
+          error: 'Failed to generate PDF',
+          message: error instanceof Error ? error.message : 'Unknown error'
+        })
       }
     }
   )

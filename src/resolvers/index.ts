@@ -21,6 +21,7 @@ import { bankIncomeResolvers } from './bankIncome'
 import { deadDebtResolvers } from './deadDebt'
 import { batchTransferResolvers } from './batchTransfer'
 import { bulkDateMigrationResolvers } from './bulkDateMigration'
+import { badDebtClientsResolvers } from './badDebtClients'
 
 export const resolvers = {
   ...scalars,
@@ -47,6 +48,7 @@ export const resolvers = {
     ...bankIncomeResolvers.Query,
     ...deadDebtResolvers.Query,
     ...bulkDateMigrationResolvers.Query,
+    ...badDebtClientsResolvers.Query,
   },
 
   Mutation: {

@@ -226,4 +226,78 @@ export class LeaderService {
       locationName: existingLeader.personalDataRelation?.addresses[0]?.locationRelation?.name || 'Desconocida'
     }
   }
+
+  /**
+   * Obtiene todos los líderes con sus cumpleaños
+   * Ordenados por proximidad del próximo cumpleaños
+   */
+  async getLeaderBirthdays(routeId?: string) {
+    const leaders = await this.prisma.employee.findMany({
+      where: {
+        type: 'LEAD',
+        ...(routeId && {
+          routes: {
+            some: { id: routeId }
+          }
+        })
+      },
+      include: {
+        personalDataRelation: {
+          include: {
+            phones: true,
+            addresses: {
+              include: {
+                locationRelation: true
+              }
+            }
+          }
+        },
+        routes: true
+      }
+    })
+
+    const today = new Date()
+    today.setHours(0, 0, 0, 0) // Normalize to start of day
+    const currentYear = today.getFullYear()
+
+    // Función para calcular días hasta el próximo cumpleaños
+    const getDaysUntilBirthday = (birthDate: Date | null): number => {
+      if (!birthDate) return 9999 // Sin fecha al final
+
+      const birthday = new Date(birthDate)
+      // Use UTC methods to avoid timezone issues (birthDate stored as UTC midnight)
+      const thisYearBirthday = new Date(currentYear, birthday.getUTCMonth(), birthday.getUTCDate())
+      thisYearBirthday.setHours(0, 0, 0, 0)
+
+      // Si ya pasó este año, usar el del próximo año
+      if (thisYearBirthday < today) {
+        thisYearBirthday.setFullYear(currentYear + 1)
+      }
+
+      const diffTime = thisYearBirthday.getTime() - today.getTime()
+      return Math.round(diffTime / (1000 * 60 * 60 * 24))
+    }
+
+    // Transformar y ordenar
+    const leaderBirthdays = leaders
+      .map((leader) => {
+        const personalData = leader.personalDataRelation
+        const location = personalData?.addresses[0]?.locationRelation
+        const route = leader.routes[0]
+
+        return {
+          id: leader.id,
+          fullName: personalData?.fullName || 'Sin nombre',
+          birthDate: personalData?.birthDate || null,
+          phone: personalData?.phones[0]?.number || null,
+          locationName: location?.name || 'Sin localidad',
+          routeId: route?.id || '',
+          routeName: route?.name || 'Sin ruta',
+          daysUntilBirthday: getDaysUntilBirthday(personalData?.birthDate || null),
+        }
+      })
+      .sort((a, b) => a.daysUntilBirthday - b.daysUntilBirthday)
+
+    return leaderBirthdays
+  }
 }

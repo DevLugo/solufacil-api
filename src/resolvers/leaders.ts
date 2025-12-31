@@ -15,6 +15,17 @@ export const leadersResolvers = {
       const leaderService = new LeaderService(context.prisma)
       return leaderService.checkExistingLeader(args.locationId)
     },
+
+    leaderBirthdays: async (
+      _parent: unknown,
+      args: { routeId?: string },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      const leaderService = new LeaderService(context.prisma)
+      return leaderService.getLeaderBirthdays(args.routeId)
+    },
   },
 
   Mutation: {

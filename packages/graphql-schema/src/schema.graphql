@@ -473,6 +473,17 @@ type LeaderInfo {
   phone: String
 }
 
+type LeaderBirthday {
+  id: ID!
+  fullName: String!
+  birthDate: DateTime
+  phone: String
+  locationName: String!
+  routeId: ID!
+  routeName: String!
+  daysUntilBirthday: Int!
+}
+
 type ClientSummary {
   totalLoansAsClient: Int!
   totalLoansAsCollateral: Int!
@@ -537,6 +548,48 @@ type NoPaymentPeriod {
   startDateFormatted: String!
   endDateFormatted: String!
   weekCount: Int!
+}
+
+# Bad Debt Clients Types (Clientes Morosos)
+type BadDebtClientItem {
+  id: ID!
+  loanId: ID!
+  clientName: String!
+  clientCode: String
+  clientPhone: String
+
+  # Montos
+  amountRequested: Decimal!
+  totalAmountDue: Decimal!
+  totalPaid: Decimal!
+  pendingDebt: Decimal!
+
+  # Ubicación
+  locationName: String
+  municipalityName: String
+  routeName: String
+
+  # Líder
+  leadName: String
+  leadPhone: String
+
+  # Fechas
+  signDate: DateTime!
+  badDebtDate: DateTime
+  cleanupDate: DateTime
+  lastPaymentDate: DateTime
+
+  # Estado
+  isFromCleanup: Boolean!
+
+  # Para fotos (reusar LoanDocumentPhotos)
+  borrowerPersonalDataId: ID!
+}
+
+type BadDebtClientsResult {
+  clients: [BadDebtClientItem!]!
+  totalCount: Int!
+  hasMore: Boolean!
 }
 
 # Pagination Types
@@ -1047,6 +1100,9 @@ type Query {
   # Check existing leader in location
   checkExistingLeader(locationId: ID!): ExistingLeaderInfo @auth
 
+  # Leader birthdays report
+  leaderBirthdays(routeId: ID): [LeaderBirthday!]! @auth
+
   # Client History (historial de clientes)
   searchClients(
     searchTerm: String!
@@ -1060,6 +1116,17 @@ type Query {
     routeId: ID
     locationId: ID
   ): ClientHistoryData! @auth
+
+  # Bad Debt Clients (Clientes Morosos)
+  badDebtClients(
+    routeId: ID
+    locationId: ID
+    limit: Int = 20
+    offset: Int = 0
+  ): BadDebtClientsResult! @auth
+
+  # Loan History Detail (for payment history modal)
+  getLoanHistoryDetail(loanId: ID!): LoanHistoryDetail @auth
 
   # Reports
   financialReport(routeIds: [ID!]!, year: Int!, month: Int!): FinancialReport! @requireRole(roles: [ADMIN])

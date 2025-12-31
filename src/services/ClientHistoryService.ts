@@ -344,6 +344,133 @@ export class ClientHistoryService {
     return results.slice(0, limit)
   }
 
+  async getLoanHistoryDetail(
+    loanId: string
+  ): Promise<LoanHistoryDetail | null> {
+    const loan = await this.prisma.loan.findUnique({
+      where: { id: loanId },
+      include: {
+        loantypeRelation: true,
+        leadRelation: {
+          include: {
+            personalDataRelation: {
+              include: {
+                phones: true,
+              },
+            },
+          },
+        },
+        borrowerRelation: {
+          include: {
+            personalDataRelation: {
+              include: { phones: true },
+            },
+          },
+        },
+        collaterals: {
+          include: { phones: true },
+        },
+        payments: {
+          orderBy: { receivedAt: 'asc' },
+        },
+        previousLoanRelation: true,
+        renewedBy: true,
+      },
+    })
+
+    if (!loan) {
+      return null
+    }
+
+    return this.mapLoanToDetail(loan, false, [loan])
+  }
+
+  private mapLoanToDetail(
+    loan: any,
+    isCollateral: boolean,
+    allLoans: any[]
+  ): LoanHistoryDetail {
+    const now = new Date()
+    const signDate = new Date(loan.signDate)
+    const daysSinceSign = Math.floor(
+      (now.getTime() - signDate.getTime()) / (1000 * 60 * 60 * 24)
+    )
+
+    const requestedAmount = parseFloat(loan.requestedAmount?.toString() || '0')
+    const rate = parseFloat(loan.loantypeRelation?.rate?.toString() || '0')
+    const totalAmountDue = requestedAmount * (1 + rate)
+    const interestAmount = requestedAmount * rate
+
+    // Calculate balance progression for payments
+    let runningBalance = totalAmountDue
+    const payments: LoanPaymentDetail[] = loan.payments.map(
+      (p: any, idx: number) => {
+        const amount = parseFloat(p.amount?.toString() || '0')
+        const balanceBefore = runningBalance
+        runningBalance -= amount
+        const balanceAfter = Math.max(0, runningBalance)
+
+        return {
+          id: p.id,
+          amount: p.amount,
+          receivedAt: p.receivedAt,
+          receivedAtFormatted: this.formatDate(new Date(p.receivedAt)),
+          type: p.type || 'PAYMENT',
+          paymentMethod: p.paymentMethod,
+          paymentNumber: idx + 1,
+          balanceBeforePayment: balanceBefore.toString(),
+          balanceAfterPayment: balanceAfter.toString(),
+        }
+      }
+    )
+
+    const noPaymentPeriods: NoPaymentPeriod[] = []
+    const collateral = loan.collaterals?.[0]
+    const borrowerData = loan.borrowerRelation?.personalDataRelation
+    const wasRenewed = !!loan.renewedDate
+    const renewingLoan = loan.renewedBy
+      ? loan.renewedBy
+      : allLoans.find((l: any) => l.previousLoan === loan.id)
+
+    return {
+      id: loan.id,
+      signDate: loan.signDate,
+      signDateFormatted: this.formatDate(new Date(loan.signDate)),
+      finishedDate: loan.finishedDate,
+      finishedDateFormatted: loan.finishedDate
+        ? this.formatDate(new Date(loan.finishedDate))
+        : null,
+      renewedDate: loan.renewedDate,
+      loanType: loan.loantypeRelation?.name || 'N/A',
+      amountRequested: loan.requestedAmount,
+      totalAmountDue: totalAmountDue.toString(),
+      interestAmount: interestAmount.toString(),
+      totalPaid: loan.totalPaid,
+      pendingDebt: loan.pendingAmountStored,
+      daysSinceSign,
+      status: loan.status,
+      wasRenewed,
+      weekDuration: loan.loantypeRelation?.weekDuration || 0,
+      rate: loan.loantypeRelation?.rate || '0',
+      leadName:
+        loan.snapshotLeadName ||
+        loan.leadRelation?.personalDataRelation?.fullName ||
+        null,
+      routeName: loan.snapshotRouteName || null,
+      paymentsCount: payments.length,
+      payments,
+      noPaymentPeriods,
+      renewedFrom: loan.previousLoan || null,
+      renewedTo: renewingLoan?.id || null,
+      avalName: isCollateral ? null : collateral?.fullName || null,
+      avalPhone: isCollateral
+        ? null
+        : collateral?.phones?.[0]?.number || null,
+      clientName: isCollateral ? borrowerData?.fullName || null : null,
+      clientDui: isCollateral ? borrowerData?.clientCode || null : null,
+    }
+  }
+
   async getClientHistory(
     clientId: string,
     _routeId?: string,
@@ -593,106 +720,6 @@ export class ClientHistoryService {
       avgMissedPaymentsPerLoan: Math.round(avgMissedPaymentsPerLoan * 10) / 10, // Round to 1 decimal
     }
 
-    // Map loans to detail format
-    // allLoans is used to find the loan that renewed this one (for renewedTo field)
-    const mapLoanToDetail = (
-      loan: any,
-      isCollateral: boolean,
-      allLoans: any[]
-    ): LoanHistoryDetail => {
-      const now = new Date()
-      const signDate = new Date(loan.signDate)
-      const daysSinceSign = Math.floor(
-        (now.getTime() - signDate.getTime()) / (1000 * 60 * 60 * 24)
-      )
-
-      const requestedAmount = parseFloat(loan.requestedAmount?.toString() || '0')
-      const rate = parseFloat(loan.loantypeRelation?.rate?.toString() || '0')
-      // Calculate total from rate: requestedAmount * (1 + rate)
-      // e.g., 5000 * 1.40 = 7000 for 40% interest
-      const totalAmountDue = requestedAmount * (1 + rate)
-      const interestAmount = requestedAmount * rate
-      const totalPaid = parseFloat(loan.totalPaid?.toString() || '0')
-
-      // Calculate balance progression for payments
-      let runningBalance = totalAmountDue
-      const payments: LoanPaymentDetail[] = loan.payments.map(
-        (p: any, idx: number) => {
-          const amount = parseFloat(p.amount?.toString() || '0')
-          const balanceBefore = runningBalance
-          runningBalance -= amount
-          const balanceAfter = Math.max(0, runningBalance)
-
-          return {
-            id: p.id,
-            amount: p.amount,
-            receivedAt: p.receivedAt,
-            receivedAtFormatted: this.formatDate(new Date(p.receivedAt)),
-            type: p.type || 'PAYMENT',
-            paymentMethod: p.paymentMethod,
-            paymentNumber: idx + 1,
-            balanceBeforePayment: balanceBefore.toString(),
-            balanceAfterPayment: balanceAfter.toString(),
-          }
-        }
-      )
-
-      // Calculate no-payment periods (simplified - actual implementation would be more complex)
-      const noPaymentPeriods: NoPaymentPeriod[] = []
-
-      // Get collateral info for loans as client
-      const collateral = loan.collaterals?.[0]
-
-      // Get borrower info for loans as collateral
-      const borrowerData = loan.borrowerRelation?.personalDataRelation
-
-      // Check if this loan was renewed - simple check: if renewedDate exists, it was renewed
-      const wasRenewed = !!loan.renewedDate
-
-      // Find the loan that renewed this one (for renewedTo field)
-      const renewingLoan = loan.renewedBy
-        ? loan.renewedBy
-        : allLoans.find((l: any) => l.previousLoan === loan.id)
-
-      return {
-        id: loan.id,
-        signDate: loan.signDate,
-        signDateFormatted: this.formatDate(new Date(loan.signDate)),
-        finishedDate: loan.finishedDate,
-        finishedDateFormatted: loan.finishedDate
-          ? this.formatDate(new Date(loan.finishedDate))
-          : null,
-        renewedDate: loan.renewedDate,
-        loanType: loan.loantypeRelation?.name || 'N/A',
-        amountRequested: loan.requestedAmount,
-        totalAmountDue: totalAmountDue.toString(),
-        interestAmount: interestAmount.toString(),
-        totalPaid: loan.totalPaid,
-        pendingDebt: loan.pendingAmountStored,
-        daysSinceSign,
-        status: loan.status,
-        wasRenewed,
-        weekDuration: loan.loantypeRelation?.weekDuration || 0,
-        rate: loan.loantypeRelation?.rate || '0',
-        leadName:
-          loan.snapshotLeadName ||
-          loan.leadRelation?.personalDataRelation?.fullName ||
-          null,
-        routeName: loan.snapshotRouteName || null,
-        paymentsCount: payments.length,
-        payments,
-        noPaymentPeriods,
-        renewedFrom: loan.previousLoan || null,
-        renewedTo: renewingLoan?.id || null,
-        avalName: isCollateral ? null : collateral?.fullName || null,
-        avalPhone: isCollateral
-          ? null
-          : collateral?.phones?.[0]?.number || null,
-        clientName: isCollateral ? borrowerData?.fullName || null : null,
-        clientDui: isCollateral ? borrowerData?.clientCode || null : null,
-      }
-    }
-
     // Combine all loans to find renewing loans across both types (for renewedTo field)
     const allLoansCombined = [...loansAsClient, ...loansAsCollateral]
 
@@ -700,10 +727,10 @@ export class ClientHistoryService {
       client: clientInfo,
       summary,
       loansAsClient: loansAsClient.map((l) =>
-        mapLoanToDetail(l, false, allLoansCombined)
+        this.mapLoanToDetail(l, false, allLoansCombined)
       ),
       loansAsCollateral: loansAsCollateral.map((l) =>
-        mapLoanToDetail(l, true, allLoansCombined)
+        this.mapLoanToDetail(l, true, allLoansCombined)
       ),
     }
   }
