@@ -14,6 +14,7 @@ import { ListadoPDFService } from './services/ListadoPDFService'
 import { PdfExportService } from './services/PdfExportService'
 import { BadDebtPDFService } from './services/BadDebtPDFService'
 import { LeaderBirthdayPDFService } from './services/LeaderBirthdayPDFService'
+import jwt from 'jsonwebtoken'
 
 async function startServer() {
   const app = express()
@@ -251,11 +252,102 @@ async function startServer() {
     }
   )
 
+  // ========================================
+  // PowerSync Authentication Endpoints
+  // ========================================
+
+  const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me'
+
+  // PowerSync credential endpoint - validates JWT and returns PowerSync credentials
+  app.get('/api/powersync/credentials', cors(), async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        res.status(401).json({ error: 'Missing or invalid authorization header' })
+        return
+      }
+
+      const token = authHeader.split(' ')[1]
+
+      // Verify the JWT
+      const payload = jwt.verify(token, JWT_SECRET) as {
+        userId: string
+        email: string
+        role: string
+      }
+
+      // Return PowerSync credentials
+      // PowerSync will use these to authenticate the sync connection
+      res.json({
+        endpoint: process.env.POWERSYNC_URL || 'http://localhost:8080',
+        token: token, // Pass through the same JWT
+        user_id: payload.userId,
+        // Optional: expiration time
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour
+      })
+    } catch (error) {
+      console.error('PowerSync credential error:', error)
+      res.status(401).json({ error: 'Invalid token' })
+    }
+  })
+
+  // PowerSync JWKS endpoint (for JWT validation)
+  // Since we use HS256, we provide the key directly to PowerSync via config
+  app.get('/api/powersync/.well-known/jwks.json', cors(), (req, res) => {
+    // For HS256, PowerSync needs the secret configured directly
+    // This endpoint returns an empty JWKS since we use symmetric keys
+    res.json({
+      keys: [],
+      // Note: For HS256 tokens, configure the secret in powersync.yaml
+      // using client_auth.supabase_jwt_secret or similar
+    })
+  })
+
+  // PowerSync token validation endpoint (alternative auth method)
+  app.post('/api/powersync/auth', cors(), express.json(), async (req, res) => {
+    try {
+      const { token } = req.body
+
+      if (!token) {
+        res.status(401).json({ error: 'Token required' })
+        return
+      }
+
+      // Verify the JWT
+      const payload = jwt.verify(token, JWT_SECRET) as {
+        userId: string
+        email: string
+        role: string
+      }
+
+      // Return user info for PowerSync
+      res.json({
+        user_id: payload.userId,
+        email: payload.email,
+        role: payload.role,
+        // PowerSync bucket parameters (used in sync-rules.yaml)
+        parameters: {
+          user_id: payload.userId,
+          role: payload.role,
+        },
+      })
+    } catch (error) {
+      console.error('PowerSync auth error:', error)
+      res.status(401).json({ error: 'Invalid token' })
+    }
+  })
+
+  // Health check for PowerSync
+  app.get('/api/powersync/health', cors(), (req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() })
+  })
+
   const port = Number(process.env.PORT) || 4000
 
   app.listen(port, () => {
     console.log(`🚀 Apollo Server ready at http://localhost:${port}/graphql`)
     console.log(`📊 GraphQL Playground: http://localhost:${port}/graphql`)
+    console.log(`🔄 PowerSync endpoints: http://localhost:${port}/api/powersync/*`)
     console.log(`🗄️  Database: Connected`)
     console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`)
     console.log(`🌐 CORS enabled for: ${corsOptions.origin.join(', ')}`)

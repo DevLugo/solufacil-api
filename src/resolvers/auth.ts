@@ -36,7 +36,13 @@ export const authResolvers = {
       context: GraphQLContext
     ) => {
       const authService = new AuthService(context.prisma)
-      return authService.login(args.email, args.password)
+      const result = await authService.login(args.email, args.password)
+      console.log('🔐 [LOGIN] Result user:', JSON.stringify({
+        id: result.user.id,
+        email: result.user.email,
+        employee: (result.user as any).employee,
+      }, null, 2))
+      return result
     },
 
     refreshToken: async (

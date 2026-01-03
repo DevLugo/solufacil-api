@@ -1,0 +1,41 @@
+# PowerSync Service - Production (DigitalOcean)
+# Run with: docker-compose -f docker-compose.prod.yaml up -d
+
+services:
+  # MongoDB for PowerSync state storage (replica set required)
+  mongo:
+    image: mongo:6
+    container_name: solufacil-powersync-mongo
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - powersync_mongo_data:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: echo "try { rs.status() } catch (err) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}) }" | mongosh --quiet
+      interval: 5s
+      timeout: 30s
+      start_period: 0s
+      retries: 30
+    # No exponer puerto externamente - solo acceso interno
+
+  powersync:
+    image: journeyapps/powersync-service:latest
+    container_name: solufacil-powersync
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./powersync.yaml:/config/powersync.yaml:ro
+      - ./sync-rules.yaml:/config/sync-rules.yaml:ro
+    environment:
+      POWERSYNC_CONFIG_PATH: /config/powersync.yaml
+      # Variables de entorno - configurar en .env o en DO
+      PS_DATABASE_URL: ${PS_DATABASE_URL}
+      PS_JWT_SECRET_BASE64: ${PS_JWT_SECRET_BASE64}
+      PS_MONGO_URI: mongodb://mongo:27017/powersync?replicaSet=rs0
+    restart: unless-stopped
+
+volumes:
+  powersync_mongo_data:

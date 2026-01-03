@@ -28,6 +28,19 @@ export class UserRepository {
     })
   }
 
+  async findByEmailWithEmployee(email: string) {
+    return this.prisma.user.findUnique({
+      where: { email },
+      include: {
+        employee: {
+          include: {
+            personalDataRelation: true,
+          },
+        },
+      },
+    })
+  }
+
   async findMany(options?: {
     role?: UserRole
     limit?: number
