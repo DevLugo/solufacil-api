@@ -87,6 +87,7 @@ export function requireAnyRole(context: GraphQLContext, roles: UserRole[]): void
 
 /**
  * Generar un JWT access token
+ * Incluye 'kid' en el header para compatibilidad con PowerSync
  */
 export function generateAccessToken(user: {
   id: string
@@ -98,9 +99,17 @@ export function generateAccessToken(user: {
       userId: user.id,
       email: user.email,
       role: user.role,
+      // Add sub claim for PowerSync compatibility
+      sub: user.id,
+      // Add aud claim for PowerSync (required)
+      aud: 'powersync',
     },
     JWT_SECRET,
-    { expiresIn: ACCESS_TOKEN_EXPIRES_IN }
+    {
+      expiresIn: ACCESS_TOKEN_EXPIRES_IN,
+      // Add key ID for PowerSync to identify the signing key
+      keyid: 'powersync-key',
+    }
   )
 }
 

@@ -1,0 +1,92 @@
+# PowerSync Sync Rules for SoluFacil Mobile
+# Defines which data syncs to mobile devices
+
+bucket_definitions:
+  # ========================================
+  # GLOBAL DATA - Same for all users
+  # ========================================
+
+  global:
+    data:
+      # Users (basic info only)
+      - SELECT id, name, email, role, "createdAt" FROM "User"
+
+      # Personal Data (clients, employees, collaterals)
+      - SELECT id, "fullName", "clientCode", "birthDate", "createdAt", "updatedAt" FROM "PersonalData"
+
+      # Contact info
+      - SELECT id, number as phone, "personalData", "createdAt" FROM "Phone"
+      - SELECT id, street, "exteriorNumber", "interiorNumber", "postalCode", "references", location, "personalData", "createdAt" FROM "Address"
+
+      # Geography
+      - SELECT id, name, municipality, route FROM "Location"
+      - SELECT id, name, state FROM "Municipality"
+      - SELECT id, name FROM "State"
+
+      # Employees (for loan info)
+      - SELECT id, "oldId", type, "personalData", "createdAt" FROM "Employee"
+
+      # Borrowers
+      - SELECT id, "loanFinishedCount", "personalData", "createdAt" FROM "Borrower"
+
+      # Loan types
+      - SELECT id, name, "weekDuration", rate, "loanPaymentComission", "loanGrantedComission" FROM "Loantype"
+
+      # Routes (for context)
+      - SELECT id, name FROM "Route"
+
+      # Route-Employee relationship (for leads assigned to routes)
+      - SELECT
+          "A" || '-' || "B" as id,
+          "A" as employee,
+          "B" as route
+        FROM "_RouteEmployees"
+
+  # ========================================
+  # LOANS - All loans with collaterals
+  # ========================================
+
+  loans:
+    data:
+      # All loans
+      - SELECT
+          id, "oldId", "requestedAmount", "amountGived", "signDate",
+          "finishedDate", "renewedDate", "badDebtDate", "isDeceased",
+          "profitAmount", "totalDebtAcquired", "expectedWeeklyPayment",
+          "totalPaid", "pendingAmountStored", "comissionAmount",
+          status, borrower, loantype, grantor, lead,
+          "snapshotLeadId", "snapshotLeadAssignedAt", "snapshotRouteId", "snapshotRouteName",
+          "previousLoan", "excludedByCleanup", "createdAt", "updatedAt"
+        FROM "Loan"
+
+      # Loan-Collateral relationship (need synthetic id)
+      - SELECT
+          "A" || '-' || "B" as id,
+          "A",
+          "B"
+        FROM "_LoanCollaterals"
+
+  # ========================================
+  # PAYMENTS - Loan payments
+  # ========================================
+
+  payments:
+    data:
+      - SELECT
+          id, amount, comission, "receivedAt", "paymentMethod", type,
+          loan, "createdAt"
+        FROM "LoanPayment"
+
+  # ========================================
+  # ACCOUNT ENTRIES - All entries (filter on client side for performance)
+  # ========================================
+
+  account_entries:
+    data:
+      - SELECT
+          id, "accountId", amount, "entryType", "sourceType",
+          "profitAmount", "returnToCapital",
+          "snapshotLeadId", "snapshotRouteId",
+          "entryDate", description,
+          "loanId", "loanPaymentId", "syncId"
+        FROM "AccountEntry"

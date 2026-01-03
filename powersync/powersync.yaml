@@ -1,0 +1,33 @@
+# PowerSync Service Configuration
+# Self-hosted configuration for SoluFacil
+
+# Replication configuration
+replication:
+  connections:
+    - type: postgresql
+      uri: !env PS_DATABASE_URL
+      sslmode: disable
+
+# Client authentication with HS256 JWT
+# Using JWKS format to properly register the key with kid
+client_auth:
+  jwks:
+    keys:
+      - kty: oct
+        k: !env PS_JWT_SECRET_BASE64
+        alg: HS256
+        kid: powersync-key
+  audience: ["powersync"]
+
+# Sync rules location
+sync_rules:
+  path: /config/sync-rules.yaml
+
+# MongoDB storage for sync state
+storage:
+  type: mongodb
+  uri: !env PS_MONGO_URI
+
+# Telemetry configuration
+telemetry:
+  disable_telemetry_sharing: true

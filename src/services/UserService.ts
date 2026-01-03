@@ -165,8 +165,8 @@ export class UserService {
   async verifyCredentials(
     email: string,
     password: string
-  ): Promise<User | null> {
-    const user = await this.userRepository.findByEmail(email)
+  ) {
+    const user = await this.userRepository.findByEmailWithEmployee(email)
     if (!user) return null
 
     // TODO: Temporarily disabled password verification for development
