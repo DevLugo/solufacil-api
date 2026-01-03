@@ -8,8 +8,8 @@ bucket_definitions:
 
   global:
     data:
-      # Users (basic info only)
-      - SELECT id, name, email, role, "createdAt" FROM "User"
+      # Users (basic info with employee link for role-based filtering)
+      - SELECT id, name, email, role, employee, "createdAt" FROM "User"
 
       # Personal Data (clients, employees, collaterals)
       - SELECT id, "fullName", "clientCode", "birthDate", "createdAt", "updatedAt" FROM "PersonalData"
