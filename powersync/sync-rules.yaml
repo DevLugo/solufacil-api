@@ -8,8 +8,8 @@ bucket_definitions:
 
   global:
     data:
-      # Users (basic info with employee link for role-based filtering)
-      - SELECT id, name, email, role, employee, "createdAt" FROM "User"
+      # Users (basic info only)
+      - SELECT id, name, email, role, "createdAt" FROM "User"
 
       # Personal Data (clients, employees, collaterals)
       - SELECT id, "fullName", "clientCode", "birthDate", "createdAt", "updatedAt" FROM "PersonalData"
@@ -23,8 +23,8 @@ bucket_definitions:
       - SELECT id, name, state FROM "Municipality"
       - SELECT id, name FROM "State"
 
-      # Employees (for loan info)
-      - SELECT id, "oldId", type, "personalData", "createdAt" FROM "Employee"
+      # Employees (for loan info and user account filtering)
+      - SELECT id, "oldId", type, "personalData", "user", "createdAt" FROM "Employee"
 
       # Borrowers
       - SELECT id, "loanFinishedCount", "personalData", "createdAt" FROM "Borrower"
