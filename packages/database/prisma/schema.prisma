@@ -501,6 +501,9 @@ enum SourceType {
   BANK_EXPENSE      // Gastos bancarios
   OTHER_EXPENSE     // Otros gastos (OTRO)
 
+  // Capital expenditure (NOT counted in operational expenses)
+  ASSET_ACQUISITION // Adquisición de activos (vehículos, equipos) - NO afecta ganancia operativa
+
   // Special
   FALCO_LOSS
   FALCO_COMPENSATORY

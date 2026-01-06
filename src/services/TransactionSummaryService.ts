@@ -33,6 +33,8 @@ const SOURCE_TYPE_LABELS: Record<SourceType, string> = {
   // Ingresos especiales
   MONEY_INVESTMENT: 'Inversión',
   MULTA: 'Multa',
+  // CAPEX (Capital expenditure)
+  ASSET_ACQUISITION: 'Adquisición de activos',
 }
 
 /**

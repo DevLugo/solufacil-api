@@ -16,6 +16,9 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:migrate-data": "tsx scripts/migrate-data.ts",
     "db:migrate-local": "SOURCE_DATABASE_URL=\"postgresql://postgres:test1234@localhost:5432/solufacil-api\" TARGET_DATABASE_URL=\"postgresql://postgres:test1234@localhost:5432/solufacil-api\" SOURCE_SCHEMA=neon_import TARGET_SCHEMA=public tsx scripts/migrate-data.ts",
+    "db:sync-from-prod": "TARGET_DATABASE_URL=\"postgresql://postgres:test1234@localhost:5432/solufacil-api\" tsx scripts/migrate-data.ts --upload",
+    "db:sync-local-only": "TARGET_DATABASE_URL=\"postgresql://postgres:test1234@localhost:5432/solufacil-api\" tsx scripts/migrate-data.ts --export",
+    "db:export-only": "TARGET_DATABASE_URL=\"postgresql://postgres:test1234@localhost:5432/solufacil-api\" tsx scripts/migrate-data.ts --export-only",
     "db:dump-to-remote": "tsx scripts/dump-to-remote.ts",
     "clean": "rm -rf dist .turbo node_modules"
   },

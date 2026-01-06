@@ -208,6 +208,7 @@ export const transactionResolvers = {
           loanPaymentId?: string
           routeId?: string
           leadId?: string
+          description?: string
         }
       },
       context: GraphQLContext

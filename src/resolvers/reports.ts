@@ -123,6 +123,8 @@ export const reportResolvers = {
           incomes: monthData.incomes.toString(),
           operationalProfit: monthData.operationalProfit.toString(),
           operationalProfitCapitalOnly: monthData.operationalProfitCapitalOnly.toString(),
+          assetAcquisitions: monthData.assetAcquisitions.toString(),
+          netProfit: monthData.netProfit.toString(),
           profitPercentage: monthData.profitPercentage.toString(),
           gainPerPayment: monthData.gainPerPayment.toString(),
           activeWeeks: monthData.activeWeeks,

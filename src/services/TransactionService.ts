@@ -16,6 +16,7 @@ export interface CreateTransactionInput {
   loanPaymentId?: string
   routeId?: string
   leadId?: string
+  description?: string
 }
 
 export interface TransferInput {
@@ -56,6 +57,7 @@ function mapToSourceType(type: TransactionType, incomeSource?: string, expenseSo
       case 'TRAVEL_EXPENSES': return 'TRAVEL_EXPENSES'
       case 'FALCO_LOSS': return 'FALCO_LOSS'
       case 'FALCO_COMPENSATORY': return 'FALCO_COMPENSATORY'
+      case 'ASSET_ACQUISITION': return 'ASSET_ACQUISITION'
       default: return 'BALANCE_ADJUSTMENT'
     }
   }
@@ -165,7 +167,8 @@ export class TransactionService {
           'LOAN_GRANT', 'LOAN_GRANT_COMMISSION', 'PAYMENT_COMMISSION',
           'GASOLINE', 'GASOLINE_TOKA', 'NOMINA_SALARY', 'EXTERNAL_SALARY',
           'VIATIC', 'TRAVEL_EXPENSES', 'EMPLOYEE_EXPENSE', 'GENERAL_EXPENSE',
-          'CAR_PAYMENT', 'BANK_EXPENSE', 'OTHER_EXPENSE', 'FALCO_LOSS'
+          'CAR_PAYMENT', 'BANK_EXPENSE', 'OTHER_EXPENSE', 'FALCO_LOSS', 'ASSET_ACQUISITION',
+          'BALANCE_ADJUSTMENT'
         ]
       case 'TRANSFER':
         return ['TRANSFER_OUT', 'TRANSFER_IN']
@@ -253,6 +256,7 @@ export class TransactionService {
       case 'OTHER_EXPENSE': return { type: 'EXPENSE', expenseSource: 'OTHER_EXPENSE' }
       case 'FALCO_LOSS': return { type: 'EXPENSE', expenseSource: 'FALCO_LOSS' }
       case 'FALCO_COMPENSATORY': return { type: 'INCOME', incomeSource: 'FALCO_COMPENSATORY' }
+      case 'ASSET_ACQUISITION': return { type: 'EXPENSE', expenseSource: 'ASSET_ACQUISITION' }
       case 'TRANSFER_OUT':
       case 'TRANSFER_IN': return { type: 'TRANSFER' }
       default: return { type: 'EXPENSE', expenseSource: 'OTRO' }
@@ -313,7 +317,7 @@ export class TransactionService {
           loanId: input.loanId,
           snapshotLeadId: input.leadId || '',
           snapshotRouteId: input.routeId || '',
-          description: input.expenseSource || '',
+          description: input.description || '',
         }, tx)
       } else if (input.type === 'TRANSFER') {
         // TRANSFER = DEBIT del origen + CREDIT al destino

@@ -103,6 +103,7 @@ enum SourceType {
   FALCO_COMPENSATORY
   INITIAL_BALANCE
   BALANCE_ADJUSTMENT
+  ASSET_ACQUISITION
 }
 
 # Directives
@@ -923,6 +924,8 @@ type MonthlyFinancialData {
   # Resultados
   operationalProfit: Decimal!
   operationalProfitCapitalOnly: Decimal!
+  assetAcquisitions: Decimal!
+  netProfit: Decimal!
   profitPercentage: Decimal!
   gainPerPayment: Decimal!
   # Semanas

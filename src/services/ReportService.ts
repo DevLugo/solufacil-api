@@ -860,6 +860,8 @@ export class ReportService {
         operationalProfit: new Decimal(0),
         profitPercentage: new Decimal(0),
         operationalProfitCapitalOnly: new Decimal(0),
+        assetAcquisitions: new Decimal(0),
+        netProfit: new Decimal(0),
         carteraMuerta: new Decimal(0),
         nominaInterna: new Decimal(0),
         salarioExterno: new Decimal(0),
@@ -937,6 +939,11 @@ export class ReportService {
             case 'BALANCE_ADJUSTMENT':
               // BALANCE_ADJUSTMENT es solo para reconciliación, no afecta métricas operativas
               break
+            case 'ASSET_ACQUISITION':
+              // Adquisición de activos (vehículos, equipos) - NO afecta ganancia operativa
+              // Se registra aparte para calcular netProfit
+              monthData.assetAcquisitions = monthData.assetAcquisitions.plus(amount)
+              break
             default:
               // Solo para tipos no mapeados (no debería ocurrir)
               monthData.generalExpenses = monthData.generalExpenses.plus(amount)
@@ -949,10 +956,14 @@ export class ReportService {
         if (entry.sourceType !== 'TRANSFER_OUT' && entry.sourceType !== 'BALANCE_ADJUSTMENT') {
           monthData.totalExpenses = monthData.totalExpenses.plus(amount)
           monthData.totalCash = monthData.totalCash.minus(amount)
-          monthData.operationalCashUsed = monthData.operationalCashUsed.plus(amount)
 
-          if (entry.sourceType !== 'LOAN_GRANT') {
-            monthData.totalInvestment = monthData.totalInvestment.plus(amount)
+          // ASSET_ACQUISITION no es gasto operativo
+          if (entry.sourceType !== 'ASSET_ACQUISITION') {
+            monthData.operationalCashUsed = monthData.operationalCashUsed.plus(amount)
+
+            if (entry.sourceType !== 'LOAN_GRANT') {
+              monthData.totalInvestment = monthData.totalInvestment.plus(amount)
+            }
           }
         }
       } else if (entry.entryType === 'CREDIT') {
@@ -1172,6 +1183,8 @@ export class ReportService {
       const uiExpensesTotal = data.generalExpenses.plus(data.nomina).plus(data.comissions).plus(data.badDebtAmount).plus(data.travelExpenses)
       const uiGainsTotal = data.incomes
       data.operationalProfit = uiGainsTotal.minus(uiExpensesTotal)
+      // netProfit = ganancia operativa - adquisiciones de activos (flujo de caja real)
+      data.netProfit = data.operationalProfit.minus(data.assetAcquisitions)
       data.profitPercentage = uiGainsTotal.greaterThan(0)
         ? data.operationalProfit.dividedBy(uiGainsTotal).times(100)
         : new Decimal(0)
@@ -1244,6 +1257,8 @@ export class ReportService {
         incomes: data.incomes,
         operationalProfit: data.operationalProfit,
         operationalProfitCapitalOnly: data.operationalProfitCapitalOnly || data.operationalProfit,
+        assetAcquisitions: data.assetAcquisitions || new Decimal(0),
+        netProfit: data.netProfit || data.operationalProfit,
         profitPercentage: data.profitPercentage,
         gainPerPayment: data.gainPerPayment,
         activeWeeks: data.activeWeeks,

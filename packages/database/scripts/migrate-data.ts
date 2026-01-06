@@ -13,12 +13,15 @@
  *   npx tsx scripts/migrate-data.ts           # Ejecutar migración
  *   npx tsx scripts/migrate-data.ts --dry-run # Solo mostrar qué se migraría
  *   npx tsx scripts/migrate-data.ts --count   # Solo contar registros
+ *   npx tsx scripts/migrate-data.ts --export  # Después de migrar, exportar dump SQL
+ *   npx tsx scripts/migrate-data.ts --export-only # Solo exportar (sin migrar)
  *
  * Variables de entorno:
  *   SOURCE_DATABASE_URL - URL de la DB origen
  *   TARGET_DATABASE_URL - URL de la DB destino
  *   SOURCE_SCHEMA       - Schema origen (default: 'public')
  *   TARGET_SCHEMA       - Schema destino (default: 'public')
+ *   DUMP_FILE           - Archivo de salida para --export (default: migration-dump.sql)
  *
  * Ejemplos:
  *   # Producción a local (Cross-DB)
@@ -30,10 +33,20 @@
  *   DATABASE_URL="postgresql://localhost/db" \
  *   SOURCE_SCHEMA=neon_import TARGET_SCHEMA=public \
  *   npx tsx scripts/migrate-data.ts
+ *
+ *   # Migrar y exportar dump para subir a remote
+ *   npx tsx scripts/migrate-data.ts --export
+ *
+ *   # Solo exportar dump de DB local (datos ya migrados)
+ *   DATABASE_URL="postgresql://localhost/db" \
+ *   npx tsx scripts/migrate-data.ts --export-only
  */
 
 import 'dotenv/config'
 import { Pool, PoolClient } from 'pg'
+import { execSync } from 'child_process'
+import * as fs from 'fs'
+import * as path from 'path'
 
 const SOURCE_SCHEMA = process.env.SOURCE_SCHEMA || 'public'
 const TARGET_SCHEMA = process.env.TARGET_SCHEMA || 'public'
@@ -41,12 +54,17 @@ const SOURCE_DB_URL = process.env.SOURCE_DATABASE_URL || process.env.DATABASE_UR
 const TARGET_DB_URL = process.env.TARGET_DATABASE_URL || process.env.DATABASE_URL
 const SAME_DATABASE = SOURCE_DB_URL === TARGET_DB_URL
 
-const BATCH_SIZE = 5000  // Increased for better performance
-const INSERT_BATCH_SIZE = 100  // Rows per multi-row INSERT statement
+const BATCH_SIZE = 10000  // Rows to fetch per query from source
+const INSERT_BATCH_SIZE = 500  // Rows per multi-row INSERT (PostgreSQL limit ~32K params)
 
 const args = process.argv.slice(2)
 const DRY_RUN = args.includes('--dry-run')
 const COUNT_ONLY = args.includes('--count')
+const EXPORT_AFTER = args.includes('--export')
+const EXPORT_ONLY = args.includes('--export-only')
+const UPLOAD_TO_REMOTE = args.includes('--upload')
+const DUMP_FILE = process.env.DUMP_FILE || 'migration-dump.sql'
+const REMOTE_DB_URL = process.env.REMOTE_DATABASE_URL
 
 // Connection pools with optimized settings for migrations
 const poolConfig = {
@@ -132,6 +150,31 @@ function getForeignKeyColumns(tableName: string): Record<string, string> {
     ReportExecutionLog: { reportConfig: 'ReportConfig' },
   }
   return fkMappings[tableName] || {}
+}
+
+/**
+ * Load all FK reference sets in parallel for better performance over network
+ */
+async function loadFkSetsParallel(
+  client: PoolClient,
+  tableName: string,
+  schema: string,
+  columns: string[]
+): Promise<Record<string, Set<string>>> {
+  const fkMappings = getForeignKeyColumns(tableName)
+  const relevantFks = Object.entries(fkMappings).filter(([col]) => columns.includes(col))
+
+  if (relevantFks.length === 0) return {}
+
+  // Load all FK sets in parallel
+  const results = await Promise.all(
+    relevantFks.map(async ([col, refTable]) => {
+      const ids = await getExistingIds(client, schema, refTable)
+      return [col, ids] as const
+    })
+  )
+
+  return Object.fromEntries(results)
 }
 
 // ============================================================================
@@ -598,18 +641,13 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
     }
 
     // Find NOT NULL columns in target that don't exist in source - we need to provide defaults
-    const missingNotNull = [...notNullColumns].filter(c => !sourceColumns.includes(c) && c !== 'id')
+    const missingNotNull = Array.from(notNullColumns).filter(c => !sourceColumns.includes(c) && c !== 'id')
 
     // Build insert columns - common columns + missing NOT NULL columns
     const insertColumns = [...commonColumns, ...missingNotNull]
 
-    // Load FK reference sets
-    const fkSets: Record<string, Set<string>> = {}
-    for (const [col, refTable] of Object.entries(getForeignKeyColumns(tableName))) {
-      if (commonColumns.includes(col)) {
-        fkSets[col] = await getExistingIds(targetClient, TARGET_SCHEMA, refTable)
-      }
-    }
+    // Load FK reference sets IN PARALLEL for better network performance
+    const fkSets = await loadFkSetsParallel(targetClient, tableName, TARGET_SCHEMA, commonColumns)
 
     // Get default User ID for DocumentPhoto.uploadedBy fallback
     let defaultUserId: string | null = null
@@ -657,7 +695,7 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
         transformedRows.push(transformed)
       }
 
-      // Execute batch insert
+      // Execute batch insert (executeBatchInsert handles errors internally with row-by-row fallback)
       const batchResult = await executeBatchInsert(targetClient, tableName, insertColumns, transformedRows)
       insertedCount += batchResult.inserted
       errorCount += batchResult.errors
@@ -685,7 +723,7 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
         // Get existing loan IDs in target
         const targetLoanIds = await getExistingIds(targetClient, TARGET_SCHEMA, 'Loan')
 
-        // Batch update previousLoan
+        // Filter valid updates
         const updates: { id: string; previousLoan: string }[] = []
         for (const row of loansWithPrevious.rows) {
           if (targetLoanIds.has(row.id) && targetLoanIds.has(row.previousLoan)) {
@@ -693,19 +731,37 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
           }
         }
 
-        // Execute updates in batches
+        // Execute updates in batches using multi-row UPDATE with VALUES
         let updateCount = 0
-        for (let i = 0; i < updates.length; i += INSERT_BATCH_SIZE) {
-          const batch = updates.slice(i, i + INSERT_BATCH_SIZE)
-          for (const { id, previousLoan } of batch) {
-            try {
-              await targetClient.query(
-                `UPDATE "${TARGET_SCHEMA}"."Loan" SET "previousLoan" = $1 WHERE id = $2`,
-                [previousLoan, id]
-              )
-              updateCount++
-            } catch {
-              // Ignore errors
+        const UPDATE_BATCH_SIZE = 200 // Smaller batches for UPDATE (2 params per row)
+
+        for (let i = 0; i < updates.length; i += UPDATE_BATCH_SIZE) {
+          const batch = updates.slice(i, i + UPDATE_BATCH_SIZE)
+
+          // Build VALUES clause: ($1, $2), ($3, $4), ...
+          const valuesClause = batch.map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`).join(', ')
+          const params = batch.flatMap(({ id, previousLoan }) => [id, previousLoan])
+
+          try {
+            await targetClient.query(`
+              UPDATE "${TARGET_SCHEMA}"."Loan" l
+              SET "previousLoan" = v.prev_loan
+              FROM (VALUES ${valuesClause}) AS v(loan_id, prev_loan)
+              WHERE l.id = v.loan_id
+            `, params)
+            updateCount += batch.length
+          } catch {
+            // Fallback to row-by-row if batch fails
+            for (const { id, previousLoan } of batch) {
+              try {
+                await targetClient.query(
+                  `UPDATE "${TARGET_SCHEMA}"."Loan" SET "previousLoan" = $1 WHERE id = $2`,
+                  [previousLoan, id]
+                )
+                updateCount++
+              } catch {
+                // Ignore individual errors
+              }
             }
           }
         }
@@ -761,16 +817,33 @@ async function migrateJunctionTable(sourceTable: string, targetTable: string): P
       `)
     } else {
       const records = await sourceClient.query(`SELECT "A", "B" FROM "${SOURCE_SCHEMA}"."${sourceTable}"`)
-      for (const row of records.rows) {
+      const JUNCTION_BATCH_SIZE = 500 // 2 params per row = 1000 params max
+
+      // Batch insert for junction tables
+      for (let i = 0; i < records.rows.length; i += JUNCTION_BATCH_SIZE) {
+        const batch = records.rows.slice(i, i + JUNCTION_BATCH_SIZE)
+        const valuesClause = batch.map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`).join(', ')
+        const params = batch.flatMap(row => [row.A, row.B])
+
         try {
           await targetClient.query(
-            `INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B") VALUES ($1, $2)`,
-            [row.A, row.B]
+            `INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B") VALUES ${valuesClause}`,
+            params
           )
         } catch (err) {
-          errorCount++
-          lastError = err instanceof Error ? err.message : String(err)
-          if (errorCount <= 2) console.error(`\n   ⚠️  ${targetTable} error: ${lastError}`)
+          // Fallback to row-by-row if batch fails
+          for (const row of batch) {
+            try {
+              await targetClient.query(
+                `INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B") VALUES ($1, $2)`,
+                [row.A, row.B]
+              )
+            } catch (rowErr) {
+              errorCount++
+              lastError = rowErr instanceof Error ? rowErr.message : String(rowErr)
+              if (errorCount <= 2) console.error(`\n   ⚠️  ${targetTable} error: ${lastError}`)
+            }
+          }
         }
       }
     }
@@ -800,20 +873,44 @@ async function migrateEmployeeRoutes(): Promise<MigrationResult> {
       `)
     } else {
       const result = await sourceClient.query(`SELECT id, routes FROM "${SOURCE_SCHEMA}"."Employee" WHERE routes IS NOT NULL`)
-      const targetEmployees = await getExistingIds(targetClient, TARGET_SCHEMA, 'Employee')
-      const targetRoutes = await getExistingIds(targetClient, TARGET_SCHEMA, 'Route')
 
+      // Load FK sets in parallel
+      const [targetEmployees, targetRoutes] = await Promise.all([
+        getExistingIds(targetClient, TARGET_SCHEMA, 'Employee'),
+        getExistingIds(targetClient, TARGET_SCHEMA, 'Route'),
+      ])
+
+      // Filter valid records
+      const validRecords = result.rows.filter(
+        row => targetEmployees.has(row.id) && targetRoutes.has(row.routes)
+      )
+
+      // Batch insert
+      const JUNCTION_BATCH_SIZE = 500
       let errorCount = 0
-      for (const row of result.rows) {
-        if (targetEmployees.has(row.id) && targetRoutes.has(row.routes)) {
-          try {
-            await targetClient.query(
-              `INSERT INTO "${TARGET_SCHEMA}"."_RouteEmployees" ("A", "B") VALUES ($1, $2)`,
-              [row.id, row.routes]
-            )
-          } catch (err) {
-            errorCount++
-            if (errorCount <= 2) console.error(`\n   ⚠️  _RouteEmployees error: ${err instanceof Error ? err.message : String(err)}`)
+
+      for (let i = 0; i < validRecords.length; i += JUNCTION_BATCH_SIZE) {
+        const batch = validRecords.slice(i, i + JUNCTION_BATCH_SIZE)
+        const valuesClause = batch.map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`).join(', ')
+        const params = batch.flatMap(row => [row.id, row.routes])
+
+        try {
+          await targetClient.query(
+            `INSERT INTO "${TARGET_SCHEMA}"."_RouteEmployees" ("A", "B") VALUES ${valuesClause}`,
+            params
+          )
+        } catch {
+          // Fallback to row-by-row
+          for (const row of batch) {
+            try {
+              await targetClient.query(
+                `INSERT INTO "${TARGET_SCHEMA}"."_RouteEmployees" ("A", "B") VALUES ($1, $2)`,
+                [row.id, row.routes]
+              )
+            } catch (err) {
+              errorCount++
+              if (errorCount <= 2) console.error(`\n   ⚠️  _RouteEmployees error: ${err instanceof Error ? err.message : String(err)}`)
+            }
           }
         }
       }
@@ -900,6 +997,7 @@ async function convertTransactionsToEntries(): Promise<number> {
           WHEN t."expenseSource" = 'CAR_PAYMENT' THEN 'CAR_PAYMENT'
           WHEN t."expenseSource" = 'BANK_EXPENSE' THEN 'BANK_EXPENSE'
           WHEN t."expenseSource" = 'OTRO' THEN 'OTHER_EXPENSE'
+          WHEN t."expenseSource" = 'ASSET_ACQUISITION' THEN 'ASSET_ACQUISITION'
           -- Transfer
           WHEN t.type = 'TRANSFER' THEN 'TRANSFER_OUT'
           -- Default: SOLO si no hay mapping (no debería pasar)
@@ -930,16 +1028,6 @@ async function convertTransactionsToEntries(): Promise<number> {
     if (SAME_DATABASE) {
       // SAME_DATABASE mode: leer desde SOURCE_SCHEMA
       console.log('   📊 Creando entries desde transacciones INCOME del origen...')
-
-      // Obtener mapeo de rutas a cuentas EMPLOYEE_CASH_FUND
-      const routeAccountsResult = await client.query(`
-        SELECT r.id as route_id, r.name as route_name, a.id as account_id
-        FROM "${TARGET_SCHEMA}"."Route" r
-        JOIN "${TARGET_SCHEMA}"."_RouteAccounts" ra ON ra."B" = r.id
-        JOIN "${TARGET_SCHEMA}"."Account" a ON a.id = ra."A"
-        WHERE a.type = 'EMPLOYEE_CASH_FUND'
-      `)
-      const routeToAccount = new Map(routeAccountsResult.rows.map((r: any) => [r.route_id, r.account_id]))
 
       // Obtener cuenta BANK
       const bankResult = await client.query(`
@@ -1007,6 +1095,67 @@ async function convertTransactionsToEntries(): Promise<number> {
       `, [bankAccountId])
 
       console.log(`   ✅ ${incomeResult.rowCount || 0} entries INCOME creados desde origen`)
+
+      // Insertar entries EXPENSE sin sourceAccount (SAME_DATABASE mode)
+      const expenseResult = await client.query(`
+        INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+          id, "accountId", amount, "entryType", "sourceType",
+          "profitAmount", "returnToCapital",
+          "snapshotLeadId", "snapshotRouteId",
+          "entryDate", description,
+          "loanId", "loanPaymentId", "leadPaymentReceivedId",
+          "syncId", "createdAt"
+        )
+        SELECT
+          gen_random_uuid()::text,
+          ra.account_id,
+          ABS(t.amount),
+          CASE WHEN t.amount < 0 THEN 'CREDIT' ELSE 'DEBIT' END::"${TARGET_SCHEMA}"."AccountEntryType",
+          CASE
+            WHEN t.amount < 0 THEN 'EXPENSE_REFUND'
+            WHEN t."expenseSource" = 'LOAN_GRANTED' THEN 'LOAN_GRANT'
+            WHEN t."expenseSource" = 'LOAN_GRANTED_COMISSION' THEN 'LOAN_GRANT_COMMISSION'
+            WHEN t."expenseSource" = 'LOAN_PAYMENT_COMISSION' THEN 'PAYMENT_COMMISSION'
+            WHEN t."expenseSource" = 'GASOLINE' THEN 'GASOLINE'
+            WHEN t."expenseSource" = 'GASOLINE_TOKA' THEN 'GASOLINE_TOKA'
+            WHEN t."expenseSource" = 'NOMINA_SALARY' THEN 'NOMINA_SALARY'
+            WHEN t."expenseSource" = 'EXTERNAL_SALARY' THEN 'EXTERNAL_SALARY'
+            WHEN t."expenseSource" = 'VIATIC' THEN 'VIATIC'
+            WHEN t."expenseSource" = 'TRAVEL_EXPENSES' THEN 'TRAVEL_EXPENSES'
+            WHEN t."expenseSource" = 'FALCO_LOSS' THEN 'FALCO_LOSS'
+            WHEN t."expenseSource" = 'EMPLOYEE_EXPENSE' THEN 'EMPLOYEE_EXPENSE'
+            WHEN t."expenseSource" = 'GENERAL_EXPENSE' THEN 'GENERAL_EXPENSE'
+            WHEN t."expenseSource" = 'CAR_PAYMENT' THEN 'CAR_PAYMENT'
+            WHEN t."expenseSource" = 'BANK_EXPENSE' THEN 'BANK_EXPENSE'
+            WHEN t."expenseSource" = 'OTRO' THEN 'OTHER_EXPENSE'
+            WHEN t."expenseSource" = 'ASSET_ACQUISITION' THEN 'ASSET_ACQUISITION'
+            ELSE 'OTHER_EXPENSE'
+          END::"${TARGET_SCHEMA}"."SourceType",
+          0,
+          0,
+          COALESCE(t."snapshotLeadId", ''),
+          COALESCE(t."snapshotRouteId", ''),
+          t.date,
+          COALESCE(t.description, ''),
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."LoanPayment" WHERE id = t."loanPayment") THEN t."loanPayment" ELSE NULL END,
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."LeadPaymentReceived" WHERE id = t."leadPaymentReceived") THEN t."leadPaymentReceived" ELSE NULL END,
+          gen_random_uuid()::text,
+          t."createdAt"
+        FROM "${SOURCE_SCHEMA}"."Transaction" t
+        LEFT JOIN (
+          SELECT r.id as route_id, a.id as account_id
+          FROM "${TARGET_SCHEMA}"."Route" r
+          JOIN "${TARGET_SCHEMA}"."_RouteAccounts" ra ON ra."B" = r.id
+          JOIN "${TARGET_SCHEMA}"."Account" a ON a.id = ra."A"
+          WHERE a.type = 'EMPLOYEE_CASH_FUND'
+        ) ra ON ra.route_id = t."snapshotRouteId"
+        WHERE t.type = 'EXPENSE'
+          AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '')
+          AND ra.account_id IS NOT NULL
+      `)
+
+      console.log(`   ✅ ${expenseResult.rowCount || 0} entries EXPENSE creados desde origen`)
 
     } else {
       console.log('   📊 Creando entries desde transacciones INCOME de producción...')
@@ -1127,7 +1276,102 @@ async function convertTransactionsToEntries(): Promise<number> {
 
         console.log(`   ✅ ${insertedCount} entries INCOME creados desde producción`)
         if (skippedCount > 0) {
-          console.log(`   ⚠️  ${skippedCount} transacciones omitidas (sin cuenta mapeada)`)
+          console.log(`   ⚠️  ${skippedCount} transacciones INCOME omitidas (sin cuenta mapeada)`)
+        }
+
+        // Procesar transacciones EXPENSE sin sourceAccount
+        console.log('   📊 Creando entries desde transacciones EXPENSE de producción...')
+
+        const expenseTransactions = await sourceClient.query(`
+          SELECT
+            t.id, t.amount, t."expenseSource",
+            t."snapshotLeadId", t."snapshotRouteId", t.date, t.description,
+            t.loan, t."loanPayment", t."leadPaymentReceived", t."createdAt"
+          FROM "Transaction" t
+          WHERE t.type = 'EXPENSE'
+            AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '')
+        `)
+
+        let expenseInserted = 0
+        let expenseSkipped = 0
+
+        for (const tx of expenseTransactions.rows) {
+          // Determinar la cuenta basado en la ruta
+          const accountId = routeToAccount.get(tx.snapshotRouteId) || null
+
+          if (!accountId) {
+            expenseSkipped++
+            continue
+          }
+
+          // Mapear expenseSource a SourceType
+          const sourceTypeMap: Record<string, string> = {
+            'LOAN_GRANTED': 'LOAN_GRANT',
+            'LOAN_GRANTED_COMISSION': 'LOAN_GRANT_COMMISSION',
+            'LOAN_PAYMENT_COMISSION': 'PAYMENT_COMMISSION',
+            'GASOLINE': 'GASOLINE',
+            'GASOLINE_TOKA': 'GASOLINE_TOKA',
+            'NOMINA_SALARY': 'NOMINA_SALARY',
+            'EXTERNAL_SALARY': 'EXTERNAL_SALARY',
+            'VIATIC': 'VIATIC',
+            'TRAVEL_EXPENSES': 'TRAVEL_EXPENSES',
+            'FALCO_LOSS': 'FALCO_LOSS',
+            'EMPLOYEE_EXPENSE': 'EMPLOYEE_EXPENSE',
+            'GENERAL_EXPENSE': 'GENERAL_EXPENSE',
+            'CAR_PAYMENT': 'CAR_PAYMENT',
+            'BANK_EXPENSE': 'BANK_EXPENSE',
+            'OTRO': 'OTHER_EXPENSE',
+            'ASSET_ACQUISITION': 'ASSET_ACQUISITION',
+          }
+
+          const sourceType = sourceTypeMap[tx.expenseSource] || 'OTHER_EXPENSE'
+          const isRefund = tx.amount < 0
+          const entryType = isRefund ? 'CREDIT' : 'DEBIT'
+          const finalSourceType = isRefund ? 'EXPENSE_REFUND' : sourceType
+
+          try {
+            await client.query(`
+              INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+                id, "accountId", amount, "entryType", "sourceType",
+                "profitAmount", "returnToCapital",
+                "snapshotLeadId", "snapshotRouteId",
+                "entryDate", description,
+                "loanId", "loanPaymentId", "leadPaymentReceivedId",
+                "syncId", "createdAt"
+              ) VALUES (
+                gen_random_uuid()::text,
+                $1, $2,
+                $3::"${TARGET_SCHEMA}"."AccountEntryType",
+                $4::"${TARGET_SCHEMA}"."SourceType",
+                0, 0,
+                COALESCE($5, ''), COALESCE($6, ''),
+                $7, COALESCE($8, ''),
+                $9, $10, $11,
+                gen_random_uuid()::text, $12
+              )
+            `, [
+              accountId,
+              Math.abs(tx.amount),
+              entryType,
+              finalSourceType,
+              tx.snapshotLeadId,
+              tx.snapshotRouteId,
+              tx.date,
+              tx.description,
+              tx.loan,
+              tx.loanPayment,
+              tx.leadPaymentReceived,
+              tx.createdAt
+            ])
+            expenseInserted++
+          } catch (err) {
+            expenseSkipped++
+          }
+        }
+
+        console.log(`   ✅ ${expenseInserted} entries EXPENSE creados desde producción`)
+        if (expenseSkipped > 0) {
+          console.log(`   ⚠️  ${expenseSkipped} transacciones EXPENSE omitidas (sin cuenta mapeada)`)
         }
       } finally {
         sourceClient.release()
@@ -1466,6 +1710,80 @@ async function fixNullSnapshotRouteIds(): Promise<void> {
 }
 
 // ============================================================================
+// EXPORT / DUMP FUNCTIONS
+// ============================================================================
+
+/**
+ * Export database to SQL dump file using pg_dump.
+ * This creates a data-only dump that can be quickly restored to another DB.
+ */
+async function exportDatabaseDump(dbUrl: string, schema: string, outputFile: string): Promise<void> {
+  console.log('\n📦 Exportando dump SQL...\n')
+
+  const dumpPath = path.resolve(outputFile)
+
+  // pg_dump command with data-only, no owner, no privileges
+  const cmd = `pg_dump "${dbUrl}" --data-only --no-owner --no-privileges --schema="${schema}" --disable-triggers -f "${dumpPath}"`
+
+  console.log(`   📄 Archivo: ${dumpPath}`)
+  console.log(`   🗄️  Schema: ${schema}`)
+  console.log(`   ⏳ Ejecutando pg_dump...`)
+
+  try {
+    const startTime = Date.now()
+    execSync(cmd, { stdio: 'pipe' })
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1)
+
+    // Get file size
+    const stats = fs.statSync(dumpPath)
+    const sizeMB = (stats.size / 1024 / 1024).toFixed(2)
+
+    console.log(`   ✅ Dump completado en ${duration}s`)
+    console.log(`   📊 Tamaño: ${sizeMB} MB`)
+    console.log(`\n   Para restaurar en otra DB:`)
+    console.log(`   psql "postgresql://user:pass@host/db" < ${dumpPath}`)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.error(`   ❌ Error en pg_dump: ${msg}`)
+    throw error
+  }
+}
+
+/**
+ * Restore SQL dump to a remote database using psql.
+ */
+async function restoreDumpToRemote(dbUrl: string, dumpFile: string): Promise<void> {
+  console.log('\n📤 Restaurando dump en DB remota...\n')
+
+  const dumpPath = path.resolve(dumpFile)
+
+  if (!fs.existsSync(dumpPath)) {
+    throw new Error(`Archivo no encontrado: ${dumpPath}`)
+  }
+
+  const stats = fs.statSync(dumpPath)
+  const sizeMB = (stats.size / 1024 / 1024).toFixed(2)
+
+  console.log(`   📄 Archivo: ${dumpPath} (${sizeMB} MB)`)
+  console.log(`   🎯 Destino: ${maskUrl(dbUrl)}`)
+  console.log(`   ⏳ Ejecutando psql...`)
+
+  const cmd = `psql "${dbUrl}" < "${dumpPath}"`
+
+  try {
+    const startTime = Date.now()
+    execSync(cmd, { stdio: 'pipe' })
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1)
+
+    console.log(`   ✅ Restauración completada en ${duration}s`)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.error(`   ❌ Error en psql: ${msg}`)
+    throw error
+  }
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -1548,7 +1866,22 @@ async function main() {
   console.log(`   Source: ${maskUrl(SOURCE_DB_URL)} (${SOURCE_SCHEMA})`)
   console.log(`   Target: ${SAME_DATABASE ? '(misma DB)' : maskUrl(TARGET_DB_URL)} (${TARGET_SCHEMA})`)
   console.log(`   Mode:   ${SAME_DATABASE ? '⚡ Same-DB (INSERT...SELECT)' : '🌐 Cross-DB (fetch+insert)'}`)
+  if (EXPORT_AFTER || EXPORT_ONLY) {
+    console.log(`   Export: ${DUMP_FILE}`)
+  }
   console.log('')
+
+  // Handle --export-only: just export the target DB (no migration)
+  if (EXPORT_ONLY) {
+    const exportDbUrl = TARGET_DB_URL || SOURCE_DB_URL
+    if (!exportDbUrl) {
+      console.error('   ❌ No hay DATABASE_URL configurada para exportar')
+      process.exit(1)
+    }
+    await exportDatabaseDump(exportDbUrl, TARGET_SCHEMA, DUMP_FILE)
+    console.log('\n✅ Export completado!\n')
+    return
+  }
 
   try {
     await sourcePool.query('SELECT 1')
@@ -1641,6 +1974,24 @@ async function main() {
   await sourcePool.end()
   if (!SAME_DATABASE) await targetPool.end()
   console.log('\n✅ Migración completada!\n')
+
+  // Export dump after migration if --export flag is set
+  if (EXPORT_AFTER || UPLOAD_TO_REMOTE) {
+    const exportDbUrl = TARGET_DB_URL || SOURCE_DB_URL
+    if (exportDbUrl) {
+      await exportDatabaseDump(exportDbUrl, TARGET_SCHEMA, DUMP_FILE)
+    }
+  }
+
+  // Upload dump to remote if --upload flag is set
+  if (UPLOAD_TO_REMOTE) {
+    if (!REMOTE_DB_URL) {
+      console.error('\n❌ REMOTE_DATABASE_URL no está configurada en .env')
+      process.exit(1)
+    }
+    await restoreDumpToRemote(REMOTE_DB_URL, DUMP_FILE)
+    console.log('\n✅ Sincronización completa: prod → local → remote\n')
+  }
 }
 
 main().catch(console.error)
