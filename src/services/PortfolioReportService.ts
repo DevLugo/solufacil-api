@@ -53,10 +53,9 @@ export class PortfolioReportService {
    * This is needed because $queryRawUnsafe doesn't use Prisma's schema configuration.
    */
   private get schemaPrefix(): string {
-    if (currentSchema && currentSchema !== 'public') {
-      return `"${currentSchema}".`
-    }
-    return ''
+    const prefix = currentSchema && currentSchema !== 'public' ? `"${currentSchema}".` : ''
+    console.log(`[PortfolioReportService] schemaPrefix: "${prefix}", currentSchema: "${currentSchema}"`)
+    return prefix
   }
 
   // ========== Helper Methods for Building Queries ==========
