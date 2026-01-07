@@ -171,9 +171,17 @@ export const routeResolvers = {
     },
 
     transactions: async (parent: { id: string }, _args: unknown, context: GraphQLContext) => {
-      // Read from AccountEntry instead of Transaction
+      // Read from AccountEntry through loans whose leads belong to this route
       const entries = await context.prisma.accountEntry.findMany({
-        where: { snapshotRouteId: parent.id },
+        where: {
+          loan: {
+            leadRelation: {
+              routes: {
+                some: { id: parent.id },
+              },
+            },
+          },
+        },
         orderBy: { entryDate: 'desc' },
         take: 50,
       })
@@ -182,7 +190,7 @@ export const routeResolvers = {
         ...e,
         date: e.entryDate,
         sourceAccount: e.accountId,
-        route: e.snapshotRouteId,
+        route: parent.id, // We know the route since we queried by it
         lead: e.snapshotLeadId,
       }))
     },

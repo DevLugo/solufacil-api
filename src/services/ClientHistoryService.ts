@@ -190,7 +190,6 @@ export class ClientHistoryService {
                 status: true,
                 signDate: true,
                 pendingAmountStored: true,
-                snapshotRouteName: true,
                 // Get lead's location for correct locality display
                 leadRelation: {
                   select: {
@@ -301,9 +300,8 @@ export class ClientHistoryService {
           ?.locationRelation
       const leadRoute = loanForRouteInfo?.leadRelation?.routes?.[0]
 
-      // Route name: use snapshotRouteName or lead's current route
-      const routeName =
-        loanForRouteInfo?.snapshotRouteName || leadRoute?.name || null
+      // Route name: use lead's current route
+      const routeName = leadRoute?.name || null
       // Location: from lead's address location
       const locationName = leadLocation?.name || null
       // Municipality: from lead's location's municipality
@@ -456,7 +454,7 @@ export class ClientHistoryService {
         loan.snapshotLeadName ||
         loan.leadRelation?.personalDataRelation?.fullName ||
         null,
-      routeName: loan.snapshotRouteName || null,
+      routeName: loan.leadRelation?.routes?.[0]?.name || null,
       paymentsCount: payments.length,
       payments,
       noPaymentPeriods,
@@ -625,10 +623,7 @@ export class ClientHistoryService {
       leader: leadPersonalData
         ? {
             name: leadPersonalData.fullName,
-            route:
-              mostRecentLoan?.snapshotRouteName ||
-              leadAddress?.locationRelation?.routeRelation?.name ||
-              '',
+            route: leadAddress?.locationRelation?.routeRelation?.name || '',
             location: leadAddress?.locationRelation?.name || '',
             municipality:
               leadAddress?.locationRelation?.municipalityRelation?.name || null,

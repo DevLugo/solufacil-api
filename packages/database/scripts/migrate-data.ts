@@ -13,12 +13,15 @@
  *   npx tsx scripts/migrate-data.ts           # Ejecutar migración
  *   npx tsx scripts/migrate-data.ts --dry-run # Solo mostrar qué se migraría
  *   npx tsx scripts/migrate-data.ts --count   # Solo contar registros
+ *   npx tsx scripts/migrate-data.ts --export  # Después de migrar, exportar dump SQL
+ *   npx tsx scripts/migrate-data.ts --export-only # Solo exportar (sin migrar)
  *
  * Variables de entorno:
  *   SOURCE_DATABASE_URL - URL de la DB origen
  *   TARGET_DATABASE_URL - URL de la DB destino
  *   SOURCE_SCHEMA       - Schema origen (default: 'public')
  *   TARGET_SCHEMA       - Schema destino (default: 'public')
+ *   DUMP_FILE           - Archivo de salida para --export (default: migration-dump.sql)
  *
  * Ejemplos:
  *   # Producción a local (Cross-DB)
@@ -30,10 +33,20 @@
  *   DATABASE_URL="postgresql://localhost/db" \
  *   SOURCE_SCHEMA=neon_import TARGET_SCHEMA=public \
  *   npx tsx scripts/migrate-data.ts
+ *
+ *   # Migrar y exportar dump para subir a remote
+ *   npx tsx scripts/migrate-data.ts --export
+ *
+ *   # Solo exportar dump de DB local (datos ya migrados)
+ *   DATABASE_URL="postgresql://localhost/db" \
+ *   npx tsx scripts/migrate-data.ts --export-only
  */
 
 import 'dotenv/config'
 import { Pool, PoolClient } from 'pg'
+import { execSync } from 'child_process'
+import * as fs from 'fs'
+import * as path from 'path'
 
 const SOURCE_SCHEMA = process.env.SOURCE_SCHEMA || 'public'
 const TARGET_SCHEMA = process.env.TARGET_SCHEMA || 'public'
@@ -41,22 +54,39 @@ const SOURCE_DB_URL = process.env.SOURCE_DATABASE_URL || process.env.DATABASE_UR
 const TARGET_DB_URL = process.env.TARGET_DATABASE_URL || process.env.DATABASE_URL
 const SAME_DATABASE = SOURCE_DB_URL === TARGET_DB_URL
 
-const BATCH_SIZE = 5000  // Increased for better performance
-const INSERT_BATCH_SIZE = 100  // Rows per multi-row INSERT statement
+const BATCH_SIZE = 20000  // Rows to fetch per query from source
+const INSERT_BATCH_SIZE = 2000  // Rows per multi-row INSERT (PostgreSQL limit ~65K params, Transaction has ~20 cols = max ~3200)
 
 const args = process.argv.slice(2)
 const DRY_RUN = args.includes('--dry-run')
 const COUNT_ONLY = args.includes('--count')
+const EXPORT_AFTER = args.includes('--export')
+const EXPORT_ONLY = args.includes('--export-only')
+const UPLOAD_TO_REMOTE = args.includes('--upload')
+const DUMP_FILE = process.env.DUMP_FILE || 'migration-dump.sql'
+const REMOTE_DB_URL = process.env.REMOTE_DATABASE_URL
 
-// Connection pools with optimized settings for migrations
+// Connection pools with optimized settings for long-running migrations
 const poolConfig = {
   max: 10,  // More connections for parallel operations
-  idleTimeoutMillis: 60000,
-  connectionTimeoutMillis: 30000,
+  idleTimeoutMillis: 0,  // Never timeout idle connections during migration
+  connectionTimeoutMillis: 60000,  // 60s to establish connection
+  keepAlive: true,  // Enable TCP keep-alive to prevent connection drops
+  keepAliveInitialDelayMillis: 10000,  // Start keep-alive after 10s of inactivity
 }
 
 const sourcePool = new Pool({ connectionString: SOURCE_DB_URL, ...poolConfig })
 const targetPool = SAME_DATABASE ? sourcePool : new Pool({ connectionString: TARGET_DB_URL, ...poolConfig })
+
+// Handle pool errors gracefully
+sourcePool.on('error', (err) => {
+  console.error('Source pool error:', err.message)
+})
+if (!SAME_DATABASE) {
+  targetPool.on('error', (err) => {
+    console.error('Target pool error:', err.message)
+  })
+}
 
 interface MigrationResult {
   table: string
@@ -82,6 +112,49 @@ const MIGRATION_ORDER = [
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
+
+/**
+ * Check if an error is a connection-related error that might be retriable
+ */
+function isConnectionError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const message = err.message.toLowerCase()
+  return (
+    message.includes('connection terminated') ||
+    message.includes('connection refused') ||
+    message.includes('connection reset') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('socket hang up') ||
+    message.includes('client has encountered a connection error')
+  )
+}
+
+/**
+ * Retry a migration with exponential backoff for connection errors
+ */
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  tableName: string,
+  maxRetries = 3
+): Promise<T> {
+  let lastError: Error | null = null
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation()
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      if (isConnectionError(err) && attempt < maxRetries) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000) // 1s, 2s, 4s... max 10s
+        console.log(`\n   ⚠️  ${tableName}: Connection error, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+      } else {
+        throw err
+      }
+    }
+  }
+  throw lastError
+}
 
 async function tableExists(client: PoolClient, schema: string, tableName: string): Promise<boolean> {
   const result = await client.query(`
@@ -122,7 +195,7 @@ function getForeignKeyColumns(tableName: string): Record<string, string> {
     Location: { municipality: 'Municipality', route: 'Route' },
     PortfolioCleanup: { route: 'Route', executedBy: 'User' },
     LeadPaymentReceived: { lead: 'Employee', agent: 'Employee' },
-    Loan: { borrower: 'Borrower', loantype: 'Loantype', grantor: 'Employee', lead: 'Employee', excludedByCleanup: 'PortfolioCleanup', previousLoan: 'Loan', snapshotRouteId: 'Route' },
+    Loan: { borrower: 'Borrower', loantype: 'Loantype', grantor: 'Employee', lead: 'Employee', excludedByCleanup: 'PortfolioCleanup', previousLoan: 'Loan' },
     LoanPayment: { loan: 'Loan', leadPaymentReceived: 'LeadPaymentReceived' },
     DocumentPhoto: { personalData: 'PersonalData', loan: 'Loan', uploadedBy: 'User' },
     CommissionPayment: { loan: 'Loan', employee: 'Employee' },
@@ -132,6 +205,31 @@ function getForeignKeyColumns(tableName: string): Record<string, string> {
     ReportExecutionLog: { reportConfig: 'ReportConfig' },
   }
   return fkMappings[tableName] || {}
+}
+
+/**
+ * Load all FK reference sets in parallel for better performance over network
+ */
+async function loadFkSetsParallel(
+  client: PoolClient,
+  tableName: string,
+  schema: string,
+  columns: string[]
+): Promise<Record<string, Set<string>>> {
+  const fkMappings = getForeignKeyColumns(tableName)
+  const relevantFks = Object.entries(fkMappings).filter(([col]) => columns.includes(col))
+
+  if (relevantFks.length === 0) return {}
+
+  // Load all FK sets in parallel
+  const results = await Promise.all(
+    relevantFks.map(async ([col, refTable]) => {
+      const ids = await getExistingIds(client, schema, refTable)
+      return [col, ids] as const
+    })
+  )
+
+  return Object.fromEntries(results)
 }
 
 // ============================================================================
@@ -248,13 +346,11 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
       // NOTA: previousLoan se inserta como NULL inicialmente, luego se actualiza en un segundo paso
       // Esto evita problemas de FK ya que el préstamo referenciado podría no existir aún
       // También verificamos que borrower y loantype EXISTAN en destino para evitar FK errors
-      return `INSERT INTO "${tgt}"."Loan" (id, "oldId", "requestedAmount", "amountGived", "signDate", "finishedDate", "renewedDate", "badDebtDate", "isDeceased", "profitAmount", "totalDebtAcquired", "expectedWeeklyPayment", "totalPaid", "pendingAmountStored", "comissionAmount", status, borrower, loantype, grantor, lead, "snapshotLeadId", "snapshotLeadAssignedAt", "snapshotRouteId", "snapshotRouteName", "previousLoan", "excludedByCleanup", "createdAt", "updatedAt")
+      return `INSERT INTO "${tgt}"."Loan" (id, "oldId", "requestedAmount", "amountGived", "signDate", "finishedDate", "renewedDate", "badDebtDate", "isDeceased", "profitAmount", "totalDebtAcquired", "expectedWeeklyPayment", "totalPaid", "pendingAmountStored", "comissionAmount", status, borrower, loantype, grantor, lead, "snapshotLeadId", "snapshotLeadAssignedAt", "previousLoan", "excludedByCleanup", "createdAt", "updatedAt")
         SELECT l.id, l."oldId", COALESCE(l."requestedAmount", 0), COALESCE(l."amountGived", 0), l."signDate", l."finishedDate", l."renewedDate", l."badDebtDate", COALESCE(l."isDeceased", false), COALESCE(l."profitAmount", 0), COALESCE(l."totalDebtAcquired", 0), COALESCE(l."expectedWeeklyPayment", 0), COALESCE(l."totalPaid", 0), COALESCE(l."pendingAmountStored", 0), COALESCE(l."comissionAmount", 0), l.status::text::"${tgt}"."LoanStatus", l.borrower, l.loantype,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = l.grantor) THEN l.grantor ELSE NULL END,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = l.lead) THEN l.lead ELSE NULL END,
-          COALESCE(l."snapshotLeadId", ''), l."snapshotLeadAssignedAt",
-          CASE WHEN l."snapshotRouteId" IS NOT NULL AND l."snapshotRouteId" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Route" WHERE id = l."snapshotRouteId") THEN l."snapshotRouteId" ELSE NULL END,
-          COALESCE(l."snapshotRouteName", ''), NULL,
+          COALESCE(l."snapshotLeadId", ''), l."snapshotLeadAssignedAt", NULL,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."PortfolioCleanup" WHERE id = l."excludedByCleanup") THEN l."excludedByCleanup" ELSE NULL END,
           l."createdAt", COALESCE(l."updatedAt", l."createdAt", NOW())
         FROM "${src}"."Loan" l
@@ -304,8 +400,8 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
     case 'Transaction':
       // Solo migrar transacciones que tengan sourceAccount válido (requerido en nuevo schema)
       // Las transacciones INCOME sin sourceAccount se convierten a AccountEntry en otro paso
-      return `INSERT INTO "${tgt}"."Transaction" (id, amount, date, type, description, "incomeSource", "expenseSource", "snapshotLeadId", "snapshotRouteId", "expenseGroupId", "profitAmount", "returnToCapital", loan, "loanPayment", "sourceAccount", "destinationAccount", route, lead, "leadPaymentReceived", "createdAt", "updatedAt")
-        SELECT t.id, COALESCE(t.amount, 0), t.date, t.type::text::"${tgt}"."TransactionType", COALESCE(t.description, ''), t."incomeSource", t."expenseSource", COALESCE(t."snapshotLeadId", ''), COALESCE(t."snapshotRouteId", ''), t."expenseGroupId", COALESCE(t."profitAmount", 0), COALESCE(t."returnToCapital", 0),
+      return `INSERT INTO "${tgt}"."Transaction" (id, amount, date, type, description, "incomeSource", "expenseSource", "snapshotLeadId", "expenseGroupId", "profitAmount", "returnToCapital", loan, "loanPayment", "sourceAccount", "destinationAccount", route, lead, "leadPaymentReceived", "createdAt", "updatedAt")
+        SELECT t.id, COALESCE(t.amount, 0), t.date, t.type::text::"${tgt}"."TransactionType", COALESCE(t.description, ''), t."incomeSource", t."expenseSource", COALESCE(t."snapshotLeadId", ''), t."expenseGroupId", COALESCE(t."profitAmount", 0), COALESCE(t."returnToCapital", 0),
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
           CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."LoanPayment" WHERE id = t."loanPayment") THEN t."loanPayment" ELSE NULL END,
           t."sourceAccount",
@@ -324,7 +420,7 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
       return `INSERT INTO "${tgt}"."AccountEntry" (
         id, "accountId", amount, "entryType", "sourceType",
         "profitAmount", "returnToCapital",
-        "snapshotLeadId", "snapshotRouteId",
+        "snapshotLeadId",
         "entryDate", description,
         "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
         "syncId", "createdAt"
@@ -336,7 +432,6 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
         COALESCE(e."profitAmount", 0),
         COALESCE(e."returnToCapital", 0),
         COALESCE(e."snapshotLeadId", ''),
-        COALESCE(e."snapshotRouteId", ''),
         e."entryDate",
         COALESCE(e.description, ''),
         CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = e."loanId") THEN e."loanId" ELSE NULL END,
@@ -598,18 +693,13 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
     }
 
     // Find NOT NULL columns in target that don't exist in source - we need to provide defaults
-    const missingNotNull = [...notNullColumns].filter(c => !sourceColumns.includes(c) && c !== 'id')
+    const missingNotNull = Array.from(notNullColumns).filter(c => !sourceColumns.includes(c) && c !== 'id')
 
     // Build insert columns - common columns + missing NOT NULL columns
     const insertColumns = [...commonColumns, ...missingNotNull]
 
-    // Load FK reference sets
-    const fkSets: Record<string, Set<string>> = {}
-    for (const [col, refTable] of Object.entries(getForeignKeyColumns(tableName))) {
-      if (commonColumns.includes(col)) {
-        fkSets[col] = await getExistingIds(targetClient, TARGET_SCHEMA, refTable)
-      }
-    }
+    // Load FK reference sets IN PARALLEL for better network performance
+    const fkSets = await loadFkSetsParallel(targetClient, tableName, TARGET_SCHEMA, commonColumns)
 
     // Get default User ID for DocumentPhoto.uploadedBy fallback
     let defaultUserId: string | null = null
@@ -657,7 +747,7 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
         transformedRows.push(transformed)
       }
 
-      // Execute batch insert
+      // Execute batch insert (executeBatchInsert handles errors internally with row-by-row fallback)
       const batchResult = await executeBatchInsert(targetClient, tableName, insertColumns, transformedRows)
       insertedCount += batchResult.inserted
       errorCount += batchResult.errors
@@ -685,7 +775,7 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
         // Get existing loan IDs in target
         const targetLoanIds = await getExistingIds(targetClient, TARGET_SCHEMA, 'Loan')
 
-        // Batch update previousLoan
+        // Filter valid updates
         const updates: { id: string; previousLoan: string }[] = []
         for (const row of loansWithPrevious.rows) {
           if (targetLoanIds.has(row.id) && targetLoanIds.has(row.previousLoan)) {
@@ -693,19 +783,37 @@ async function migrateTableCrossDb(tableName: string): Promise<MigrationResult> 
           }
         }
 
-        // Execute updates in batches
+        // Execute updates in batches using multi-row UPDATE with VALUES
         let updateCount = 0
-        for (let i = 0; i < updates.length; i += INSERT_BATCH_SIZE) {
-          const batch = updates.slice(i, i + INSERT_BATCH_SIZE)
-          for (const { id, previousLoan } of batch) {
-            try {
-              await targetClient.query(
-                `UPDATE "${TARGET_SCHEMA}"."Loan" SET "previousLoan" = $1 WHERE id = $2`,
-                [previousLoan, id]
-              )
-              updateCount++
-            } catch {
-              // Ignore errors
+        const UPDATE_BATCH_SIZE = 200 // Smaller batches for UPDATE (2 params per row)
+
+        for (let i = 0; i < updates.length; i += UPDATE_BATCH_SIZE) {
+          const batch = updates.slice(i, i + UPDATE_BATCH_SIZE)
+
+          // Build VALUES clause: ($1, $2), ($3, $4), ...
+          const valuesClause = batch.map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`).join(', ')
+          const params = batch.flatMap(({ id, previousLoan }) => [id, previousLoan])
+
+          try {
+            await targetClient.query(`
+              UPDATE "${TARGET_SCHEMA}"."Loan" l
+              SET "previousLoan" = v.prev_loan
+              FROM (VALUES ${valuesClause}) AS v(loan_id, prev_loan)
+              WHERE l.id = v.loan_id
+            `, params)
+            updateCount += batch.length
+          } catch {
+            // Fallback to row-by-row if batch fails
+            for (const { id, previousLoan } of batch) {
+              try {
+                await targetClient.query(
+                  `UPDATE "${TARGET_SCHEMA}"."Loan" SET "previousLoan" = $1 WHERE id = $2`,
+                  [previousLoan, id]
+                )
+                updateCount++
+              } catch {
+                // Ignore individual errors
+              }
             }
           }
         }
@@ -761,16 +869,33 @@ async function migrateJunctionTable(sourceTable: string, targetTable: string): P
       `)
     } else {
       const records = await sourceClient.query(`SELECT "A", "B" FROM "${SOURCE_SCHEMA}"."${sourceTable}"`)
-      for (const row of records.rows) {
+      const JUNCTION_BATCH_SIZE = 500 // 2 params per row = 1000 params max
+
+      // Batch insert for junction tables
+      for (let i = 0; i < records.rows.length; i += JUNCTION_BATCH_SIZE) {
+        const batch = records.rows.slice(i, i + JUNCTION_BATCH_SIZE)
+        const valuesClause = batch.map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`).join(', ')
+        const params = batch.flatMap(row => [row.A, row.B])
+
         try {
           await targetClient.query(
-            `INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B") VALUES ($1, $2)`,
-            [row.A, row.B]
+            `INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B") VALUES ${valuesClause}`,
+            params
           )
         } catch (err) {
-          errorCount++
-          lastError = err instanceof Error ? err.message : String(err)
-          if (errorCount <= 2) console.error(`\n   ⚠️  ${targetTable} error: ${lastError}`)
+          // Fallback to row-by-row if batch fails
+          for (const row of batch) {
+            try {
+              await targetClient.query(
+                `INSERT INTO "${TARGET_SCHEMA}"."${targetTable}" ("A", "B") VALUES ($1, $2)`,
+                [row.A, row.B]
+              )
+            } catch (rowErr) {
+              errorCount++
+              lastError = rowErr instanceof Error ? rowErr.message : String(rowErr)
+              if (errorCount <= 2) console.error(`\n   ⚠️  ${targetTable} error: ${lastError}`)
+            }
+          }
         }
       }
     }
@@ -800,20 +925,44 @@ async function migrateEmployeeRoutes(): Promise<MigrationResult> {
       `)
     } else {
       const result = await sourceClient.query(`SELECT id, routes FROM "${SOURCE_SCHEMA}"."Employee" WHERE routes IS NOT NULL`)
-      const targetEmployees = await getExistingIds(targetClient, TARGET_SCHEMA, 'Employee')
-      const targetRoutes = await getExistingIds(targetClient, TARGET_SCHEMA, 'Route')
 
+      // Load FK sets in parallel
+      const [targetEmployees, targetRoutes] = await Promise.all([
+        getExistingIds(targetClient, TARGET_SCHEMA, 'Employee'),
+        getExistingIds(targetClient, TARGET_SCHEMA, 'Route'),
+      ])
+
+      // Filter valid records
+      const validRecords = result.rows.filter(
+        row => targetEmployees.has(row.id) && targetRoutes.has(row.routes)
+      )
+
+      // Batch insert
+      const JUNCTION_BATCH_SIZE = 500
       let errorCount = 0
-      for (const row of result.rows) {
-        if (targetEmployees.has(row.id) && targetRoutes.has(row.routes)) {
-          try {
-            await targetClient.query(
-              `INSERT INTO "${TARGET_SCHEMA}"."_RouteEmployees" ("A", "B") VALUES ($1, $2)`,
-              [row.id, row.routes]
-            )
-          } catch (err) {
-            errorCount++
-            if (errorCount <= 2) console.error(`\n   ⚠️  _RouteEmployees error: ${err instanceof Error ? err.message : String(err)}`)
+
+      for (let i = 0; i < validRecords.length; i += JUNCTION_BATCH_SIZE) {
+        const batch = validRecords.slice(i, i + JUNCTION_BATCH_SIZE)
+        const valuesClause = batch.map((_, idx) => `($${idx * 2 + 1}, $${idx * 2 + 2})`).join(', ')
+        const params = batch.flatMap(row => [row.id, row.routes])
+
+        try {
+          await targetClient.query(
+            `INSERT INTO "${TARGET_SCHEMA}"."_RouteEmployees" ("A", "B") VALUES ${valuesClause}`,
+            params
+          )
+        } catch {
+          // Fallback to row-by-row
+          for (const row of batch) {
+            try {
+              await targetClient.query(
+                `INSERT INTO "${TARGET_SCHEMA}"."_RouteEmployees" ("A", "B") VALUES ($1, $2)`,
+                [row.id, row.routes]
+              )
+            } catch (err) {
+              errorCount++
+              if (errorCount <= 2) console.error(`\n   ⚠️  _RouteEmployees error: ${err instanceof Error ? err.message : String(err)}`)
+            }
           }
         }
       }
@@ -860,7 +1009,7 @@ async function convertTransactionsToEntries(): Promise<number> {
       INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
         id, "accountId", amount, "entryType", "sourceType",
         "profitAmount", "returnToCapital",
-        "snapshotLeadId", "snapshotRouteId",
+        "snapshotLeadId",
         "entryDate", description,
         "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
         "syncId", "createdAt"
@@ -900,6 +1049,7 @@ async function convertTransactionsToEntries(): Promise<number> {
           WHEN t."expenseSource" = 'CAR_PAYMENT' THEN 'CAR_PAYMENT'
           WHEN t."expenseSource" = 'BANK_EXPENSE' THEN 'BANK_EXPENSE'
           WHEN t."expenseSource" = 'OTRO' THEN 'OTHER_EXPENSE'
+          WHEN t."expenseSource" = 'ASSET_ACQUISITION' THEN 'ASSET_ACQUISITION'
           -- Transfer
           WHEN t.type = 'TRANSFER' THEN 'TRANSFER_OUT'
           -- Default: SOLO si no hay mapping (no debería pasar)
@@ -908,7 +1058,6 @@ async function convertTransactionsToEntries(): Promise<number> {
         COALESCE(t."profitAmount", 0),
         COALESCE(t."returnToCapital", 0),
         COALESCE(t."snapshotLeadId", ''),
-        COALESCE(t."snapshotRouteId", ''),
         t.date,
         COALESCE(t.description, ''),
         t.loan,
@@ -931,16 +1080,6 @@ async function convertTransactionsToEntries(): Promise<number> {
       // SAME_DATABASE mode: leer desde SOURCE_SCHEMA
       console.log('   📊 Creando entries desde transacciones INCOME del origen...')
 
-      // Obtener mapeo de rutas a cuentas EMPLOYEE_CASH_FUND
-      const routeAccountsResult = await client.query(`
-        SELECT r.id as route_id, r.name as route_name, a.id as account_id
-        FROM "${TARGET_SCHEMA}"."Route" r
-        JOIN "${TARGET_SCHEMA}"."_RouteAccounts" ra ON ra."B" = r.id
-        JOIN "${TARGET_SCHEMA}"."Account" a ON a.id = ra."A"
-        WHERE a.type = 'EMPLOYEE_CASH_FUND'
-      `)
-      const routeToAccount = new Map(routeAccountsResult.rows.map((r: any) => [r.route_id, r.account_id]))
-
       // Obtener cuenta BANK
       const bankResult = await client.query(`
         SELECT id FROM "${TARGET_SCHEMA}"."Account" WHERE type = 'BANK' LIMIT 1
@@ -952,7 +1091,7 @@ async function convertTransactionsToEntries(): Promise<number> {
         INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
           id, "accountId", amount, "entryType", "sourceType",
           "profitAmount", "returnToCapital",
-          "snapshotLeadId", "snapshotRouteId",
+          "snapshotLeadId",
           "entryDate", description,
           "loanId", "loanPaymentId", "leadPaymentReceivedId",
           "syncId", "createdAt"
@@ -981,7 +1120,6 @@ async function convertTransactionsToEntries(): Promise<number> {
             ELSE COALESCE(t."returnToCapital", 0)
           END,
           COALESCE(t."snapshotLeadId", ''),
-          COALESCE(t."snapshotRouteId", ''),
           t.date,
           COALESCE(t.description, ''),
           CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
@@ -1007,6 +1145,66 @@ async function convertTransactionsToEntries(): Promise<number> {
       `, [bankAccountId])
 
       console.log(`   ✅ ${incomeResult.rowCount || 0} entries INCOME creados desde origen`)
+
+      // Insertar entries EXPENSE sin sourceAccount (SAME_DATABASE mode)
+      const expenseResult = await client.query(`
+        INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+          id, "accountId", amount, "entryType", "sourceType",
+          "profitAmount", "returnToCapital",
+          "snapshotLeadId",
+          "entryDate", description,
+          "loanId", "loanPaymentId", "leadPaymentReceivedId",
+          "syncId", "createdAt"
+        )
+        SELECT
+          gen_random_uuid()::text,
+          ra.account_id,
+          ABS(t.amount),
+          CASE WHEN t.amount < 0 THEN 'CREDIT' ELSE 'DEBIT' END::"${TARGET_SCHEMA}"."AccountEntryType",
+          CASE
+            WHEN t.amount < 0 THEN 'EXPENSE_REFUND'
+            WHEN t."expenseSource" = 'LOAN_GRANTED' THEN 'LOAN_GRANT'
+            WHEN t."expenseSource" = 'LOAN_GRANTED_COMISSION' THEN 'LOAN_GRANT_COMMISSION'
+            WHEN t."expenseSource" = 'LOAN_PAYMENT_COMISSION' THEN 'PAYMENT_COMMISSION'
+            WHEN t."expenseSource" = 'GASOLINE' THEN 'GASOLINE'
+            WHEN t."expenseSource" = 'GASOLINE_TOKA' THEN 'GASOLINE_TOKA'
+            WHEN t."expenseSource" = 'NOMINA_SALARY' THEN 'NOMINA_SALARY'
+            WHEN t."expenseSource" = 'EXTERNAL_SALARY' THEN 'EXTERNAL_SALARY'
+            WHEN t."expenseSource" = 'VIATIC' THEN 'VIATIC'
+            WHEN t."expenseSource" = 'TRAVEL_EXPENSES' THEN 'TRAVEL_EXPENSES'
+            WHEN t."expenseSource" = 'FALCO_LOSS' THEN 'FALCO_LOSS'
+            WHEN t."expenseSource" = 'EMPLOYEE_EXPENSE' THEN 'EMPLOYEE_EXPENSE'
+            WHEN t."expenseSource" = 'GENERAL_EXPENSE' THEN 'GENERAL_EXPENSE'
+            WHEN t."expenseSource" = 'CAR_PAYMENT' THEN 'CAR_PAYMENT'
+            WHEN t."expenseSource" = 'BANK_EXPENSE' THEN 'BANK_EXPENSE'
+            WHEN t."expenseSource" = 'OTRO' THEN 'OTHER_EXPENSE'
+            WHEN t."expenseSource" = 'ASSET_ACQUISITION' THEN 'ASSET_ACQUISITION'
+            ELSE 'OTHER_EXPENSE'
+          END::"${TARGET_SCHEMA}"."SourceType",
+          0,
+          0,
+          COALESCE(t."snapshotLeadId", ''),
+          t.date,
+          COALESCE(t.description, ''),
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."LoanPayment" WHERE id = t."loanPayment") THEN t."loanPayment" ELSE NULL END,
+          CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."LeadPaymentReceived" WHERE id = t."leadPaymentReceived") THEN t."leadPaymentReceived" ELSE NULL END,
+          gen_random_uuid()::text,
+          t."createdAt"
+        FROM "${SOURCE_SCHEMA}"."Transaction" t
+        LEFT JOIN (
+          SELECT r.id as route_id, a.id as account_id
+          FROM "${TARGET_SCHEMA}"."Route" r
+          JOIN "${TARGET_SCHEMA}"."_RouteAccounts" ra ON ra."B" = r.id
+          JOIN "${TARGET_SCHEMA}"."Account" a ON a.id = ra."A"
+          WHERE a.type = 'EMPLOYEE_CASH_FUND'
+        ) ra ON ra.route_id = t."snapshotRouteId"
+        WHERE t.type = 'EXPENSE'
+          AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '')
+          AND ra.account_id IS NOT NULL
+      `)
+
+      console.log(`   ✅ ${expenseResult.rowCount || 0} entries EXPENSE creados desde origen`)
 
     } else {
       console.log('   📊 Creando entries desde transacciones INCOME de producción...')
@@ -1046,6 +1244,11 @@ async function convertTransactionsToEntries(): Promise<number> {
         let insertedCount = 0
         let skippedCount = 0
 
+        // Preparar batch de valores para inserción masiva
+        // Max ~5400 rows por batch (PostgreSQL limit: 65535 params / 12 params per row)
+        const batchSize = 3000
+        const valuesToInsert: any[][] = []
+
         for (const tx of incomeTransactions.rows) {
           // Determinar la cuenta: BANK para transferencias, EMPLOYEE_CASH_FUND para efectivo
           let accountId: string | null = null
@@ -1061,18 +1264,17 @@ async function convertTransactionsToEntries(): Promise<number> {
           }
 
           // Determinar sourceType basado en incomeSource y método de pago
-          // MONEY_INVESMENT y MULTA NO son cobranza, usan tipos específicos
           let sourceType: string
           let profitAmount: number
           let returnToCapital: number
 
           if (tx.incomeSource === 'MONEY_INVESMENT') {
-            sourceType = 'MONEY_INVESTMENT' // Inversión de capital (NO es cobranza)
-            profitAmount = 0 // Inversión no es ganancia
+            sourceType = 'MONEY_INVESTMENT'
+            profitAmount = 0
             returnToCapital = 0
           } else if (tx.incomeSource === 'MULTA') {
-            sourceType = 'MULTA' // Multas cobradas (NO es cobranza)
-            profitAmount = Math.abs(tx.amount) // 100% del monto es ganancia
+            sourceType = 'MULTA'
+            profitAmount = Math.abs(tx.amount)
             returnToCapital = 0
           } else if (tx.paymentMethod === 'MONEY_TRANSFER') {
             sourceType = 'LOAN_PAYMENT_BANK'
@@ -1084,50 +1286,204 @@ async function convertTransactionsToEntries(): Promise<number> {
             returnToCapital = tx.returnToCapital || 0
           }
 
+          valuesToInsert.push([
+            accountId,
+            Math.abs(tx.amount),
+            sourceType,
+            profitAmount,
+            returnToCapital,
+            tx.snapshotLeadId || '',
+            tx.date,
+            tx.description || '',
+            tx.loan,
+            tx.loanPayment,
+            tx.leadPaymentReceived,
+            tx.createdAt
+          ])
+        }
+
+        // Insertar en batches
+        for (let i = 0; i < valuesToInsert.length; i += batchSize) {
+          const batch = valuesToInsert.slice(i, i + batchSize)
+          const placeholders = batch.map((_, idx) => {
+            const base = idx * 12
+            return `(gen_random_uuid()::text, $${base+1}, $${base+2}, 'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType", $${base+3}::"${TARGET_SCHEMA}"."SourceType", $${base+4}, $${base+5}, $${base+6}, $${base+7}, $${base+8}, $${base+9}, $${base+10}, $${base+11}, gen_random_uuid()::text, $${base+12})`
+          }).join(',\n')
+
+          const flatValues = batch.flat()
+
           try {
             await client.query(`
               INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
                 id, "accountId", amount, "entryType", "sourceType",
                 "profitAmount", "returnToCapital",
-                "snapshotLeadId", "snapshotRouteId",
+                "snapshotLeadId",
                 "entryDate", description,
                 "loanId", "loanPaymentId", "leadPaymentReceivedId",
                 "syncId", "createdAt"
-              ) VALUES (
-                gen_random_uuid()::text,
-                $1, $2,
-                'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType",
-                $3::"${TARGET_SCHEMA}"."SourceType",
-                $4, $5,
-                COALESCE($6, ''), COALESCE($7, ''),
-                $8, COALESCE($9, ''),
-                $10, $11, $12,
-                gen_random_uuid()::text, $13
-              )
-            `, [
-              accountId,
-              Math.abs(tx.amount),
-              sourceType,
-              profitAmount,
-              returnToCapital,
-              tx.snapshotLeadId,
-              tx.snapshotRouteId,
-              tx.date,
-              tx.description,
-              tx.loan,
-              tx.loanPayment,
-              tx.leadPaymentReceived,
-              tx.createdAt
-            ])
-            insertedCount++
+              ) VALUES ${placeholders}
+            `, flatValues)
+            insertedCount += batch.length
           } catch (err) {
-            skippedCount++
+            // Si falla el batch, intentar uno por uno
+            for (const values of batch) {
+              try {
+                await client.query(`
+                  INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+                    id, "accountId", amount, "entryType", "sourceType",
+                    "profitAmount", "returnToCapital",
+                    "snapshotLeadId",
+                    "entryDate", description,
+                    "loanId", "loanPaymentId", "leadPaymentReceivedId",
+                    "syncId", "createdAt"
+                  ) VALUES (
+                    gen_random_uuid()::text, $1, $2, 'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType",
+                    $3::"${TARGET_SCHEMA}"."SourceType", $4, $5, $6, $7, $8, $9, $10, $11,
+                    gen_random_uuid()::text, $12
+                  )
+                `, values)
+                insertedCount++
+              } catch {
+                skippedCount++
+              }
+            }
+          }
+
+          // Progress indicator cada 10000 registros
+          if (i > 0 && i % 10000 === 0) {
+            console.log(`      ... ${i}/${valuesToInsert.length} procesados`)
           }
         }
 
         console.log(`   ✅ ${insertedCount} entries INCOME creados desde producción`)
         if (skippedCount > 0) {
-          console.log(`   ⚠️  ${skippedCount} transacciones omitidas (sin cuenta mapeada)`)
+          console.log(`   ⚠️  ${skippedCount} transacciones INCOME omitidas (sin cuenta mapeada)`)
+        }
+
+        // Procesar transacciones EXPENSE sin sourceAccount
+        console.log('   📊 Creando entries desde transacciones EXPENSE de producción...')
+
+        const expenseTransactions = await sourceClient.query(`
+          SELECT
+            t.id, t.amount, t."expenseSource",
+            t."snapshotLeadId", t."snapshotRouteId", t.date, t.description,
+            t.loan, t."loanPayment", t."leadPaymentReceived", t."createdAt"
+          FROM "Transaction" t
+          WHERE t.type = 'EXPENSE'
+            AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '')
+        `)
+
+        let expenseInserted = 0
+        let expenseSkipped = 0
+
+        // Mapear expenseSource a SourceType
+        const sourceTypeMap: Record<string, string> = {
+          'LOAN_GRANTED': 'LOAN_GRANT',
+          'LOAN_GRANTED_COMISSION': 'LOAN_GRANT_COMMISSION',
+          'LOAN_PAYMENT_COMISSION': 'PAYMENT_COMMISSION',
+          'GASOLINE': 'GASOLINE',
+          'GASOLINE_TOKA': 'GASOLINE_TOKA',
+          'NOMINA_SALARY': 'NOMINA_SALARY',
+          'EXTERNAL_SALARY': 'EXTERNAL_SALARY',
+          'VIATIC': 'VIATIC',
+          'TRAVEL_EXPENSES': 'TRAVEL_EXPENSES',
+          'FALCO_LOSS': 'FALCO_LOSS',
+          'EMPLOYEE_EXPENSE': 'EMPLOYEE_EXPENSE',
+          'GENERAL_EXPENSE': 'GENERAL_EXPENSE',
+          'CAR_PAYMENT': 'CAR_PAYMENT',
+          'BANK_EXPENSE': 'BANK_EXPENSE',
+          'OTRO': 'OTHER_EXPENSE',
+          'ASSET_ACQUISITION': 'ASSET_ACQUISITION',
+        }
+
+        // Preparar batch de valores para inserción masiva
+        const expenseValuesToInsert: any[][] = []
+
+        for (const tx of expenseTransactions.rows) {
+          const accountId = routeToAccount.get(tx.snapshotRouteId) || null
+
+          if (!accountId) {
+            expenseSkipped++
+            continue
+          }
+
+          const sourceType = sourceTypeMap[tx.expenseSource] || 'OTHER_EXPENSE'
+          const isRefund = tx.amount < 0
+          const entryType = isRefund ? 'CREDIT' : 'DEBIT'
+          const finalSourceType = isRefund ? 'EXPENSE_REFUND' : sourceType
+
+          expenseValuesToInsert.push([
+            accountId,
+            Math.abs(tx.amount),
+            entryType,
+            finalSourceType,
+            tx.snapshotLeadId || '',
+            tx.date,
+            tx.description || '',
+            tx.loan,
+            tx.loanPayment,
+            tx.leadPaymentReceived,
+            tx.createdAt
+          ])
+        }
+
+        // Insertar en batches
+        // Max ~5900 rows por batch (PostgreSQL limit: 65535 params / 11 params per row)
+        const expenseBatchSize = 3000
+        for (let i = 0; i < expenseValuesToInsert.length; i += expenseBatchSize) {
+          const batch = expenseValuesToInsert.slice(i, i + expenseBatchSize)
+          const placeholders = batch.map((_, idx) => {
+            const base = idx * 11
+            return `(gen_random_uuid()::text, $${base+1}, $${base+2}, $${base+3}::"${TARGET_SCHEMA}"."AccountEntryType", $${base+4}::"${TARGET_SCHEMA}"."SourceType", 0, 0, $${base+5}, $${base+6}, $${base+7}, $${base+8}, $${base+9}, $${base+10}, gen_random_uuid()::text, $${base+11})`
+          }).join(',\n')
+
+          const flatValues = batch.flat()
+
+          try {
+            await client.query(`
+              INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+                id, "accountId", amount, "entryType", "sourceType",
+                "profitAmount", "returnToCapital",
+                "snapshotLeadId",
+                "entryDate", description,
+                "loanId", "loanPaymentId", "leadPaymentReceivedId",
+                "syncId", "createdAt"
+              ) VALUES ${placeholders}
+            `, flatValues)
+            expenseInserted += batch.length
+          } catch (err) {
+            // Si falla el batch, intentar uno por uno
+            for (const values of batch) {
+              try {
+                await client.query(`
+                  INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+                    id, "accountId", amount, "entryType", "sourceType",
+                    "profitAmount", "returnToCapital",
+                    "snapshotLeadId",
+                    "entryDate", description,
+                    "loanId", "loanPaymentId", "leadPaymentReceivedId",
+                    "syncId", "createdAt"
+                  ) VALUES (
+                    gen_random_uuid()::text, $1, $2, $3::"${TARGET_SCHEMA}"."AccountEntryType",
+                    $4::"${TARGET_SCHEMA}"."SourceType", 0, 0, $5, $6, $7, $8, $9, $10,
+                    gen_random_uuid()::text, $11
+                  )
+                `, values)
+                expenseInserted++
+              } catch {
+                expenseSkipped++
+              }
+            }
+          }
+
+          if (i > 0 && i % 10000 === 0) {
+            console.log(`      ... ${i}/${expenseValuesToInsert.length} procesados`)
+          }
+        }
+
+        console.log(`   ✅ ${expenseInserted} entries EXPENSE creados desde producción`)
+        if (expenseSkipped > 0) {
+          console.log(`   ⚠️  ${expenseSkipped} transacciones EXPENSE omitidas (sin cuenta mapeada)`)
         }
       } finally {
         sourceClient.release()
@@ -1139,7 +1495,7 @@ async function convertTransactionsToEntries(): Promise<number> {
       INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
         id, "accountId", amount, "entryType", "sourceType",
         "profitAmount", "returnToCapital",
-        "snapshotLeadId", "snapshotRouteId",
+        "snapshotLeadId",
         "entryDate", description,
         "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
         "syncId", "createdAt"
@@ -1153,7 +1509,6 @@ async function convertTransactionsToEntries(): Promise<number> {
         0,
         0,
         COALESCE(t."snapshotLeadId", ''),
-        COALESCE(t."snapshotRouteId", ''),
         t.date,
         COALESCE(t.description, ''),
         NULL,
@@ -1226,7 +1581,7 @@ async function reconcileBalances(): Promise<ReconciliationResult[]> {
             INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
               id, "accountId", amount, "entryType", "sourceType",
               "profitAmount", "returnToCapital",
-              "snapshotLeadId", "snapshotRouteId",
+              "snapshotLeadId",
               "entryDate", description,
               "syncId", "createdAt"
             ) VALUES (
@@ -1236,7 +1591,7 @@ async function reconcileBalances(): Promise<ReconciliationResult[]> {
               $3::"${TARGET_SCHEMA}"."AccountEntryType",
               'BALANCE_ADJUSTMENT'::"${TARGET_SCHEMA}"."SourceType",
               0, 0,
-              '', '',
+              '',
               NOW(),
               'Ajuste de migración - diferencia entre Account.amount y SUM(AccountEntry)',
               gen_random_uuid()::text,
@@ -1294,6 +1649,209 @@ async function reconcileBalances(): Promise<ReconciliationResult[]> {
     }
 
     return results
+  } finally {
+    client.release()
+  }
+}
+
+// ============================================================================
+// LOCATION ROUTE HISTORY
+// ============================================================================
+
+async function populateLocationRouteHistory(): Promise<void> {
+  console.log('\n📍 Poblando LocationRouteHistory (desde Employee → Route)...\n')
+  const client = await targetPool.connect()
+
+  try {
+    // Check current count
+    const currentCount = await client.query(
+      `SELECT COUNT(*) as count FROM "${TARGET_SCHEMA}"."LocationRouteHistory"`
+    )
+    const existing = parseInt(currentCount.rows[0].count)
+
+    if (existing > 0) {
+      console.log(`   ⏭️  Ya existen ${existing} registros en LocationRouteHistory, omitiendo`)
+      return
+    }
+
+    // ÚNICA FUENTE DE VERDAD: Employee → Route (via _RouteEmployees)
+    // La localidad del empleado determina a qué ruta pertenece esa localidad
+    // Lógica: Employee ↔ Route + Employee → PersonalData → Address → Location
+    console.log(`   🔄 Poblando desde Employee → Route...`)
+
+    const insertFromEmployees = await client.query(`
+      INSERT INTO "${TARGET_SCHEMA}"."LocationRouteHistory" (
+        "id",
+        "locationId",
+        "routeId",
+        "startDate",
+        "endDate",
+        "createdAt",
+        "updatedAt"
+      )
+      SELECT DISTINCT ON (loc.id)
+        gen_random_uuid()::text,
+        loc.id,
+        re."B",
+        '2020-01-01'::timestamp,
+        NULL::timestamp,
+        NOW(),
+        NOW()
+      FROM "${TARGET_SCHEMA}"."_RouteEmployees" re
+      JOIN "${TARGET_SCHEMA}"."Employee" e ON e.id = re."A"
+      JOIN "${TARGET_SCHEMA}"."PersonalData" pd ON pd.id = e."personalData"
+      JOIN "${TARGET_SCHEMA}"."Address" a ON a."personalData" = pd.id
+      JOIN "${TARGET_SCHEMA}"."Location" loc ON loc.id = a.location
+      WHERE loc.id IS NOT NULL
+        AND re."B" IS NOT NULL
+      ORDER BY loc.id, e."createdAt" DESC
+    `)
+    console.log(`   ✅ ${insertFromEmployees.rowCount} registros desde Employee → Route`)
+
+    // Sync Location.route con LocationRouteHistory
+    console.log(`\n   🔄 Sincronizando Location.route...`)
+    const updateLocationRoute = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."Location" loc
+      SET route = lrh."routeId"
+      FROM "${TARGET_SCHEMA}"."LocationRouteHistory" lrh
+      WHERE lrh."locationId" = loc.id
+    `)
+    console.log(`   ✅ ${updateLocationRoute.rowCount} Location.route actualizados`)
+
+    // Show distribution by route
+    console.log(`\n   📊 Distribución por ruta:`)
+    const byRoute = await client.query(`
+      SELECT r.name as route_name, COUNT(lrh.id) as location_count
+      FROM "${TARGET_SCHEMA}"."LocationRouteHistory" lrh
+      JOIN "${TARGET_SCHEMA}"."Route" r ON r.id = lrh."routeId"
+      GROUP BY r.name
+      ORDER BY r.name
+    `)
+
+    for (const row of byRoute.rows) {
+      console.log(`      ${row.route_name}: ${row.location_count} locations`)
+    }
+
+    // Final count
+    const finalCount = await client.query(
+      `SELECT COUNT(*) as count FROM "${TARGET_SCHEMA}"."LocationRouteHistory"`
+    )
+    console.log(`\n   📊 Total registros en LocationRouteHistory: ${finalCount.rows[0].count}`)
+  } finally {
+    client.release()
+  }
+}
+
+// ============================================================================
+// BACKFILL SNAPSHOT LEAD ID
+// ============================================================================
+
+async function backfillSnapshotLeadId(): Promise<void> {
+  console.log('\n👤 Backfill snapshotLeadId en AccountEntry...\n')
+  const client = await targetPool.connect()
+
+  try {
+    // Stats before
+    const statsBefore = await client.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE "snapshotLeadId" = '' OR "snapshotLeadId" IS NULL) as empty_lead,
+        COUNT(*) FILTER (WHERE "snapshotLeadId" != '' AND "snapshotLeadId" IS NOT NULL) as with_lead,
+        COUNT(*) as total
+      FROM "${TARGET_SCHEMA}"."AccountEntry"
+    `)
+    const emptyBefore = parseInt(statsBefore.rows[0].empty_lead)
+    const withLeadBefore = parseInt(statsBefore.rows[0].with_lead)
+    const total = parseInt(statsBefore.rows[0].total)
+
+    console.log(`   📊 Antes: ${withLeadBefore}/${total} con snapshotLeadId (${emptyBefore} vacíos)`)
+
+    if (emptyBefore === 0) {
+      console.log(`   ⏭️  Todos los entries ya tienen snapshotLeadId`)
+      return
+    }
+
+    // Step 1: Populate from Loan.lead directly
+    const directResult = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."AccountEntry" ae
+      SET "snapshotLeadId" = l.lead
+      FROM "${TARGET_SCHEMA}"."Loan" l
+      WHERE l.id = ae."loanId"
+        AND (ae."snapshotLeadId" = '' OR ae."snapshotLeadId" IS NULL)
+        AND l.lead IS NOT NULL
+    `)
+    console.log(`   ✅ ${directResult.rowCount} actualizados desde Loan.lead`)
+
+    // Step 2: Populate from LoanPayment → Loan
+    const paymentResult = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."AccountEntry" ae
+      SET "snapshotLeadId" = l.lead
+      FROM "${TARGET_SCHEMA}"."LoanPayment" lp
+      JOIN "${TARGET_SCHEMA}"."Loan" l ON l.id = lp.loan
+      WHERE lp.id = ae."loanPaymentId"
+        AND (ae."snapshotLeadId" = '' OR ae."snapshotLeadId" IS NULL)
+        AND ae."loanId" IS NULL
+        AND l.lead IS NOT NULL
+    `)
+    console.log(`   ✅ ${paymentResult.rowCount} actualizados desde LoanPayment→Loan.lead`)
+
+    // Step 3: Populate PAYMENT_COMMISSION from LoanPayment
+    const commissionResult = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."AccountEntry" ae
+      SET "snapshotLeadId" = l.lead
+      FROM "${TARGET_SCHEMA}"."LoanPayment" lp
+      JOIN "${TARGET_SCHEMA}"."Loan" l ON l.id = lp.loan
+      WHERE lp.id = ae."loanPaymentId"
+        AND (ae."snapshotLeadId" = '' OR ae."snapshotLeadId" IS NULL)
+        AND l.lead IS NOT NULL
+    `)
+    console.log(`   ✅ ${commissionResult.rowCount} PAYMENT_COMMISSION actualizados`)
+
+    // Step 4: Use Loan.snapshotLeadId as fallback
+    const snapshotResult = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."AccountEntry" ae
+      SET "snapshotLeadId" = l."snapshotLeadId"
+      FROM "${TARGET_SCHEMA}"."Loan" l
+      WHERE l.id = ae."loanId"
+        AND (ae."snapshotLeadId" = '' OR ae."snapshotLeadId" IS NULL)
+        AND l."snapshotLeadId" IS NOT NULL
+        AND l."snapshotLeadId" != ''
+    `)
+    console.log(`   ✅ ${snapshotResult.rowCount} actualizados desde Loan.snapshotLeadId`)
+
+    // Stats after
+    const statsAfter = await client.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE "snapshotLeadId" = '' OR "snapshotLeadId" IS NULL) as empty_lead,
+        COUNT(*) FILTER (WHERE "snapshotLeadId" != '' AND "snapshotLeadId" IS NOT NULL) as with_lead
+      FROM "${TARGET_SCHEMA}"."AccountEntry"
+    `)
+    const emptyAfter = parseInt(statsAfter.rows[0].empty_lead)
+    const withLeadAfter = parseInt(statsAfter.rows[0].with_lead)
+
+    const totalUpdated =
+      (directResult.rowCount || 0) +
+      (paymentResult.rowCount || 0) +
+      (commissionResult.rowCount || 0) +
+      (snapshotResult.rowCount || 0)
+
+    console.log(`\n   📊 Después: ${withLeadAfter}/${total} con snapshotLeadId (${emptyAfter} vacíos)`)
+    console.log(`   📈 Total actualizados: ${totalUpdated}`)
+
+    if (emptyAfter > 0) {
+      // Show breakdown of remaining empty entries
+      const remaining = await client.query(`
+        SELECT "sourceType", COUNT(*) as count
+        FROM "${TARGET_SCHEMA}"."AccountEntry"
+        WHERE "snapshotLeadId" = '' OR "snapshotLeadId" IS NULL
+        GROUP BY "sourceType"
+        ORDER BY count DESC
+        LIMIT 5
+      `)
+      console.log(`\n   ⚠️  ${emptyAfter} entries sin snapshotLeadId (gastos generales, normal):`)
+      for (const row of remaining.rows) {
+        console.log(`      ${row.sourceType}: ${row.count}`)
+      }
+    }
   } finally {
     client.release()
   }
@@ -1383,82 +1941,166 @@ async function runDiagnostics(): Promise<void> {
 }
 
 // ============================================================================
-// FIX NULL SNAPSHOT ROUTE IDS
+// FIX NULL SNAPSHOT ROUTE IDS - DEPRECATED
+// snapshotRouteId was removed from schema, this function is no longer needed
+// ============================================================================
+
+// async function fixNullSnapshotRouteIds(): Promise<void> {
+//   // DEPRECATED: snapshotRouteId column was removed from Loan table
+//   // Route information is now obtained via LocationRouteHistory
+// }
+
+// ============================================================================
+// EXPORT / DUMP FUNCTIONS
 // ============================================================================
 
 /**
- * Fixes loans with NULL snapshotRouteId by getting the route from the lead's assigned routes.
- * This ensures all loans have a proper snapshotRouteId for reporting purposes.
+ * Export database to SQL dump file using pg_dump.
+ * This creates a data-only dump that can be quickly restored to another DB.
  */
-async function fixNullSnapshotRouteIds(): Promise<void> {
-  console.log('\n🔧 Corrigiendo préstamos con snapshotRouteId NULL...\n')
+async function exportDatabaseDump(dbUrl: string, schema: string, outputFile: string): Promise<void> {
+  console.log('\n📦 Exportando dump SQL...\n')
+
+  const dumpPath = path.resolve(outputFile)
+
+  // pg_dump command with data-only, no owner, no privileges
+  const cmd = `pg_dump "${dbUrl}" --data-only --no-owner --no-privileges --schema="${schema}" --disable-triggers -f "${dumpPath}"`
+
+  console.log(`   📄 Archivo: ${dumpPath}`)
+  console.log(`   🗄️  Schema: ${schema}`)
+  console.log(`   ⏳ Ejecutando pg_dump...`)
+
+  try {
+    const startTime = Date.now()
+    execSync(cmd, { stdio: 'pipe' })
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1)
+
+    // Get file size
+    const stats = fs.statSync(dumpPath)
+    const sizeMB = (stats.size / 1024 / 1024).toFixed(2)
+
+    console.log(`   ✅ Dump completado en ${duration}s`)
+    console.log(`   📊 Tamaño: ${sizeMB} MB`)
+    console.log(`\n   Para restaurar en otra DB:`)
+    console.log(`   psql "postgresql://user:pass@host/db" < ${dumpPath}`)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.error(`   ❌ Error en pg_dump: ${msg}`)
+    throw error
+  }
+}
+
+/**
+ * Restore SQL dump to a remote database using psql.
+ */
+async function restoreDumpToRemote(dbUrl: string, dumpFile: string): Promise<void> {
+  console.log('\n📤 Restaurando dump en DB remota...\n')
+
+  const dumpPath = path.resolve(dumpFile)
+
+  if (!fs.existsSync(dumpPath)) {
+    throw new Error(`Archivo no encontrado: ${dumpPath}`)
+  }
+
+  const stats = fs.statSync(dumpPath)
+  const sizeMB = (stats.size / 1024 / 1024).toFixed(2)
+
+  console.log(`   📄 Archivo: ${dumpPath} (${sizeMB} MB)`)
+  console.log(`   🎯 Destino: ${maskUrl(dbUrl)}`)
+  console.log(`   ⏳ Ejecutando psql...`)
+
+  const cmd = `psql "${dbUrl}" < "${dumpPath}"`
+
+  try {
+    const startTime = Date.now()
+    execSync(cmd, { stdio: 'pipe' })
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1)
+
+    console.log(`   ✅ Restauración completada en ${duration}s`)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    console.error(`   ❌ Error en psql: ${msg}`)
+    throw error
+  }
+}
+
+// ============================================================================
+// DATA FIX FUNCTIONS
+// ============================================================================
+
+/**
+ * Fix loan status data after migration
+ * - Converts RENOVATED status to FINISHED (RENOVATED was removed from enum)
+ * - Sets finishedDate based on last payment for renovated/finished loans
+ * - Sets renewedDate for loans that have a next loan (previousLoan reference)
+ * - Fixes status to FINISHED for loans with finishedDate or renewedDate
+ */
+async function fixLoanStatusData(): Promise<void> {
+  console.log('\n📋 Corrigiendo datos de préstamos...\n')
   const client = await targetPool.connect()
 
   try {
-    // Count loans with NULL snapshotRouteId
-    const countResult = await client.query(`
-      SELECT COUNT(*) as count FROM "${TARGET_SCHEMA}"."Loan"
-      WHERE "snapshotRouteId" IS NULL OR "snapshotRouteId" = ''
+    // Query 1: Convert RENOVATED to FINISHED
+    const q1 = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."Loan"
+      SET status = 'FINISHED'
+      WHERE status = 'RENOVATED'
     `)
-    const nullCount = parseInt(countResult.rows[0].count)
+    console.log(`   ✅ RENOVATED → FINISHED: ${q1.rowCount} préstamos actualizados`)
 
-    if (nullCount === 0) {
-      console.log('   ✅ No hay préstamos con snapshotRouteId NULL')
-      return
-    }
-
-    console.log(`   📊 Préstamos con snapshotRouteId NULL: ${nullCount}`)
-
-    // Update loans by getting route from lead's assigned routes
-    // Join: Loan -> Employee (lead) -> _RouteEmployees -> Route
-    const updateResult = await client.query(`
+    // Query 2: Set finishedDate based on last payment for renovated/finished loans
+    const q2 = await client.query(`
       UPDATE "${TARGET_SCHEMA}"."Loan" l
-      SET
-        "snapshotRouteId" = subq.route_id,
-        "snapshotRouteName" = COALESCE(l."snapshotRouteName", subq.route_name, '')
-      FROM (
-        SELECT DISTINCT ON (l2.id)
-          l2.id as loan_id,
-          r.id as route_id,
-          r.name as route_name
-        FROM "${TARGET_SCHEMA}"."Loan" l2
-        JOIN "${TARGET_SCHEMA}"."_RouteEmployees" re ON re."A" = l2.lead
-        JOIN "${TARGET_SCHEMA}"."Route" r ON r.id = re."B"
-        WHERE (l2."snapshotRouteId" IS NULL OR l2."snapshotRouteId" = '')
-        ORDER BY l2.id, r.name
-      ) subq
-      WHERE l.id = subq.loan_id
+      SET "finishedDate" = (
+        SELECT MAX(p."receivedAt")
+        FROM "${TARGET_SCHEMA}"."LoanPayment" p
+        WHERE p.loan = l.id
+      )
+      WHERE l."finishedDate" IS NULL
+        AND (
+          EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Loan" r WHERE r."previousLoan" = l.id)
+          OR l."pendingAmountStored" <= 0
+        )
+        AND EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."LoanPayment" p WHERE p.loan = l.id)
     `)
+    console.log(`   ✅ finishedDate establecido: ${q2.rowCount} préstamos`)
 
-    const updatedCount = updateResult.rowCount || 0
-    console.log(`   ✅ ${updatedCount} préstamos actualizados con snapshotRouteId del lead`)
-
-    // Check remaining loans with NULL snapshotRouteId (lead has no route assigned)
-    const remainingResult = await client.query(`
-      SELECT COUNT(*) as count FROM "${TARGET_SCHEMA}"."Loan"
-      WHERE "snapshotRouteId" IS NULL OR "snapshotRouteId" = ''
+    // Query 3: Set renewedDate for loans that have a next loan
+    const q3 = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."Loan" l
+      SET "renewedDate" = (
+        SELECT r."signDate"
+        FROM "${TARGET_SCHEMA}"."Loan" r
+        WHERE r."previousLoan" = l.id
+        LIMIT 1
+      )
+      WHERE l."renewedDate" IS NULL
+        AND EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Loan" r WHERE r."previousLoan" = l.id)
     `)
-    const remainingCount = parseInt(remainingResult.rows[0].count)
+    console.log(`   ✅ renewedDate establecido: ${q3.rowCount} préstamos`)
 
-    if (remainingCount > 0) {
-      console.log(`   ⚠️  ${remainingCount} préstamos aún sin snapshotRouteId (lead sin ruta asignada)`)
+    // Query 4: Fix status to FINISHED for loans with finishedDate or renewedDate
+    const q4 = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."Loan"
+      SET status = 'FINISHED'
+      WHERE status = 'ACTIVE'
+        AND ("finishedDate" IS NOT NULL OR "renewedDate" IS NOT NULL)
+    `)
+    console.log(`   ✅ ACTIVE → FINISHED (con fechas): ${q4.rowCount} préstamos`)
 
-      // List some examples
-      const examples = await client.query(`
-        SELECT l.id, pd."fullName" as borrower_name, e_pd."fullName" as lead_name
-        FROM "${TARGET_SCHEMA}"."Loan" l
-        LEFT JOIN "${TARGET_SCHEMA}"."Borrower" b ON b.id = l.borrower
-        LEFT JOIN "${TARGET_SCHEMA}"."PersonalData" pd ON pd.id = b."personalData"
-        LEFT JOIN "${TARGET_SCHEMA}"."Employee" e ON e.id = l.lead
-        LEFT JOIN "${TARGET_SCHEMA}"."PersonalData" e_pd ON e_pd.id = e."personalData"
-        WHERE l."snapshotRouteId" IS NULL OR l."snapshotRouteId" = ''
-        LIMIT 5
-      `)
-
-      for (const row of examples.rows) {
-        console.log(`      - Préstamo ${row.id.substring(0, 12)}... (${row.borrower_name || 'N/A'}, lead: ${row.lead_name || 'N/A'})`)
-      }
-    }
+    // Query 5: Ensure finishedDate is the last payment date (not renewal date)
+    const q5 = await client.query(`
+      UPDATE "${TARGET_SCHEMA}"."Loan" l
+      SET "finishedDate" = (
+        SELECT MAX(p."receivedAt")
+        FROM "${TARGET_SCHEMA}"."LoanPayment" p
+        WHERE p.loan = l.id
+      )
+      WHERE l."finishedDate" IS NOT NULL
+        AND l."renewedDate" IS NOT NULL
+        AND EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."LoanPayment" p WHERE p.loan = l.id)
+    `)
+    console.log(`   ✅ finishedDate corregido a último pago: ${q5.rowCount} préstamos`)
 
   } finally {
     client.release()
@@ -1548,7 +2190,22 @@ async function main() {
   console.log(`   Source: ${maskUrl(SOURCE_DB_URL)} (${SOURCE_SCHEMA})`)
   console.log(`   Target: ${SAME_DATABASE ? '(misma DB)' : maskUrl(TARGET_DB_URL)} (${TARGET_SCHEMA})`)
   console.log(`   Mode:   ${SAME_DATABASE ? '⚡ Same-DB (INSERT...SELECT)' : '🌐 Cross-DB (fetch+insert)'}`)
+  if (EXPORT_AFTER || EXPORT_ONLY) {
+    console.log(`   Export: ${DUMP_FILE}`)
+  }
   console.log('')
+
+  // Handle --export-only: just export the target DB (no migration)
+  if (EXPORT_ONLY) {
+    const exportDbUrl = TARGET_DB_URL || SOURCE_DB_URL
+    if (!exportDbUrl) {
+      console.error('   ❌ No hay DATABASE_URL configurada para exportar')
+      process.exit(1)
+    }
+    await exportDatabaseDump(exportDbUrl, TARGET_SCHEMA, DUMP_FILE)
+    console.log('\n✅ Export completado!\n')
+    return
+  }
 
   try {
     await sourcePool.query('SELECT 1')
@@ -1587,18 +2244,29 @@ async function main() {
 
   console.log('📋 Migrando tablas principales...\n')
   for (const tableName of MIGRATION_ORDER) {
-    const result = await migrateTable(tableName)
-    results.push(result)
-    console.log(result.success
-      ? (result.error ? `\r   ${tableName}... ⚠️  ${result.error}` : `\r   ${tableName}... ✅ ${result.sourceCount} → ${result.targetCount}`)
-      : `\r   ${tableName}... ❌ ${result.error}`)
+    try {
+      // Wrap with retry logic for connection errors
+      const result = await withRetry(() => migrateTable(tableName), tableName, 3)
+      results.push(result)
+      console.log(result.success
+        ? (result.error ? `\r   ${tableName}... ⚠️  ${result.error}` : `\r   ${tableName}... ✅ ${result.sourceCount} → ${result.targetCount}`)
+        : `\r   ${tableName}... ❌ ${result.error}`)
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err)
+      results.push({ table: tableName, sourceCount: 0, targetCount: 0, success: false, error: errorMsg })
+      console.log(`\r   ${tableName}... ❌ ${errorMsg}`)
+    }
   }
 
   console.log('\n📋 Migrando relaciones M:M...\n')
 
-  const empRoutes = await migrateEmployeeRoutes()
-  results.push(empRoutes)
-  console.log(`   Employee Routes: ${empRoutes.success ? '✅' : '❌'} → ${empRoutes.targetCount}`)
+  try {
+    const empRoutes = await withRetry(() => migrateEmployeeRoutes(), 'EmployeeRoutes', 3)
+    results.push(empRoutes)
+    console.log(`   Employee Routes: ${empRoutes.success ? '✅' : '❌'} → ${empRoutes.targetCount}`)
+  } catch (err) {
+    console.log(`   Employee Routes: ❌ ${err instanceof Error ? err.message : String(err)}`)
+  }
 
   const junctionTables = [
     ['_Loan_collaterals', '_LoanCollaterals'],
@@ -1608,19 +2276,29 @@ async function main() {
   ]
 
   for (const [src, tgt] of junctionTables) {
-    const result = await migrateJunctionTable(src, tgt)
-    results.push(result)
-    console.log(`   ${src}: ${result.success ? '✅' : '❌'} ${result.sourceCount} → ${result.targetCount}`)
+    try {
+      const result = await withRetry(() => migrateJunctionTable(src, tgt), src, 3)
+      results.push(result)
+      console.log(`   ${src}: ${result.success ? '✅' : '❌'} ${result.sourceCount} → ${result.targetCount}`)
+    } catch (err) {
+      console.log(`   ${src}: ❌ ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   // Step 1: Convert Transaction → AccountEntry
-  await convertTransactionsToEntries()
+  await withRetry(() => convertTransactionsToEntries(), 'TransactionsToEntries', 3)
 
   // Step 2: Balance reconciliation - create BALANCE_ADJUSTMENT entries to match Account.amount
-  await reconcileBalances()
+  await withRetry(() => reconcileBalances(), 'ReconcileBalances', 3)
 
-  // Step 3: Fix loans with NULL snapshotRouteId - assign from lead's route
-  await fixNullSnapshotRouteIds()
+  // Step 3: Populate LocationRouteHistory for historical route lookups
+  await withRetry(() => populateLocationRouteHistory(), 'PopulateLocationRouteHistory', 3)
+
+  // Step 4: Backfill snapshotLeadId in AccountEntry for lead-based filtering
+  await withRetry(() => backfillSnapshotLeadId(), 'BackfillSnapshotLeadId', 3)
+
+  // Step 5: Fix loan status data (RENOVATED → FINISHED, set dates)
+  await withRetry(() => fixLoanStatusData(), 'FixLoanStatusData', 3)
 
   console.log('\n' + '='.repeat(60))
   console.log('📊 RESUMEN')
@@ -1641,6 +2319,24 @@ async function main() {
   await sourcePool.end()
   if (!SAME_DATABASE) await targetPool.end()
   console.log('\n✅ Migración completada!\n')
+
+  // Export dump after migration if --export flag is set
+  if (EXPORT_AFTER || UPLOAD_TO_REMOTE) {
+    const exportDbUrl = TARGET_DB_URL || SOURCE_DB_URL
+    if (exportDbUrl) {
+      await exportDatabaseDump(exportDbUrl, TARGET_SCHEMA, DUMP_FILE)
+    }
+  }
+
+  // Upload dump to remote if --upload flag is set
+  if (UPLOAD_TO_REMOTE) {
+    if (!REMOTE_DB_URL) {
+      console.error('\n❌ REMOTE_DATABASE_URL no está configurada en .env')
+      process.exit(1)
+    }
+    await restoreDumpToRemote(REMOTE_DB_URL, DUMP_FILE)
+    console.log('\n✅ Sincronización completa: prod → local → remote\n')
+  }
 }
 
 main().catch(console.error)

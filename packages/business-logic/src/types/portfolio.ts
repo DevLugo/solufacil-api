@@ -83,10 +83,28 @@ export interface LoanForPortfolio {
   cleanupDate?: Date | null
   /** ID del préstamo anterior (null si es primer préstamo) */
   previousLoan: string | null
+  /**
+   * Fecha en que el préstamo anterior terminó (finishedDate del previousLoan).
+   * Se usa para distinguir renovación vs reintegro:
+   * - Renovación: terminó en la MISMA semana que se firmó este préstamo
+   * - Reintegro: terminó en una semana DIFERENTE
+   */
+  previousLoanFinishedDate?: Date | null
   /** Status del préstamo (usado como fallback para renovaciones) */
   status?: string
+  /**
+   * Indica si el préstamo fue renovado (calculado desde EXISTS en la query).
+   * Más confiable que renewedDate porque no depende de datos migrados.
+   */
+  wasRenewed?: boolean
   /** Monto solicitado (para calcular deuda total) */
   requestedAmount?: number
+  /**
+   * Monto físicamente entregado al cliente.
+   * Si amountGived < requestedAmount, significa que hubo deuda pendiente del
+   * préstamo anterior que se descontó → es una renovación verdadera.
+   */
+  amountGived?: number
   /** Tasa de interés del loantype (para calcular deuda total) */
   rate?: number
   /** Total pagado hasta la fecha (para calcular monto pendiente real) */
@@ -142,9 +160,15 @@ export interface ClientBalanceResult {
   nuevos: number
   /** Clientes que terminaron sin renovar */
   terminadosSinRenovar: number
-  /** Clientes que renovaron */
+  /** Clientes que renovaron (préstamo anterior tenía deuda pendiente) */
   renovados: number
-  /** Balance neto (nuevos - terminadosSinRenovar) */
+  /**
+   * Reintegros: Clientes que regresan después de pagar completamente su préstamo anterior.
+   * previousLoan !== null AND amountGived === requestedAmount
+   * (No se descontó deuda del préstamo anterior)
+   */
+  reintegros: number
+  /** Balance neto (nuevos + reintegros - terminadosSinRenovar) */
   balance: number
   /** Tendencia del balance */
   trend: Trend

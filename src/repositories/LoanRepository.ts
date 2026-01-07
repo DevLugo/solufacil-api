@@ -109,41 +109,22 @@ export class LoanRepository {
     }
 
     if (options?.routeId) {
-      // Get lead IDs that belong to this route first
-      const leadsInRoute = await this.prisma.employee.findMany({
-        where: {
+      // Filter by lead's current routes
+      const routeCondition: Prisma.LoanWhereInput = {
+        leadRelation: {
           routes: {
             some: { id: options.routeId },
           },
         },
-        select: { id: true },
-      })
-      const leadIdsInRoute = leadsInRoute.map((e) => e.id)
-
-      // Handle both cases:
-      // 1. snapshotRouteId matches the given routeId (older loans with snapshot)
-      // 2. snapshotRouteId is empty/null AND lead is in the route (newer loans)
-      const routeConditions: Prisma.LoanWhereInput[] = [
-        { snapshotRouteId: options.routeId },
-        // Null snapshotRouteId but lead belongs to route
-        {
-          snapshotRouteId: null,
-          lead: { in: leadIdsInRoute },
-        },
-        // Empty string snapshotRouteId but lead belongs to route
-        {
-          snapshotRouteId: '',
-          lead: { in: leadIdsInRoute },
-        },
-      ]
+      }
 
       // If there are already OR conditions (from status), wrap both in AND
       if (where.OR && where.OR.length > 0) {
         const existingOr = where.OR
         delete where.OR
-        where.AND = [{ OR: existingOr }, { OR: routeConditions }]
+        where.AND = [{ OR: existingOr }, routeCondition]
       } else {
-        where.OR = routeConditions
+        Object.assign(where, routeCondition)
       }
     }
 
@@ -258,8 +239,6 @@ export class LoanRepository {
     previousLoan?: string
     snapshotLeadId?: string
     snapshotLeadAssignedAt?: Date
-    snapshotRouteId?: string
-    snapshotRouteName?: string
   }) {
     return this.prisma.loan.create({
       data: {
@@ -279,8 +258,6 @@ export class LoanRepository {
         previousLoan: data.previousLoan,
         snapshotLeadId: data.snapshotLeadId,
         snapshotLeadAssignedAt: data.snapshotLeadAssignedAt,
-        snapshotRouteId: data.snapshotRouteId,
-        snapshotRouteName: data.snapshotRouteName,
         collaterals: data.collateralIds
           ? { connect: data.collateralIds.map((id) => ({ id })) }
           : undefined,
@@ -361,7 +338,7 @@ export class LoanRepository {
     return this.prisma.loan.findMany({
       where: {
         badDebtDate: { not: null },
-        ...(routeId ? { snapshotRouteId: routeId } : {}),
+        ...(routeId ? { leadRelation: { routes: { some: { id: routeId } } } } : {}),
       },
       include: {
         borrowerRelation: {

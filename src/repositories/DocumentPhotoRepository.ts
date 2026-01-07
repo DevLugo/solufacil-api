@@ -152,7 +152,11 @@ export class DocumentPhotoRepository {
         ...(options?.routeId
           ? {
               loanRelation: {
-                snapshotRouteId: options.routeId,
+                leadRelation: {
+                  routes: {
+                    some: { id: options.routeId },
+                  },
+                },
               },
             }
           : {}),

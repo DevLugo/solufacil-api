@@ -60,7 +60,6 @@ export interface CreateEntryInput {
   profitAmount?: Decimal | number | string
   returnToCapital?: Decimal | number | string
   snapshotLeadId?: string
-  snapshotRouteId?: string
 }
 
 export interface ReconciliationResult {
@@ -134,7 +133,6 @@ export class BalanceService {
         profitAmount: input.profitAmount ? new Decimal(input.profitAmount.toString()) : undefined,
         returnToCapital: input.returnToCapital ? new Decimal(input.returnToCapital.toString()) : undefined,
         snapshotLeadId: input.snapshotLeadId || '',
-        snapshotRouteId: input.snapshotRouteId || '',
       },
     })
 
@@ -162,7 +160,6 @@ export class BalanceService {
       entryDate?: Date
       description?: string
       snapshotLeadId?: string
-      snapshotRouteId?: string
       leadPaymentReceivedId?: string
     },
     tx?: PrismaTransactionClient
@@ -181,7 +178,6 @@ export class BalanceService {
         description: input.description,
         destinationAccountId: input.destinationAccountId,
         snapshotLeadId: input.snapshotLeadId,
-        snapshotRouteId: input.snapshotRouteId,
         leadPaymentReceivedId: input.leadPaymentReceivedId,
       },
       client as PrismaTransactionClient
@@ -198,7 +194,6 @@ export class BalanceService {
         description: input.description,
         destinationAccountId: input.sourceAccountId, // Link back to source
         snapshotLeadId: input.snapshotLeadId,
-        snapshotRouteId: input.snapshotRouteId,
         leadPaymentReceivedId: input.leadPaymentReceivedId,
       },
       client as PrismaTransactionClient
@@ -247,7 +242,6 @@ export class BalanceService {
         leadPaymentReceivedId: original.leadPaymentReceivedId || undefined,
         destinationAccountId: original.destinationAccountId || undefined,
         snapshotLeadId: original.snapshotLeadId,
-        snapshotRouteId: original.snapshotRouteId,
       },
       client as PrismaTransactionClient
     )
@@ -511,13 +505,20 @@ export class BalanceService {
 
   /**
    * Get entries by route for reporting.
+   * Filters by loan's lead current routes.
    */
   async getEntriesByRoute(
     routeId: string,
     options: { from?: Date; to?: Date; sourceType?: SourceType | SourceType[] } = {}
   ): Promise<AccountEntry[]> {
     const where: Prisma.AccountEntryWhereInput = {
-      snapshotRouteId: routeId,
+      loan: {
+        leadRelation: {
+          routes: {
+            some: { id: routeId },
+          },
+        },
+      },
     }
 
     if (options.from || options.to) {
@@ -552,7 +553,15 @@ export class BalanceService {
     const where: Prisma.AccountEntryWhereInput = {}
 
     if (options.accountId) where.accountId = options.accountId
-    if (options.routeId) where.snapshotRouteId = options.routeId
+    if (options.routeId) {
+      where.loan = {
+        leadRelation: {
+          routes: {
+            some: { id: options.routeId },
+          },
+        },
+      }
+    }
 
     if (options.from || options.to) {
       where.entryDate = {}

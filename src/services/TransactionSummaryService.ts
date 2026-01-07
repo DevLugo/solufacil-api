@@ -33,6 +33,8 @@ const SOURCE_TYPE_LABELS: Record<SourceType, string> = {
   // Ingresos especiales
   MONEY_INVESTMENT: 'Inversión',
   MULTA: 'Multa',
+  // CAPEX (Capital expenditure)
+  ASSET_ACQUISITION: 'Adquisición de activos',
 }
 
 /**
@@ -148,9 +150,16 @@ export class TransactionSummaryService {
     endDate: Date
   ): Promise<TransactionSummaryResponse> {
     // Fetch all AccountEntry records for the route in the date range
+    // Filter by loan's lead current routes
     const entries = await this.prisma.accountEntry.findMany({
       where: {
-        snapshotRouteId: routeId,
+        loan: {
+          leadRelation: {
+            routes: {
+              some: { id: routeId },
+            },
+          },
+        },
         entryDate: {
           gte: startDate,
           lte: endDate,

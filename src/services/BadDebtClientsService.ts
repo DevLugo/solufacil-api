@@ -86,7 +86,6 @@ const LOAN_INCLUDE = {
     take: 1,
   },
   excludedByCleanupRelation: true,
-  snapshotRoute: true,
 }
 
 export class BadDebtClientsService {
@@ -106,21 +105,36 @@ export class BadDebtClientsService {
       ],
     }
 
-    // Filter by route if provided
+    // Filter by route if provided (via lead's current routes)
     if (routeId) {
-      whereClause.snapshotRouteId = routeId
+      whereClause.leadRelation = {
+        routes: {
+          some: { id: routeId },
+        },
+      }
     }
 
     // Filter by location if provided
     if (locationId) {
-      whereClause.leadRelation = {
-        personalDataRelation: {
+      // If we already have leadRelation from route filter, extend it
+      if (whereClause.leadRelation) {
+        whereClause.leadRelation.personalDataRelation = {
           addresses: {
             some: {
               location: locationId,
             },
           },
-        },
+        }
+      } else {
+        whereClause.leadRelation = {
+          personalDataRelation: {
+            addresses: {
+              some: {
+                location: locationId,
+              },
+            },
+          },
+        }
       }
     }
 
@@ -155,7 +169,7 @@ export class BadDebtClientsService {
       // Get location from lead's assignment
       const locationName = leadLocation?.name || null
       const municipalityName = leadLocation?.municipalityRelation?.name || null
-      const routeName = loan.snapshotRoute?.name || leadLocation?.routeRelation?.name || null
+      const routeName = leadLocation?.routeRelation?.name || null
 
       // Get lead phone
       const leadPhone = leadPersonalData?.phones?.[0]?.number || null

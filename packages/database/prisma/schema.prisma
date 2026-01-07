@@ -198,9 +198,6 @@ model Loan {
 
   snapshotLeadId         String?
   snapshotLeadAssignedAt DateTime?
-  snapshotRouteId        String?
-  snapshotRoute          Route?   @relation("LoanSnapshotRoute", fields: [snapshotRouteId], references: [id])
-  snapshotRouteName      String    @default("")
 
   previousLoan String? @unique
   previousLoanRelation Loan? @relation("LoanRenewal", fields: [previousLoan], references: [id])
@@ -226,8 +223,8 @@ model Loan {
 enum LoanStatus {
   ACTIVE
   FINISHED
-  RENOVATED
   CANCELLED
+  // RENOVATED fue eliminado - ahora se determina por renewedDate IS NOT NULL
 }
 
 model LoanPayment {
@@ -337,7 +334,6 @@ model Transaction {
   incomeSource    String?
   expenseSource   String?
   snapshotLeadId  String @default("")
-  snapshotRouteId String @default("")
   expenseGroupId  String?
 
   profitAmount    Decimal? @db.Decimal(10, 2) @default(0)
@@ -435,7 +431,6 @@ model AccountEntry {
 
   // Snapshots for historical reports
   snapshotLeadId  String @default("")
-  snapshotRouteId String @default("")
 
   // Timestamps
   entryDate DateTime @default(now())
@@ -459,7 +454,6 @@ model AccountEntry {
   @@index([accountId])
   @@index([entryDate])
   @@index([sourceType])
-  @@index([snapshotRouteId, entryDate])
   @@index([syncId])
   @@index([loanId])
   @@index([loanPaymentId])
@@ -501,6 +495,9 @@ enum SourceType {
   BANK_EXPENSE      // Gastos bancarios
   OTHER_EXPENSE     // Otros gastos (OTRO)
 
+  // Capital expenditure (NOT counted in operational expenses)
+  ASSET_ACQUISITION // Adquisición de activos (vehículos, equipos) - NO afecta ganancia operativa
+
   // Special
   FALCO_LOSS
   FALCO_COMPENSATORY
@@ -529,7 +526,9 @@ model Route {
   locations         Location[]
   portfolioCleanups PortfolioCleanup[]
   reportConfigs     ReportConfig[]     @relation("ReportConfigRoutes")
-  snapshotLoans     Loan[]             @relation("LoanSnapshotRoute")
+
+  // Historial de localidades asignadas a esta ruta
+  locationHistory LocationRouteHistory[]
 }
 
 model Location {
@@ -543,6 +542,9 @@ model Location {
   routeRelation Route? @relation(fields: [route], references: [id])
 
   addresses Address[]
+
+  // Historial de asignaciones a rutas (para reportes por fecha)
+  routeHistory LocationRouteHistory[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -574,6 +576,28 @@ model State {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// Historial de asignaciones de localidades a rutas
+// Permite rastrear a qué ruta pertenece cada localidad en cada fecha
+model LocationRouteHistory {
+  id String @id @default(cuid())
+
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+
+  routeId String
+  route   Route  @relation(fields: [routeId], references: [id])
+
+  startDate DateTime
+  endDate   DateTime? // null = asignación actual
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([locationId, startDate]) // Una localidad no puede tener dos asignaciones iniciando el mismo día
+  @@index([locationId, startDate, endDate])
+  @@index([routeId, startDate, endDate])
 }
 
 // ========================================

@@ -136,7 +136,7 @@ This prevents financial inconsistencies in reports.
 | totalDebtAcquired | Decimal | Total debt |
 | pendingAmountStored | Decimal | Remaining debt |
 | expectedWeeklyPayment | Decimal | Weekly payment |
-| status | Enum | ACTIVE, FINISHED, RENOVATED, BAD_DEBT |
+| status | Enum | ACTIVE, FINISHED, CANCELLED (renovated = renewedDate IS NOT NULL) |
 | previousLoan | UUID? | FK to previous loan (renewals) |
 | badDebtDate | DateTime? | When marked as bad debt |
 
@@ -354,7 +354,7 @@ class LoanEngine {
 ### Sync Strategy
 1. **Loan Creation**: Create locally, sync when online
 2. **Payments**: Create locally, update loan.pendingAmountStored locally
-3. **Renewals**: Create new loan locally, update old loan status to RENOVATED
+3. **Renewals**: Create new loan locally, update old loan status to FINISHED and set renewedDate
 
 ### Payment Processing Flow (Offline-First)
 

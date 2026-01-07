@@ -17,20 +17,19 @@ Número de préstamos activos al final del período (mes).
 ```typescript
 // Usa isActiveLoan() - verifica estado actual del préstamo
 isActiveLoan(loan) =
-  loan.status !== 'RENOVATED' &&  // ✅ IMPORTANTE: Préstamos renovados NO cuentan
+  loan.renewedDate === null &&  // ✅ IMPORTANTE: Préstamos renovados NO cuentan
   loan.pendingAmountStored > 0 &&
   loan.badDebtDate === null &&
   loan.excludedByCleanup === null
 ```
 
-> ⚠️ **IMPORTANTE**: Un préstamo con `status = 'RENOVATED'` NO se cuenta como activo,
+> ⚠️ **IMPORTANTE**: Un préstamo con `renewedDate` establecido NO se cuenta como activo,
 > aunque tenga `pendingAmountStored > 0`. El préstamo que lo reemplazó es el que cuenta.
 
 **Para meses PASADOS:**
 ```typescript
 // Usa wasLoanActiveInWeek() - verifica estado en la última semana del mes
 wasLoanActiveInWeek(loan, lastCompletedWeek) =
-  loan.status !== 'RENOVATED' &&  // ✅ IMPORTANTE: Préstamos renovados NO cuentan
   loan.signDate <= week.end &&
   (loan.finishedDate === null || loan.finishedDate >= week.start) &&
   (loan.renewedDate === null || loan.renewedDate >= week.start) &&
@@ -129,13 +128,17 @@ isNewClientInPeriod(loan, periodStart, periodEnd) =
 isFinishedWithoutRenewal(loan, periodStart, periodEnd) =
   loan.finishedDate >= periodStart &&
   loan.finishedDate <= periodEnd &&
-  loan.renewedDate === null &&
-  loan.status !== 'RENOVATED'
+  loan.renewedDate === null  // Si tiene renewedDate, fue renovado
 
-// Renovación
+// Renovación VERDADERA
+// Un préstamo ES una renovación si:
+// 1. Tiene previousLoan (referencia a un préstamo anterior)
+// 2. El préstamo anterior TENÍA DEUDA pendiente (amountGived < requestedAmount)
+// 3. Se firmó en el período
 isRenewalInPeriod(loan, periodStart, periodEnd) =
-  (loan.renewedDate >= periodStart && loan.renewedDate <= periodEnd) ||
-  (loan.status === 'RENOVATED' && loan.finishedDate in period)
+  loan.previousLoan !== null &&
+  loan.signDate >= periodStart && loan.signDate <= periodEnd &&
+  loan.amountGived < loan.requestedAmount  // ← Había deuda pendiente
 ```
 
 ### Archivos Relevantes
@@ -240,8 +243,8 @@ OR: [
 | `excludedByCleanup` | Préstamo excluído por limpieza de datos |
 | `previousLoan` | ID del préstamo anterior (null = cliente nuevo) |
 | `signDate` | Fecha de firma del préstamo |
-| `status` | Estado del préstamo: 'ACTIVE', 'FINISHED', 'RENOVATED', etc. |
-| `RENOVATED` | ⚠️ Status que indica que el préstamo fue reemplazado por otro. **NO cuenta como activo** |
+| `status` | Estado del préstamo: 'ACTIVE', 'FINISHED', 'CANCELLED' |
+| `renewedDate` | ⚠️ Si está establecido, indica que el préstamo fue renovado (reemplazado por otro). **NO cuenta como activo** |
 
 ---
 

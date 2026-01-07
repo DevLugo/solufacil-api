@@ -39,7 +39,7 @@ import type {
   Trend,
   LoanRenewalInfo,
 } from '../types/portfolio'
-import { isDateInWeek } from './active-week'
+import { isDateInWeek, getWeekStart } from './active-week'
 
 /**
  * =============================================================================
@@ -380,7 +380,10 @@ export function isNewClient(loan: LoanForPortfolio): boolean {
  *
  * A loan finished without renewal if:
  * - finishedDate is in the period AND
- * - renewedDate is null
+ * - was NOT renewed (no loan points to it as previousLoan)
+ *
+ * Uses loan.wasRenewed if available (calculated from EXISTS query),
+ * falls back to renewedDate for backwards compatibility.
  *
  * @param loan - Loan to check
  * @param periodStart - Start of the period to check
@@ -399,32 +402,116 @@ export function isFinishedWithoutRenewal(
   const finishedInPeriod =
     loan.finishedDate >= periodStart && loan.finishedDate <= periodEnd
 
-  // Check renewedDate to determine if it was renewed
-  const wasRenewed = loan.renewedDate !== null
+  // Use wasRenewed if available (from query), fallback to renewedDate
+  const wasRenewed =
+    loan.wasRenewed !== undefined ? loan.wasRenewed : loan.renewedDate !== null
 
   return finishedInPeriod && !wasRenewed
 }
 
 /**
- * Checks if a loan represents a renewal in the period
+ * Checks if a loan is a RENOVATION for MONTHLY reports
  *
- * Uses renewedDate to determine if it was renewed in the period.
+ * A RENOVATION (monthly) is when:
+ * 1. The loan has previousLoan (references a previous loan)
+ * 2. The previous loan finished DURING the same period (>= periodStart)
+ * 3. The loan was signed in the period
  *
- * @param loan - Loan to check
+ * This is different from WEEKLY logic (same week) because:
+ * - Monthly KPI measures clients who were ALREADY inactive before the month
+ * - If previous loan finished IN the month, it's a neutral renovation
+ * - If previous loan finished BEFORE the month, it's a reintegro (adds to balance)
+ *
+ * IMPORTANT: Renovations are NEUTRAL for client balance:
+ * - Previous loan exits (-1)
+ * - New loan enters (+1)
+ * - Net: 0
+ *
+ * @param loan - Loan to check (the NEW loan that may be a renovation)
  * @param periodStart - Start of the period to check
  * @param periodEnd - End of the period to check
- * @returns true if loan was renewed in the period
+ * @returns true if loan is a renovation signed in the period
  */
 export function isRenewalInPeriod(
   loan: LoanForPortfolio,
   periodStart: Date,
   periodEnd: Date
 ): boolean {
-  if (loan.renewedDate === null) {
+  // Must have previousLoan to be a potential renovation
+  if (loan.previousLoan === null) {
     return false
   }
 
-  return loan.renewedDate >= periodStart && loan.renewedDate <= periodEnd
+  // Must be signed in the period
+  if (loan.signDate < periodStart || loan.signDate > periodEnd) {
+    return false
+  }
+
+  // Need previousLoanFinishedDate to determine if it's a renovation
+  if (loan.previousLoanFinishedDate === undefined || loan.previousLoanFinishedDate === null) {
+    // Fallback: if we don't have the date, assume it's a renovation
+    // (maintains backwards compatibility)
+    return true
+  }
+
+  // For MONTHLY reports: renovation if previous loan finished DURING the period
+  // (client was still active at the start of the period)
+  const prevFinishedTime = new Date(loan.previousLoanFinishedDate).getTime()
+  const periodStartTime = new Date(periodStart).getTime()
+  return prevFinishedTime >= periodStartTime
+}
+
+/**
+ * Checks if a loan is a REINTEGRO for MONTHLY reports
+ *
+ * A REINTEGRO (monthly) is when:
+ * 1. The loan has previousLoan (references a previous loan)
+ * 2. The previous loan finished BEFORE the period (< periodStart)
+ * 3. The loan was signed in the period
+ *
+ * This means the client was INACTIVE at the start of the month (had no active loan)
+ * and returned during the month to take a new loan.
+ *
+ * IMPORTANT: Reintegros ADD to client balance because:
+ * - Client was NOT counted as active at period start
+ * - Client IS counted as active at period end
+ * - Net: +1
+ *
+ * This is different from WEEKLY logic (different week) because monthly KPI
+ * measures clients who were already inactive BEFORE the month started.
+ *
+ * @param loan - Loan to check (the NEW loan)
+ * @param periodStart - Start of the period to check
+ * @param periodEnd - End of the period to check
+ * @returns true if loan is a reintegro signed in the period
+ */
+export function isReintegroInPeriod(
+  loan: LoanForPortfolio,
+  periodStart: Date,
+  periodEnd: Date
+): boolean {
+  // Must have previousLoan (returning client)
+  if (loan.previousLoan === null) {
+    return false
+  }
+
+  // Must be signed in the period
+  if (loan.signDate < periodStart || loan.signDate > periodEnd) {
+    return false
+  }
+
+  // Need previousLoanFinishedDate to determine if it's a reintegro
+  if (loan.previousLoanFinishedDate === undefined || loan.previousLoanFinishedDate === null) {
+    // If we don't have the date, we can't determine if it's a reintegro
+    // Default to false (safer to undercount reintegros than overcount)
+    return false
+  }
+
+  // For MONTHLY reports: reintegro if previous loan finished BEFORE the period
+  // (client was NOT active at the start of the period)
+  const prevFinishedTime = new Date(loan.previousLoanFinishedDate).getTime()
+  const periodStartTime = new Date(periodStart).getTime()
+  return prevFinishedTime < periodStartTime
 }
 
 /**
@@ -463,7 +550,20 @@ export function calculateTrend(current: number, previous: number): Trend {
 /**
  * Calculates the client balance for a period
  *
- * Balance = New Clients - Clients who finished without renewing
+ * Balance = Nuevos + Reintegros - TerminadosSinRenovar
+ *
+ * Where:
+ * - Nuevos: First-time clients (previousLoan === null)
+ * - Reintegros: Clients returning after paying off previous loan (no debt carried over)
+ * - Renovados: Clients who renewed WITH pending debt (debt carried over)
+ * - TerminadosSinRenovar: Clients who finished and didn't come back
+ *
+ * Renovations (with debt) are NEUTRAL for the count:
+ * - Old loan changes to FINISHED with renewedDate set (-1 active)
+ * - New loan is created (+1 active)
+ * - Net result: 0
+ *
+ * Reintegros ADD to the count (client was inactive, now active again)
  *
  * @param loans - All loans to analyze
  * @param periodStart - Start of the period
@@ -477,7 +577,8 @@ export function calculateTrend(current: number, previous: number): Trend {
  * //   nuevos: 15,
  * //   terminadosSinRenovar: 8,
  * //   renovados: 12,
- * //   balance: 7,  // 15 - 8
+ * //   reintegros: 5,
+ * //   balance: 12,  // 15 + 5 - 8
  * //   trend: 'UP'
  * // }
  */
@@ -490,6 +591,7 @@ export function calculateClientBalance(
   let nuevos = 0
   let terminadosSinRenovar = 0
   let renovados = 0
+  let reintegros = 0
 
   for (const loan of loans) {
     if (isNewClientInPeriod(loan, periodStart, periodEnd)) {
@@ -503,9 +605,15 @@ export function calculateClientBalance(
     if (isRenewalInPeriod(loan, periodStart, periodEnd)) {
       renovados++
     }
+
+    if (isReintegroInPeriod(loan, periodStart, periodEnd)) {
+      reintegros++
+    }
   }
 
-  const balance = nuevos - terminadosSinRenovar
+  // Balance formula: nuevos + reintegros - terminadosSinRenovar
+  // Renovaciones son neutrales (no afectan el balance)
+  const balance = nuevos + reintegros - terminadosSinRenovar
   const trend =
     previousBalance !== undefined
       ? calculateTrend(balance, previousBalance)
@@ -515,6 +623,7 @@ export function calculateClientBalance(
     nuevos,
     terminadosSinRenovar,
     renovados,
+    reintegros,
     balance,
     trend,
   }
@@ -722,6 +831,66 @@ export function wasLoanActiveAtDate(
 }
 
 /**
+ * =============================================================================
+ * isLoanActiveAtDate - VERSIÓN SIMPLIFICADA
+ * =============================================================================
+ *
+ * Determina si un préstamo está activo en una fecha específica.
+ *
+ * Un préstamo está activo si:
+ * 1. Fue firmado antes o en la fecha (signDate <= date)
+ * 2. No ha sido finalizado antes de la fecha (finishedDate es null o > date)
+ * 3. No ha sido renovado antes de la fecha (renewedDate es null o > date)
+ * 4. No está excluido por cleanup (excludedByCleanup es null)
+ *
+ * NOTA: Esta versión confía en que finishedDate siempre se establece
+ * cuando pendingAmountStored llega a 0, por lo que no necesita verificar
+ * el monto pendiente directamente.
+ *
+ * @param loan - Préstamo a evaluar
+ * @param date - Fecha de referencia
+ * @returns true si el préstamo está activo en la fecha dada
+ */
+export function isLoanActiveAtDate(
+  loan: LoanForPortfolio,
+  date: Date
+): boolean {
+  const dateTime = date.getTime()
+
+  // 1. Debe estar firmado antes o en la fecha
+  if (!loan.signDate) {
+    return false
+  }
+  const signDateTime = new Date(loan.signDate).getTime()
+  if (signDateTime > dateTime) {
+    return false
+  }
+
+  // 2. No debe estar finalizado antes de la fecha
+  if (loan.finishedDate !== null) {
+    const finishedDateTime = new Date(loan.finishedDate).getTime()
+    if (finishedDateTime <= dateTime) {
+      return false
+    }
+  }
+
+  // 3. No debe estar renovado antes de la fecha
+  if (loan.renewedDate !== null) {
+    const renewedDateTime = new Date(loan.renewedDate).getTime()
+    if (renewedDateTime <= dateTime) {
+      return false
+    }
+  }
+
+  // 4. No debe estar excluido por cleanup
+  if (loan.excludedByCleanup !== null) {
+    return false
+  }
+
+  return true
+}
+
+/**
  * Counts loans that were active at a specific date.
  * Used to calculate clientesActivosInicio for a period.
  *
@@ -731,16 +900,11 @@ export function wasLoanActiveAtDate(
  */
 export function countActiveLoansAtDate(
   loans: LoanForPortfolio[],
-  date: Date,
-  renewalMap?: Map<string, LoanRenewalInfo[]>
+  date: Date
 ): number {
-  // Construir mapa de renovaciones si no se proporcionó
-  const effectiveRenewalMap = renewalMap || buildRenewalMap(loans)
-
   let count = 0
   for (const loan of loans) {
-    // IMPORTANTE: Usar isLoanConsideredOnDate igual que el original
-    if (isLoanConsideredOnDate(loan, date, effectiveRenewalMap)) {
+    if (isLoanActiveAtDate(loan, date)) {
       count++
     }
   }
@@ -750,35 +914,30 @@ export function countActiveLoansAtDate(
 /**
  * Counts active clients and clients in CV from a list of loans.
  *
- * IMPORTANTE: Esta función usa la lógica ORIGINAL de Keystone:
- * - Para semanas completadas (isHistorical=true): usa isLoanConsideredOnDate con weekEnd
- * - Para la semana actual (isHistorical=false): usa isLoanConsideredOnDate con fecha actual
+ * Usa isLoanActiveAtDate (versión simplificada) que confía en:
+ * - finishedDate se establece cuando pendingAmountStored llega a 0
+ * - renewedDate se establece cuando el préstamo es renovado
  *
  * @param loans - Préstamos a analizar
  * @param paymentsMap - Mapa de pagos por préstamo
  * @param activeWeek - Rango de la semana activa
  * @param isHistorical - Si es true, usa weekEnd como fecha de referencia
- * @param renewalMap - Mapa de renovaciones (opcional, se construye si no se proporciona)
  */
 export function countClientsStatus(
   loans: LoanForPortfolio[],
   paymentsMap: Map<string, PaymentForCV[]>,
   activeWeek: WeekRange,
-  isHistorical = false,
-  renewalMap?: Map<string, LoanRenewalInfo[]>
+  isHistorical = false
 ): { totalActivos: number; enCV: number; alCorriente: number } {
   let totalActivos = 0
   let enCV = 0
-
-  // Construir mapa de renovaciones si no se proporcionó
-  const effectiveRenewalMap = renewalMap || buildRenewalMap(loans)
 
   // Fecha de referencia: weekEnd para histórico, ahora para actual
   const referenceDate = isHistorical ? activeWeek.end : new Date()
 
   for (const loan of loans) {
-    // Usar la lógica ORIGINAL de Keystone
-    const isActive = isLoanConsideredOnDate(loan, referenceDate, effectiveRenewalMap)
+    // Usar la versión simplificada
+    const isActive = isLoanActiveAtDate(loan, referenceDate)
 
     if (!isActive) {
       continue
@@ -787,14 +946,12 @@ export function countClientsStatus(
     totalActivos++
     const payments = paymentsMap.get(loan.id) || []
 
-    // Calcular contribución de CV usando la lógica de Keystone
-    // Considera sobrepago de semanas anteriores y pagos parciales
+    // Calcular contribución de CV
     const cvContribution = calculateCVContribution(
       loan,
       payments,
       activeWeek,
-      referenceDate,
-      effectiveRenewalMap
+      referenceDate
     )
 
     enCV += cvContribution
@@ -808,7 +965,7 @@ export function countClientsStatus(
 }
 
 /**
- * Calcula la contribución de CV de un préstamo usando la lógica de Keystone.
+ * Calcula la contribución de CV de un préstamo.
  *
  * La lógica considera:
  * - Sobrepago de semanas anteriores que puede cubrir la semana actual
@@ -821,11 +978,10 @@ export function calculateCVContribution(
   loan: LoanForPortfolio,
   payments: PaymentForCV[],
   activeWeek: WeekRange,
-  referenceDate: Date,
-  renewalMap: Map<string, LoanRenewalInfo[]>
+  referenceDate: Date
 ): number {
   // Verificar que está activo en la fecha de referencia
-  if (!isLoanConsideredOnDate(loan, referenceDate, renewalMap)) {
+  if (!isLoanActiveAtDate(loan, referenceDate)) {
     return 0
   }
 

@@ -29,12 +29,19 @@ export const bankIncomeResolvers = {
         const bankAccountIds = bankAccounts.map((a) => a.id)
 
         // Build where conditions for AccountEntry
+        // Filter by loan's lead current routes
         const whereConditions: any = {
           entryDate: {
             gte: new Date(startDate),
             lte: new Date(endDate),
           },
-          snapshotRouteId: { in: routeIds },
+          loan: {
+            leadRelation: {
+              routes: {
+                some: { id: { in: routeIds } },
+              },
+            },
+          },
         }
 
         // Filter by entry type
