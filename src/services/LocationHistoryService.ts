@@ -310,6 +310,38 @@ export class LocationHistoryService {
 
   /**
    * Upsert a historical assignment (for manual corrections or imports)
+   *
+   * SMART BEHAVIOR: Automatically adjusts overlapping assignments by moving
+   * their startDate to the day after the new assignment's endDate.
+   * This works for both:
+   * - Current assignment (endDate = null)
+   * - Historical assignments (endDate != null)
+   *
+   * If an adjustment would make a record invalid (startDate > endDate), that
+   * record is deleted as it's completely contained within the new period.
+   *
+   * Example 1 - Overlaps with current:
+   * - Current: RUTA_CIUDAD from 2020-01-01 to NULL
+   * - New historical: RUTA_1B from 2020-01-01 to 2025-01-01
+   * - Result:
+   *   - RUTA_1B from 2020-01-01 to 2025-01-01 (new)
+   *   - RUTA_CIUDAD from 2025-01-02 to NULL (adjusted)
+   *
+   * Example 2 - Overlaps with historical:
+   * - Existing: RUTA_1B from 2020-01-01 to 2025-01-01
+   * - Existing: RUTA_CIUDAD from 2025-01-02 to NULL
+   * - New historical: RUTA_X from 2020-01-01 to 2024-01-01
+   * - Result:
+   *   - RUTA_X from 2020-01-01 to 2024-01-01 (new)
+   *   - RUTA_1B from 2024-01-02 to 2025-01-01 (adjusted)
+   *   - RUTA_CIUDAD from 2025-01-02 to NULL (unchanged)
+   *
+   * Example 3 - Completely replaces existing:
+   * - Existing: RUTA_OLD from 2022-01-01 to 2022-06-01
+   * - New historical: RUTA_NEW from 2020-01-01 to 2024-01-01
+   * - Result:
+   *   - RUTA_NEW from 2020-01-01 to 2024-01-01 (new)
+   *   - RUTA_OLD is DELETED (would have invalid dates after adjustment)
    */
   async upsertHistoricalAssignment(input: LocationRouteHistoryInput) {
     // Validate location exists
@@ -332,34 +364,71 @@ export class LocationHistoryService {
       })
     }
 
+    // The new assignment MUST have an endDate (it's historical, not current)
+    if (!input.endDate) {
+      throw new GraphQLError('Historical assignments must have an end date', {
+        extensions: { code: 'VALIDATION_ERROR' },
+      })
+    }
+
+    const newEndDate = input.endDate
+
     // Check for overlapping assignments
-    const overlapping = await this.prisma.locationRouteHistory.findFirst({
+    const overlappingAssignments = await this.prisma.locationRouteHistory.findMany({
       where: {
         locationId: input.locationId,
-        startDate: { lte: input.endDate ?? new Date('9999-12-31') },
+        startDate: { lte: newEndDate },
         OR: [
           { endDate: null },
           { endDate: { gte: input.startDate } },
         ],
       },
+      orderBy: { startDate: 'asc' },
     })
 
-    if (overlapping) {
-      throw new GraphQLError('This assignment overlaps with an existing assignment', {
-        extensions: {
-          code: 'VALIDATION_ERROR',
-          overlappingId: overlapping.id,
+    // Calculate the day after the new assignment ends
+    const dayAfterEndDate = new Date(newEndDate)
+    dayAfterEndDate.setDate(dayAfterEndDate.getDate() + 1)
+
+    return this.prisma.$transaction(async (tx) => {
+      // Process each overlapping assignment
+      for (const existing of overlappingAssignments) {
+        // Only adjust if the new assignment's endDate is >= existing's startDate
+        if (newEndDate >= existing.startDate) {
+          if (existing.endDate === null) {
+            // Current assignment: just adjust startDate
+            await tx.locationRouteHistory.update({
+              where: { id: existing.id },
+              data: { startDate: dayAfterEndDate },
+            })
+          } else {
+            // Historical assignment: check if adjustment would be valid
+            // If dayAfterEndDate > existing.endDate, the record would be invalid (startDate > endDate)
+            if (dayAfterEndDate > existing.endDate) {
+              // Delete the record as it's completely contained within the new period
+              await tx.locationRouteHistory.delete({
+                where: { id: existing.id },
+              })
+            } else {
+              // Adjust the startDate
+              await tx.locationRouteHistory.update({
+                where: { id: existing.id },
+                data: { startDate: dayAfterEndDate },
+              })
+            }
+          }
+        }
+      }
+
+      // Create the new historical assignment
+      return tx.locationRouteHistory.create({
+        data: {
+          locationId: input.locationId,
+          routeId: input.routeId,
+          startDate: input.startDate,
+          endDate: input.endDate,
         },
       })
-    }
-
-    return this.prisma.locationRouteHistory.create({
-      data: {
-        locationId: input.locationId,
-        routeId: input.routeId,
-        startDate: input.startDate,
-        endDate: input.endDate,
-      },
     })
   }
 
