@@ -8,6 +8,7 @@ import {
   isNewClient,
   isFinishedWithoutRenewal,
   isRenewalInPeriod,
+  isReintegroInPeriod,
   isNewClientInPeriod,
   calculateTrend,
   calculateClientBalance,
@@ -278,25 +279,141 @@ describe('Portfolio Calculations', () => {
       })
       expect(isFinishedWithoutRenewal(loan, periodStart, periodEnd)).toBe(false)
     })
+
+    // NEW: wasRenewed field takes precedence over renewedDate
+    it('uses wasRenewed field when available (from query)', () => {
+      // Even with renewedDate null, if wasRenewed is true, it was renewed
+      const loan = createLoan({
+        finishedDate: new Date('2024-12-15'),
+        renewedDate: null, // Old field empty (migrated data)
+        wasRenewed: true, // New field from EXISTS query
+      })
+      expect(isFinishedWithoutRenewal(loan, periodStart, periodEnd)).toBe(false)
+    })
+
+    it('returns true when wasRenewed is explicitly false', () => {
+      const loan = createLoan({
+        finishedDate: new Date('2024-12-15'),
+        renewedDate: null,
+        wasRenewed: false,
+      })
+      expect(isFinishedWithoutRenewal(loan, periodStart, periodEnd)).toBe(true)
+    })
   })
 
   describe('isRenewalInPeriod', () => {
     const periodStart = new Date('2024-12-01')
     const periodEnd = new Date('2024-12-31')
 
-    it('returns true when renewed in period', () => {
-      const loan = createLoan({ renewedDate: new Date('2024-12-15') })
+    // TRUE renewal: previousLoan exists AND previous loan had pending debt
+    // (amountGived < requestedAmount means debt was deducted)
+    it('returns true for TRUE renewal (previousLoan + debt deducted)', () => {
+      const loan = createLoan({
+        previousLoan: 'loan-prev',
+        signDate: new Date('2024-12-15'),
+        requestedAmount: 3000,
+        amountGived: 900, // < requestedAmount → debt was deducted
+      })
       expect(isRenewalInPeriod(loan, periodStart, periodEnd)).toBe(true)
     })
 
-    it('returns false when not renewed', () => {
-      const loan = createLoan({ renewedDate: null })
+    it('returns false when no previousLoan (new client)', () => {
+      const loan = createLoan({
+        previousLoan: null,
+        signDate: new Date('2024-12-15'),
+        requestedAmount: 3000,
+        amountGived: 3000,
+      })
       expect(isRenewalInPeriod(loan, periodStart, periodEnd)).toBe(false)
     })
 
-    it('returns false when renewed outside period', () => {
-      const loan = createLoan({ renewedDate: new Date('2024-11-15') })
+    it('returns false when signed outside period', () => {
+      const loan = createLoan({
+        previousLoan: 'loan-prev',
+        signDate: new Date('2024-11-15'),
+        requestedAmount: 3000,
+        amountGived: 900,
+      })
       expect(isRenewalInPeriod(loan, periodStart, periodEnd)).toBe(false)
+    })
+
+    // NOT a renewal: previous loan was already paid off
+    it('returns false when previous loan was paid off (amountGived == requestedAmount)', () => {
+      const loan = createLoan({
+        previousLoan: 'loan-prev',
+        signDate: new Date('2024-12-15'),
+        requestedAmount: 3000,
+        amountGived: 3000, // == requestedAmount → no debt deducted
+      })
+      expect(isRenewalInPeriod(loan, periodStart, periodEnd)).toBe(false)
+    })
+
+    // Fallback: if amounts not available, just check previousLoan
+    it('falls back to previousLoan check if amounts not available', () => {
+      const loan = createLoan({
+        previousLoan: 'loan-prev',
+        signDate: new Date('2024-12-15'),
+        // No requestedAmount or amountGived
+      })
+      expect(isRenewalInPeriod(loan, periodStart, periodEnd)).toBe(true)
+    })
+  })
+
+  describe('isReintegroInPeriod', () => {
+    const periodStart = new Date('2024-12-01')
+    const periodEnd = new Date('2024-12-31')
+
+    // Reintegro: client returning after paying off previous loan completely
+    // (amountGived === requestedAmount means no debt was deducted)
+    it('returns true for reintegro (previousLoan + no debt deducted)', () => {
+      const loan = createLoan({
+        previousLoan: 'loan-prev',
+        signDate: new Date('2024-12-15'),
+        requestedAmount: 3000,
+        amountGived: 3000, // === requestedAmount → no debt deducted
+      })
+      expect(isReintegroInPeriod(loan, periodStart, periodEnd)).toBe(true)
+    })
+
+    it('returns false when no previousLoan (new client, not reintegro)', () => {
+      const loan = createLoan({
+        previousLoan: null,
+        signDate: new Date('2024-12-15'),
+        requestedAmount: 3000,
+        amountGived: 3000,
+      })
+      expect(isReintegroInPeriod(loan, periodStart, periodEnd)).toBe(false)
+    })
+
+    it('returns false when signed outside period', () => {
+      const loan = createLoan({
+        previousLoan: 'loan-prev',
+        signDate: new Date('2024-11-15'),
+        requestedAmount: 3000,
+        amountGived: 3000,
+      })
+      expect(isReintegroInPeriod(loan, periodStart, periodEnd)).toBe(false)
+    })
+
+    // NOT a reintegro: debt was carried over (it's a renewal)
+    it('returns false when debt was deducted (amountGived < requestedAmount)', () => {
+      const loan = createLoan({
+        previousLoan: 'loan-prev',
+        signDate: new Date('2024-12-15'),
+        requestedAmount: 3000,
+        amountGived: 900, // < requestedAmount → debt was deducted, it's a renewal
+      })
+      expect(isReintegroInPeriod(loan, periodStart, periodEnd)).toBe(false)
+    })
+
+    // If amounts not available, default to false (safer to undercount)
+    it('returns false if amounts not available', () => {
+      const loan = createLoan({
+        previousLoan: 'loan-prev',
+        signDate: new Date('2024-12-15'),
+        // No requestedAmount or amountGived
+      })
+      expect(isReintegroInPeriod(loan, periodStart, periodEnd)).toBe(false)
     })
   })
 
@@ -347,9 +464,9 @@ describe('Portfolio Calculations', () => {
     const periodStart = new Date('2024-12-01')
     const periodEnd = new Date('2024-12-31')
 
-    it('calculates balance correctly', () => {
+    it('calculates balance correctly with nuevos, renovados, reintegros and terminados', () => {
       const loans = [
-        // 3 new clients
+        // 3 new clients (previousLoan = null)
         createLoan({ previousLoan: null, signDate: new Date('2024-12-05') }),
         createLoan({ previousLoan: null, signDate: new Date('2024-12-10') }),
         createLoan({ previousLoan: null, signDate: new Date('2024-12-15') }),
@@ -357,10 +474,34 @@ describe('Portfolio Calculations', () => {
         createLoan({
           finishedDate: new Date('2024-12-20'),
           renewedDate: null,
+          wasRenewed: false,
         }),
-        // 2 renewals
-        createLoan({ renewedDate: new Date('2024-12-12') }),
-        createLoan({ renewedDate: new Date('2024-12-18') }),
+        // 2 TRUE renewals (previousLoan + signDate in period + amountGived < requestedAmount)
+        createLoan({
+          previousLoan: 'prev-1',
+          signDate: new Date('2024-12-12'),
+          requestedAmount: 3000,
+          amountGived: 2100, // Less than requested = debt was carried over
+        }),
+        createLoan({
+          previousLoan: 'prev-2',
+          signDate: new Date('2024-12-18'),
+          requestedAmount: 4000,
+          amountGived: 3500,
+        }),
+        // 2 reintegros (previousLoan + signDate in period + amountGived === requestedAmount)
+        createLoan({
+          previousLoan: 'prev-3',
+          signDate: new Date('2024-12-08'),
+          requestedAmount: 3000,
+          amountGived: 3000, // Equal = no debt carried, client paid off previous loan
+        }),
+        createLoan({
+          previousLoan: 'prev-4',
+          signDate: new Date('2024-12-22'),
+          requestedAmount: 5000,
+          amountGived: 5000,
+        }),
       ]
 
       const result = calculateClientBalance(loans, periodStart, periodEnd)
@@ -368,7 +509,9 @@ describe('Portfolio Calculations', () => {
       expect(result.nuevos).toBe(3)
       expect(result.terminadosSinRenovar).toBe(1)
       expect(result.renovados).toBe(2)
-      expect(result.balance).toBe(2) // 3 - 1
+      expect(result.reintegros).toBe(2)
+      // Balance = nuevos + reintegros - terminadosSinRenovar = 3 + 2 - 1 = 4
+      expect(result.balance).toBe(4)
     })
 
     it('calculates trend when previous balance provided', () => {
@@ -393,15 +536,36 @@ describe('Portfolio Calculations', () => {
 
     it('calculates renovation rate correctly', () => {
       const loans = [
-        // 4 renewals
-        createLoan({ renewedDate: new Date('2024-12-10') }),
-        createLoan({ renewedDate: new Date('2024-12-12') }),
-        createLoan({ renewedDate: new Date('2024-12-15') }),
-        createLoan({ renewedDate: new Date('2024-12-18') }),
+        // 4 TRUE renewals (previousLoan + signDate in period + amountGived < requestedAmount)
+        createLoan({
+          previousLoan: 'prev-1',
+          signDate: new Date('2024-12-10'),
+          requestedAmount: 3000,
+          amountGived: 2100,
+        }),
+        createLoan({
+          previousLoan: 'prev-2',
+          signDate: new Date('2024-12-12'),
+          requestedAmount: 3000,
+          amountGived: 2500,
+        }),
+        createLoan({
+          previousLoan: 'prev-3',
+          signDate: new Date('2024-12-15'),
+          requestedAmount: 3000,
+          amountGived: 1800,
+        }),
+        createLoan({
+          previousLoan: 'prev-4',
+          signDate: new Date('2024-12-18'),
+          requestedAmount: 3000,
+          amountGived: 2900,
+        }),
         // 1 finished without renewal
         createLoan({
           finishedDate: new Date('2024-12-20'),
           renewedDate: null,
+          wasRenewed: false,
         }),
       ]
 
@@ -421,7 +585,13 @@ describe('Portfolio Calculations', () => {
 
     it('calculates trend correctly', () => {
       const loans = [
-        createLoan({ renewedDate: new Date('2024-12-10') }),
+        // TRUE renewal
+        createLoan({
+          previousLoan: 'prev-1',
+          signDate: new Date('2024-12-10'),
+          requestedAmount: 3000,
+          amountGived: 2100,
+        }),
       ]
 
       const result = calculateRenovationKPIs(loans, periodStart, periodEnd, 0.5)
@@ -434,14 +604,39 @@ describe('Portfolio Calculations', () => {
       const activeWeek = getActiveWeekRange(new Date('2024-12-11'))
 
       const loans = [
-        // Active and Al Corriente
-        createLoan({ id: 'loan-1', signDate: new Date('2024-11-01') }),
-        // Active but in CV (no payment)
-        createLoan({ id: 'loan-2', signDate: new Date('2024-11-01') }),
-        // Not active (paid off)
-        createLoan({ id: 'loan-3', pendingAmountStored: 0 }),
-        // Not active (bad debt)
-        createLoan({ id: 'loan-4', badDebtDate: new Date() }),
+        // Active and Al Corriente (has pending debt)
+        createLoan({
+          id: 'loan-1',
+          signDate: new Date('2024-11-01'),
+          requestedAmount: 3000,
+          rate: 0.4,
+          totalPaid: 1000, // Still has pending debt
+        }),
+        // Active but in CV (no payment, has pending debt)
+        createLoan({
+          id: 'loan-2',
+          signDate: new Date('2024-11-01'),
+          requestedAmount: 3000,
+          rate: 0.4,
+          totalPaid: 500, // Still has pending debt
+        }),
+        // Not active (paid off completely - has finishedDate)
+        createLoan({
+          id: 'loan-3',
+          pendingAmountStored: 0,
+          finishedDate: new Date('2024-12-01'), // Marked as finished
+          requestedAmount: 3000,
+          rate: 0.4,
+          totalPaid: 4200, // Fully paid
+        }),
+        // Not active (excluded by cleanup)
+        createLoan({
+          id: 'loan-4',
+          excludedByCleanup: 'cleanup-1',
+          requestedAmount: 3000,
+          rate: 0.4,
+          totalPaid: 0,
+        }),
       ]
 
       const paymentsMap = new Map<string, PaymentForCV[]>([
@@ -451,7 +646,8 @@ describe('Portfolio Calculations', () => {
         ['loan-4', []],
       ])
 
-      const result = countClientsStatus(loans, paymentsMap, activeWeek)
+      // Use isHistorical=true to use the activeWeek.end as reference date
+      const result = countClientsStatus(loans, paymentsMap, activeWeek, true)
 
       expect(result.totalActivos).toBe(2) // loan-1 and loan-2
       expect(result.enCV).toBe(1) // loan-2

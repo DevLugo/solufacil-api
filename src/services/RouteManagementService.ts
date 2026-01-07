@@ -174,16 +174,11 @@ export class RouteManagementService {
             excludedByCleanup: null,
             renewedDate: null,
             finishedDate: null,
-            OR: [
-              { snapshotRouteId: route.id },
-              {
-                leadRelation: {
-                  routes: {
-                    some: { id: route.id },
-                  },
-                },
+            leadRelation: {
+              routes: {
+                some: { id: route.id },
               },
-            ],
+            },
           },
           select: {
             id: true,

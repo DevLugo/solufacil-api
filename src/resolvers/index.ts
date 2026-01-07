@@ -22,6 +22,7 @@ import { deadDebtResolvers } from './deadDebt'
 import { batchTransferResolvers } from './batchTransfer'
 import { bulkDateMigrationResolvers } from './bulkDateMigration'
 import { badDebtClientsResolvers } from './badDebtClients'
+import { locationHistoryResolvers } from './locationHistory'
 
 export const resolvers = {
   ...scalars,
@@ -49,6 +50,7 @@ export const resolvers = {
     ...deadDebtResolvers.Query,
     ...bulkDateMigrationResolvers.Query,
     ...badDebtClientsResolvers.Query,
+    ...locationHistoryResolvers.Query,
   },
 
   Mutation: {
@@ -71,6 +73,7 @@ export const resolvers = {
     ...deadDebtResolvers.Mutation,
     ...batchTransferResolvers.Mutation,
     ...bulkDateMigrationResolvers.Mutation,
+    ...locationHistoryResolvers.Mutation,
   },
 
   // Type resolvers
@@ -85,7 +88,11 @@ export const resolvers = {
   AccountEntry: transactionResolvers.AccountEntry,
   Account: accountResolvers.Account,
   Route: routeResolvers.Route,
-  Location: routeResolvers.Location,
+  Location: {
+    ...routeResolvers.Location,
+    ...locationHistoryResolvers.LocationExtensions,
+  },
+  LocationRouteHistory: locationHistoryResolvers.LocationRouteHistory,
   Municipality: routeResolvers.Municipality,
   State: routeResolvers.State,
   DocumentPhoto: documentResolvers.DocumentPhoto,

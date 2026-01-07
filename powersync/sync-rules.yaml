@@ -55,7 +55,7 @@ bucket_definitions:
           "profitAmount", "totalDebtAcquired", "expectedWeeklyPayment",
           "totalPaid", "pendingAmountStored", "comissionAmount",
           status, borrower, loantype, grantor, lead,
-          "snapshotLeadId", "snapshotLeadAssignedAt", "snapshotRouteId", "snapshotRouteName",
+          "snapshotLeadId", "snapshotLeadAssignedAt",
           "previousLoan", "excludedByCleanup", "createdAt", "updatedAt"
         FROM "Loan"
 
@@ -78,6 +78,19 @@ bucket_definitions:
         FROM "LoanPayment"
 
   # ========================================
+  # ACCOUNTS - Financial accounts for routes
+  # ========================================
+
+  accounts:
+    data:
+      # Sync accounts with their associated route
+      # Note: Account-Route is many-to-many in Prisma, but we pick the first route for simplicity
+      - SELECT
+          a.id, a.name, a.type, a.amount,
+          (SELECT ra."B" FROM "_RouteAccounts" ra WHERE ra."A" = a.id LIMIT 1) as route
+        FROM "Account" a
+
+  # ========================================
   # ACCOUNT ENTRIES - All entries (filter on client side for performance)
   # ========================================
 
@@ -86,7 +99,19 @@ bucket_definitions:
       - SELECT
           id, "accountId", amount, "entryType", "sourceType",
           "profitAmount", "returnToCapital",
-          "snapshotLeadId", "snapshotRouteId",
+          "snapshotLeadId",
           "entryDate", description,
           "loanId", "loanPaymentId", "syncId"
         FROM "AccountEntry"
+
+  # ========================================
+  # LOCATION ROUTE HISTORY - For reports by route at specific dates
+  # ========================================
+
+  location_route_history:
+    data:
+      - SELECT
+          id, "locationId", "routeId",
+          "startDate", "endDate",
+          "createdAt", "updatedAt"
+        FROM "LocationRouteHistory"

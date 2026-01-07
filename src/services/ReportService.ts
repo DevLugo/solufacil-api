@@ -1,5 +1,6 @@
 import { Decimal } from 'decimal.js'
 import type { PrismaClient, LoanStatus } from '@solufacil/database'
+import { LocationHistoryService } from './LocationHistoryService'
 
 export interface ActiveLoansBreakdown {
   total: number           // Total active loans
@@ -60,40 +61,149 @@ export interface BadDebtSummary {
 }
 
 export class ReportService {
-  constructor(private prisma: PrismaClient) {}
+  private locationHistoryService: LocationHistoryService
+
+  constructor(private prisma: PrismaClient) {
+    this.locationHistoryService = new LocationHistoryService(prisma)
+  }
 
   // ========== Private Helper Methods ==========
 
   /**
-   * Builds the route filter condition for querying loans.
-   * Matches loans where:
-   * - snapshotRouteId is in routeIds, OR
-   * - The lead's current routes include a route in routeIds
+   * Gets the location ID for a lead based on their primary address
    */
-  private getRouteFilterCondition(routeIds: string[]) {
-    return {
-      OR: [
-        { snapshotRouteId: { in: routeIds } },
-        {
-          leadRelation: {
-            routes: {
-              some: { id: { in: routeIds } },
+  private async getLeadLocationId(leadId: string): Promise<string | null> {
+    const lead = await this.prisma.employee.findUnique({
+      where: { id: leadId },
+      include: {
+        personalDataRelation: {
+          include: {
+            addresses: {
+              take: 1,
+              include: { locationRelation: true },
             },
           },
         },
-      ],
+      },
+    })
+    return lead?.personalDataRelation?.addresses[0]?.location || null
+  }
+
+  /**
+   * Gets location IDs for multiple leads (batch operation)
+   * Returns a Map of leadId -> locationId
+   */
+  private async getLeadLocationIds(leadIds: string[]): Promise<Map<string, string>> {
+    if (leadIds.length === 0) {
+      return new Map()
+    }
+
+    const leads = await this.prisma.employee.findMany({
+      where: { id: { in: leadIds } },
+      include: {
+        personalDataRelation: {
+          include: {
+            addresses: {
+              take: 1,
+            },
+          },
+        },
+      },
+    })
+
+    const result = new Map<string, string>()
+    for (const lead of leads) {
+      const locationId = lead.personalDataRelation?.addresses[0]?.location
+      if (locationId) {
+        result.set(lead.id, locationId)
+      }
+    }
+    return result
+  }
+
+  /**
+   * Gets location IDs that were in the specified routes at a given date
+   * using the LocationHistoryService
+   */
+  private async getLocationIdsInRoutesAtDate(routeIds: string[], date: Date): Promise<Set<string>> {
+    return this.locationHistoryService.getLocationIdsInRoutesAtDate(routeIds, date)
+  }
+
+  /**
+   * Gets location IDs that were in the specified routes at ANY point during a period
+   */
+  private async getLocationIdsInRoutesDuringPeriod(
+    routeIds: string[],
+    fromDate: Date,
+    toDate: Date
+  ): Promise<Set<string>> {
+    return this.locationHistoryService.getLocationIdsInRoutesDuringPeriod(routeIds, fromDate, toDate)
+  }
+
+  /**
+   * Builds the route filter condition for querying loans based on location history.
+   * Uses the lead's address location to determine if the loan belongs to a route.
+   */
+  private getLocationBasedRouteFilter(locationIds: Set<string>) {
+    return {
+      leadRelation: {
+        personalDataRelation: {
+          addresses: {
+            some: {
+              location: { in: Array.from(locationIds) },
+            },
+          },
+        },
+      },
     }
   }
 
   /**
+   * Filters loans by checking if their lead's location was in one of the specified routes
+   * at the loan's sign date using location history.
+   */
+  private async filterLoansByRouteHistory<T extends { lead: string; signDate: Date }>(
+    loans: T[],
+    routeIds: string[]
+  ): Promise<T[]> {
+    if (loans.length === 0 || routeIds.length === 0) {
+      return []
+    }
+
+    // Get unique lead IDs
+    const leadIds = Array.from(new Set(loans.map((l) => l.lead)))
+
+    // Batch get location IDs for all leads
+    const leadLocationMap = await this.getLeadLocationIds(leadIds)
+
+    // For each loan, check if its lead's location was in one of the routes at sign date
+    const filteredLoans: T[] = []
+    for (const loan of loans) {
+      const locationId = leadLocationMap.get(loan.lead)
+      if (!locationId) continue
+
+      const routeId = await this.locationHistoryService.getRouteForLocationAtDate(
+        locationId,
+        loan.signDate
+      )
+      if (routeId && routeIds.includes(routeId)) {
+        filteredLoans.push(loan)
+      }
+    }
+
+    return filteredLoans
+  }
+
+  /**
    * Builds the base WHERE clause for querying active loans.
+   * Uses location-based filtering via locationIds.
    */
   private getActiveLoansWhereClause(
-    routeIds: string[],
+    locationIds: Set<string>,
     signDateFilter?: { lte?: Date; gte?: Date }
   ) {
     return {
-      ...this.getRouteFilterCondition(routeIds),
+      ...this.getLocationBasedRouteFilter(locationIds),
       finishedDate: null,
       pendingAmountStored: { gt: 0 },
       excludedByCleanup: null,
@@ -169,11 +279,42 @@ export class ReportService {
     const startDate = new Date(year, month - 1, 1)
     const endDate = new Date(year, month, 0, 23, 59, 59)
 
+    // Get all locations that were in the routes during this month
+    // We use a wide range to catch all relevant loans (from 2020 to endDate)
+    const locationIds = await this.getLocationIdsInRoutesDuringPeriod(
+      routeIds,
+      new Date('2020-01-01'),
+      endDate
+    )
+
+    if (locationIds.size === 0) {
+      // No locations found - return empty report
+      return {
+        summary: {
+          activeLoans: 0,
+          activeLoansBreakdown: { total: 0, alCorriente: 0, carteraVencida: 0 },
+          totalPortfolio: new Decimal(0),
+          totalPaid: new Decimal(0),
+          pendingAmount: new Decimal(0),
+          averagePayment: new Decimal(0),
+        },
+        weeklyData: [],
+        comparisonData: null,
+        performanceMetrics: {
+          recoveryRate: new Decimal(0),
+          averageTicket: new Decimal(0),
+          activeLoansCount: 0,
+          finishedLoansCount: 0,
+        },
+      }
+    }
+
+    const locationFilter = this.getLocationBasedRouteFilter(locationIds)
+
     // Get loans for the specified routes and period
-    // Filter by snapshotRouteId OR lead's current routes
     const loans = await this.prisma.loan.findMany({
       where: {
-        ...this.getRouteFilterCondition(routeIds),
+        ...locationFilter,
         signDate: {
           gte: startDate,
           lte: endDate,
@@ -200,7 +341,7 @@ export class ReportService {
 
     // Get active loans with their payments for CV calculation
     const activeLoansWithPayments = await this.prisma.loan.findMany({
-      where: this.getActiveLoansWhereClause(routeIds),
+      where: this.getActiveLoansWhereClause(locationIds),
       select: {
         id: true,
         totalDebtAcquired: true,
@@ -247,13 +388,13 @@ export class ReportService {
     }
 
     // Calculate weekly data
-    const weeklyData = await this.calculateWeeklyData(routeIds, year, month)
+    const weeklyData = await this.calculateWeeklyData(locationIds, year, month)
 
     // Calculate comparison with previous month
-    const comparisonData = await this.getComparisonData(routeIds, year, month)
+    const comparisonData = await this.getComparisonData(routeIds, locationIds, year, month)
 
     // Calculate performance metrics
-    const performanceMetrics = await this.calculatePerformanceMetrics(routeIds)
+    const performanceMetrics = await this.calculatePerformanceMetrics(locationIds)
 
     return {
       summary,
@@ -264,19 +405,20 @@ export class ReportService {
   }
 
   private async calculateWeeklyData(
-    routeIds: string[],
+    locationIds: Set<string>,
     year: number,
     month: number
   ): Promise<WeeklyData[]> {
     const startDate = new Date(year, month - 1, 1)
     const endDate = new Date(year, month, 0, 23, 59, 59)
 
+    const locationFilter = this.getLocationBasedRouteFilter(locationIds)
+
     // OPTIMIZATION: Get all data for the month in 3 queries instead of N*3 queries
     // Query 1: Get all loans granted in the month
-    // Filter by snapshotRouteId OR lead's current routes
     const allLoansGranted = await this.prisma.loan.findMany({
       where: {
-        ...this.getRouteFilterCondition(routeIds),
+        ...locationFilter,
         signDate: {
           gte: startDate,
           lte: endDate,
@@ -289,10 +431,9 @@ export class ReportService {
     })
 
     // Query 2: Get all payments for the month
-    // Filter by loan's snapshotRouteId OR lead's current routes
     const allPayments = await this.prisma.loanPayment.findMany({
       where: {
-        loanRelation: this.getRouteFilterCondition(routeIds),
+        loanRelation: locationFilter,
         receivedAt: {
           gte: startDate,
           lte: endDate,
@@ -306,7 +447,7 @@ export class ReportService {
 
     // Query 3: Get all active loans (for expected payments calculation)
     const allActiveLoans = await this.prisma.loan.findMany({
-      where: this.getActiveLoansWhereClause(routeIds, { lte: endDate }),
+      where: this.getActiveLoansWhereClause(locationIds, { lte: endDate }),
       select: {
         id: true,
         expectedWeeklyPayment: true,
@@ -376,6 +517,7 @@ export class ReportService {
 
   private async getComparisonData(
     routeIds: string[],
+    currentLocationIds: Set<string>,
     year: number,
     month: number
   ): Promise<ComparisonData | null> {
@@ -386,9 +528,20 @@ export class ReportService {
     const prevStartDate = new Date(prevYear, prevMonth - 1, 1)
     const prevEndDate = new Date(prevYear, prevMonth, 0, 23, 59, 59)
 
+    // Get locations for the previous month period
+    const prevLocationIds = await this.getLocationIdsInRoutesDuringPeriod(
+      routeIds,
+      new Date('2020-01-01'),
+      prevEndDate
+    )
+
+    if (prevLocationIds.size === 0) {
+      return null
+    }
+
     // Get active loans for previous month with payments for CV calculation
     const prevActiveLoansWithPayments = await this.prisma.loan.findMany({
-      where: this.getActiveLoansWhereClause(routeIds, { lte: prevEndDate }),
+      where: this.getActiveLoansWhereClause(prevLocationIds, { lte: prevEndDate }),
       select: {
         id: true,
         totalDebtAcquired: true,
@@ -441,9 +594,11 @@ export class ReportService {
     const currentStartDate = new Date(year, month - 1, 1)
     const currentEndDate = new Date(year, month, 0, 23, 59, 59)
 
+    const currentLocationFilter = this.getLocationBasedRouteFilter(currentLocationIds)
+
     const currentLoans = await this.prisma.loan.findMany({
       where: {
-        ...this.getRouteFilterCondition(routeIds),
+        ...currentLocationFilter,
         signDate: {
           gte: currentStartDate,
           lte: currentEndDate,
@@ -480,9 +635,10 @@ export class ReportService {
   }
 
   private async calculatePerformanceMetrics(
-    routeIds: string[]
+    locationIds: Set<string>
   ): Promise<PerformanceMetrics> {
-    const activeLoansWhereClause = this.getActiveLoansWhereClause(routeIds)
+    const activeLoansWhereClause = this.getActiveLoansWhereClause(locationIds)
+    const locationFilter = this.getLocationBasedRouteFilter(locationIds)
 
     const activeLoansCount = await this.prisma.loan.count({
       where: activeLoansWhereClause,
@@ -490,7 +646,7 @@ export class ReportService {
 
     const finishedLoansCount = await this.prisma.loan.count({
       where: {
-        ...this.getRouteFilterCondition(routeIds),
+        ...locationFilter,
         finishedDate: { not: null },
       },
     })
@@ -548,18 +704,45 @@ export class ReportService {
       },
       select: {
         id: true,
+        lead: true,
+        signDate: true,
         pendingAmountStored: true,
-        snapshotRouteId: true,
-        snapshotRouteName: true,
       },
     })
+
+    // Get lead location IDs (filter out null leads)
+    const leadIds = Array.from(new Set(loans.map((l) => l.lead).filter((id): id is string => id !== null)))
+    const leadLocationMap = await this.getLeadLocationIds(leadIds)
+
+    // Build lookups for batch route resolution at sign date
+    const lookups: Array<{ locationId: string; date: Date }> = []
+    for (const loan of loans) {
+      if (!loan.lead) continue
+      const locationId = leadLocationMap.get(loan.lead)
+      if (locationId) {
+        lookups.push({ locationId, date: loan.signDate })
+      }
+    }
+
+    // Get routes for all locations at their respective sign dates
+    const routeMap = await this.locationHistoryService.getRoutesForLocationsAtDates(lookups)
 
     // Group by route
     const byRoute = new Map<string, { routeName: string; count: number; amount: Decimal }>()
 
     for (const loan of loans) {
-      const routeId = loan.snapshotRouteId || 'unknown'
-      const routeName = loan.snapshotRouteName || 'Sin ruta'
+      const locationId = loan.lead ? leadLocationMap.get(loan.lead) : undefined
+      let routeId = 'unknown'
+      let routeName = 'Sin ruta'
+
+      if (locationId) {
+        const key = `${locationId}:${loan.signDate.toISOString()}`
+        const routeInfo = routeMap.get(key)
+        if (routeInfo) {
+          routeId = routeInfo.routeId
+          routeName = routeInfo.routeName
+        }
+      }
 
       if (!byRoute.has(routeId)) {
         byRoute.set(routeId, { routeName, count: 0, amount: new Decimal(0) })
@@ -585,11 +768,28 @@ export class ReportService {
       },
       select: {
         id: true,
+        lead: true,
+        signDate: true,
         pendingAmountStored: true,
-        snapshotRouteId: true,
-        snapshotRouteName: true,
       },
     })
+
+    // Get lead location IDs (filter out null leads)
+    const leadIds = Array.from(new Set(loans.map((l) => l.lead).filter((id): id is string => id !== null)))
+    const leadLocationMap = await this.getLeadLocationIds(leadIds)
+
+    // Build lookups for batch route resolution at sign date
+    const lookups: Array<{ locationId: string; date: Date }> = []
+    for (const loan of loans) {
+      if (!loan.lead) continue
+      const locationId = leadLocationMap.get(loan.lead)
+      if (locationId) {
+        lookups.push({ locationId, date: loan.signDate })
+      }
+    }
+
+    // Get routes for all locations at their respective sign dates
+    const routeMap = await this.locationHistoryService.getRoutesForLocationsAtDates(lookups)
 
     // Group by route
     const byRoute = new Map<string, { routeName: string; count: number; amount: Decimal }>()
@@ -598,8 +798,18 @@ export class ReportService {
     let totalAmount = new Decimal(0)
 
     for (const loan of loans) {
-      const routeId = loan.snapshotRouteId || 'unknown'
-      const routeName = loan.snapshotRouteName || 'Sin ruta'
+      const locationId = loan.lead ? leadLocationMap.get(loan.lead) : undefined
+      let routeId = 'unknown'
+      let routeName = 'Sin ruta'
+
+      if (locationId) {
+        const key = `${locationId}:${loan.signDate.toISOString()}`
+        const routeInfo = routeMap.get(key)
+        if (routeInfo) {
+          routeId = routeInfo.routeId
+          routeName = routeInfo.routeName
+        }
+      }
 
       if (!byRoute.has(routeId)) {
         byRoute.set(routeId, { routeName, count: 0, amount: new Decimal(0) })
@@ -746,19 +956,44 @@ export class ReportService {
     const yearStart = new Date(`${year}-01-01`)
     const yearEnd = new Date(`${year}-12-31T23:59:59.999Z`)
 
+    // Get locations that were in the specified routes during ANY point in the year
+    // This ensures we catch all locations even if they moved out during the year
+    const locationIdsInRoutes = await this.getLocationIdsInRoutesDuringPeriod(
+      routeIds,
+      yearStart,
+      yearEnd
+    )
+
     // Get all account entries for the year
-    // Filter by snapshotRouteId OR by the associated loan's lead routes
+    // Filter by:
+    // 1. Entries WITH loans: loan's lead location was in one of the routes
+    // 2. Entries whose account is linked to one of the routes (for expenses, commissions, transfers, etc.)
+    //    This catches entries with loans that have no lead or lead without valid address
     const entries = await this.prisma.accountEntry.findMany({
       where: {
         entryDate: { gte: yearStart, lte: yearEnd },
         OR: [
-          { snapshotRouteId: { in: routeIds } },
+          // Entries associated with loans whose lead's location is in the routes
           {
             loan: {
               leadRelation: {
-                routes: {
-                  some: { id: { in: routeIds } },
+                personalDataRelation: {
+                  addresses: {
+                    some: {
+                      location: { in: Array.from(locationIdsInRoutes) },
+                    },
+                  },
                 },
+              },
+            },
+          },
+          // Entries (with or without loans) whose account is linked to the routes
+          // This includes: gasoline, salaries, general expenses, transfers,
+          // and commissions from loans that have no lead or invalid lead address
+          {
+            account: {
+              routes: {
+                some: { id: { in: routeIds } },
               },
             },
           },
@@ -779,16 +1014,21 @@ export class ReportService {
     // The badDebt calculation needs payments from previous years that were made before badDebtDate
     const loans = await this.prisma.loan.findMany({
       where: {
-        AND: [
-          { signDate: { lt: yearEnd } },
-          {
-            OR: [
-              { finishedDate: null },
-              { finishedDate: { gte: yearStart } }
-            ],
-          },
-          this.getRouteFilterCondition(routeIds),
+        signDate: { lt: yearEnd },
+        OR: [
+          { finishedDate: null },
+          { finishedDate: { gte: yearStart } }
         ],
+        // Filter by lead's location being in the routes (using location history)
+        leadRelation: {
+          personalDataRelation: {
+            addresses: {
+              some: {
+                location: { in: Array.from(locationIdsInRoutes) },
+              },
+            },
+          },
+        },
       },
       select: {
         id: true,

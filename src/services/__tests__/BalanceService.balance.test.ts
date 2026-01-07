@@ -148,7 +148,6 @@ describe('BalanceService', () => {
         amount: 100,
         sourceType: 'LOAN_PAYMENT_CASH',
         snapshotLeadId: 'snapshot-lead-123',
-        snapshotRouteId: testEnv.route.id,
         profitAmount: 20,
         returnToCapital: 80,
         description: 'Test entry with optional fields',
@@ -159,7 +158,6 @@ describe('BalanceService', () => {
       expect(entry.loanPaymentId).toBeNull()
       expect(entry.leadPaymentReceivedId).toBeNull()
       expect(entry.snapshotLeadId).toBe('snapshot-lead-123')
-      expect(entry.snapshotRouteId).toBe(testEnv.route.id)
       expect(new Decimal(entry.profitAmount?.toString() || '0').toNumber()).toBe(20)
       expect(new Decimal(entry.returnToCapital?.toString() || '0').toNumber()).toBe(80)
       expect(entry.description).toBe('Test entry with optional fields')

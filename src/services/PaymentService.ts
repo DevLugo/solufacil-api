@@ -190,9 +190,6 @@ export class PaymentService {
       const cashAccount = agentAccounts.find(a => a.type === 'EMPLOYEE_CASH_FUND')
       const bankAccount = agentAccounts.find(a => a.type === 'BANK')
 
-      // Obtener routeId para los entries
-      const routeId = agent?.routes?.[0]?.id || ''
-
       // 2. Crear el registro de pago del lead
       const leadPaymentReceived = await this.paymentRepository.createLeadPaymentReceived({
         expectedAmount,
@@ -266,7 +263,6 @@ export class PaymentService {
             profitAmount,
             returnToCapital,
             snapshotLeadId: input.leadId,
-            snapshotRouteId: routeId,
           }, tx)
         }
 
@@ -286,7 +282,6 @@ export class PaymentService {
             loanPaymentId: payment.id,
             leadPaymentReceivedId: leadPaymentReceived.id,
             snapshotLeadId: input.leadId,
-            snapshotRouteId: routeId,
           }, tx)
         }
 
@@ -309,7 +304,6 @@ export class PaymentService {
           entryDate: paymentDate,
           description: `Depósito efectivo a banco - LPR ${leadPaymentReceived.id}`,
           snapshotLeadId: input.leadId,
-          snapshotRouteId: routeId,
           leadPaymentReceivedId: leadPaymentReceived.id,
         }, tx)
       }
@@ -325,7 +319,6 @@ export class PaymentService {
           description: `Pérdida por falco - LPR ${leadPaymentReceived.id}`,
           leadPaymentReceivedId: leadPaymentReceived.id,
           snapshotLeadId: input.leadId,
-          snapshotRouteId: routeId,
         }, tx)
       }
 
@@ -499,7 +492,6 @@ export class PaymentService {
       const agentAccounts = agent?.routes?.flatMap(r => r.accounts) || []
       const cashAccount = agentAccounts.find(a => a.type === 'EMPLOYEE_CASH_FUND')
       const bankAccount = agentAccounts.find(a => a.type === 'BANK')
-      const routeId = agent?.routes?.[0]?.id || ''
 
       // 2. Delete all existing AccountEntry for this LPR (this reverses all balance changes)
       await balanceService.deleteEntriesByLeadPaymentReceived(id, tx)
@@ -636,7 +628,6 @@ export class PaymentService {
             profitAmount,
             returnToCapital,
             snapshotLeadId: existingRecord.lead,
-            snapshotRouteId: routeId,
           }, tx)
         }
 
@@ -656,7 +647,6 @@ export class PaymentService {
             loanPaymentId: payment.id,
             leadPaymentReceivedId: id,
             snapshotLeadId: existingRecord.lead,
-            snapshotRouteId: routeId,
           }, tx)
         }
       }
@@ -672,7 +662,6 @@ export class PaymentService {
           entryDate: existingRecord.createdAt,
           description: `Depósito efectivo a banco - LPR ${id}`,
           snapshotLeadId: existingRecord.lead,
-          snapshotRouteId: routeId,
           leadPaymentReceivedId: id,
         }, tx)
       }
@@ -688,7 +677,6 @@ export class PaymentService {
           description: `Pérdida por falco - LPR ${id}`,
           leadPaymentReceivedId: id,
           snapshotLeadId: existingRecord.lead,
-          snapshotRouteId: routeId,
         }, tx)
       }
 
@@ -764,7 +752,6 @@ export class PaymentService {
 
     // Get the cash account for the lead
     const cashAccount = leadPaymentReceived.leadRelation?.routes?.[0]?.accounts?.[0]
-    const routeId = leadPaymentReceived.leadRelation?.routes?.[0]?.id || ''
 
     return this.prisma.$transaction(async (tx) => {
       const balanceService = new BalanceService(tx as any)
@@ -792,7 +779,6 @@ export class PaymentService {
             : `Compensación de falco (${newCompensatedTotal} de ${originalFalcoAmount}) - LPR ${input.leadPaymentReceivedId}`,
           leadPaymentReceivedId: input.leadPaymentReceivedId,
           snapshotLeadId: leadPaymentReceived.lead,
-          snapshotRouteId: routeId,
         }, tx)
       }
 

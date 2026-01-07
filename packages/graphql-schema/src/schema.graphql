@@ -21,7 +21,6 @@ enum EmployeeType {
 enum LoanStatus {
   ACTIVE
   FINISHED
-  RENOVATED
   CANCELLED
 }
 
@@ -227,8 +226,6 @@ type Loan {
   snapshotLeadId: String
   snapshotLeadName: String
   snapshotLeadAssignedAt: DateTime
-  snapshotRouteId: String
-  snapshotRouteName: String
   previousLoan: Loan
   renewedBy: Loan
   createdAt: DateTime!
@@ -279,7 +276,6 @@ type AccountEntry {
   profitAmount: Decimal
   returnToCapital: Decimal
   snapshotLeadId: String
-  snapshotRouteId: String
   account: Account!
   loan: Loan
   loanPayment: LoanPayment
@@ -355,7 +351,27 @@ type Location {
   route: Route
   municipality: Municipality!
   addresses: [Address!]!
+  routeHistory: [LocationRouteHistory!]!
+  currentRouteId: ID
   createdAt: DateTime!
+}
+
+type LocationRouteHistory {
+  id: ID!
+  location: Location!
+  locationId: ID!
+  route: Route!
+  routeId: ID!
+  startDate: DateTime!
+  endDate: DateTime
+  createdAt: DateTime!
+}
+
+input LocationRouteHistoryInput {
+  locationId: ID!
+  routeId: ID!
+  startDate: DateTime!
+  endDate: DateTime
 }
 
 type Municipality {
@@ -702,6 +718,9 @@ type ClientBalanceData {
   nuevos: Int!
   terminadosSinRenovar: Int!
   renovados: Int!
+  "Reintegros: clientes que regresan después de pagar completamente su préstamo anterior"
+  reintegros: Int!
+  "Balance neto (nuevos + reintegros - terminadosSinRenovar)"
   balance: Int!
   trend: Trend!
 }
@@ -1079,6 +1098,9 @@ type Query {
   routesWithStats(year: Int!, month: Int!): [RouteWithStats!]! @requireRole(roles: [ADMIN])
   locations(routeId: ID): [Location!]! @auth
   locationsCreatedInPeriod(fromDate: DateTime!, toDate: DateTime!, routeId: ID): [Location!]! @auth
+  locationRouteHistory(locationId: ID!): [LocationRouteHistory!]! @auth
+  locationsInRouteAtDate(routeId: ID!, date: DateTime!): [Location!]! @auth
+  routeForLocationAtDate(locationId: ID!, date: DateTime!): Route @auth
   municipalities: [Municipality!]! @auth
 
   # Loan types
@@ -1651,6 +1673,10 @@ type Mutation {
 
   # Locations
   createLocation(input: CreateLocationInput!): Location! @auth
+  changeLocationRoute(locationId: ID!, routeId: ID!, effectiveDate: DateTime!): LocationRouteHistory! @auth
+  addLocationRouteHistory(input: LocationRouteHistoryInput!): LocationRouteHistory! @auth
+  updateLocationRouteHistory(id: ID!, input: LocationRouteHistoryInput!): LocationRouteHistory! @auth
+  deleteLocationRouteHistory(id: ID!): Boolean! @auth
 
   # Loan types
   createLoantype(input: CreateLoantypeInput!): Loantype! @requireRole(roles: [ADMIN])

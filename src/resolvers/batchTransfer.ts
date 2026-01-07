@@ -36,7 +36,7 @@ function mapEntryToTransaction(entry: any) {
     expenseSource: entry.description || null,
     description: entry.description || null,
     sourceAccount: entry.accountId,
-    route: entry.snapshotRouteId,
+    route: null, // Route is resolved via Transaction resolver using snapshotLeadId
     lead: entry.snapshotLeadId,
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt,

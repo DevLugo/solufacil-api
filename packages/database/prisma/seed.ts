@@ -273,8 +273,6 @@ async function main() {
         grantor: b.grantor.id,
         signDate: new Date(),
         snapshotLeadId: b.lead.id,
-        snapshotRouteName: b.route.name,
-        snapshotRouteId: b.route.id,
       },
     })
   }

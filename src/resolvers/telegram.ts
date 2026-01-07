@@ -327,10 +327,14 @@ export const telegramResolvers = {
         where.OR = [{ isError: true }, { isMissing: true }]
       }
 
-      // If route filter, we need to get via loan
+      // If route filter, we need to get via loan's lead routes
       if (args.routeId) {
         where.loanRelation = {
-          snapshotRouteId: args.routeId,
+          leadRelation: {
+            routes: {
+              some: { id: args.routeId },
+            },
+          },
         }
       }
 
@@ -673,23 +677,24 @@ export const telegramResolvers = {
         const routeIds = config.routes.map((r) => r.id)
 
         // Build where clause - include documents with errors/missing
-        // If routes are configured, filter by those routes OR include docs with NULL snapshotRouteId
+        // If routes are configured, filter by those routes
         let whereClause: any = {
           OR: [{ isError: true }, { isMissing: true }],
         }
 
         if (routeIds.length > 0) {
-          // Include documents where:
-          // 1. The loan's snapshotRouteId is in the configured routes, OR
-          // 2. The loan's snapshotRouteId is NULL (to not miss any documents)
+          // Include documents where the loan's lead has routes in the configured routes
           whereClause = {
             AND: [
               { OR: [{ isError: true }, { isMissing: true }] },
               {
-                OR: [
-                  { loanRelation: { snapshotRouteId: { in: routeIds } } },
-                  { loanRelation: { snapshotRouteId: null } },
-                ],
+                loanRelation: {
+                  leadRelation: {
+                    routes: {
+                      some: { id: { in: routeIds } },
+                    },
+                  },
+                },
               },
             ],
           }
@@ -706,7 +711,14 @@ export const telegramResolvers = {
                     personalDataRelation: true,
                   },
                 },
-                snapshotRoute: true,
+                leadRelation: {
+                  include: {
+                    routes: {
+                      select: { id: true, name: true },
+                      take: 1,
+                    },
+                  },
+                },
               },
             },
           },
@@ -944,7 +956,7 @@ export const telegramResolvers = {
                 }
 
                 const clientName = docItem.loanRelation?.borrowerRelation?.personalDataRelation?.fullName || 'Sin cliente'
-                const routeName = docItem.loanRelation?.snapshotRoute?.name || docItem.loanRelation?.snapshotRouteName || 'Sin ruta'
+                const routeName = docItem.loanRelation?.leadRelation?.routes?.[0]?.name || 'Sin ruta'
                 const docType = docItem.documentType || 'N/A'
                 const status = docItem.isError ? 'Error' : 'Faltante'
                 const description = docItem.errorDescription || '-'
@@ -1050,7 +1062,11 @@ export const telegramResolvers = {
           personalDataRelation: true,
           loanRelation: {
             include: {
-              snapshotRoute: true,
+              leadRelation: {
+                include: {
+                  routes: { take: 1 },
+                },
+              },
             },
           },
         },
@@ -1065,7 +1081,13 @@ export const telegramResolvers = {
       const telegramService = new TelegramService()
       const issueType = document.isError ? 'ERROR' : 'MISSING'
       const personName = document.personalDataRelation?.fullName || 'Unknown'
-      const routeName = document.loanRelation?.snapshotRouteName || 'No route'
+      // Get route from lead's current routes
+      const leadRoutes = await context.prisma.employee.findFirst({
+        where: { id: document.loanRelation?.lead || '' },
+        select: { routes: { select: { id: true, name: true }, take: 1 } },
+      })
+      const routeName = leadRoutes?.routes?.[0]?.name || 'No route'
+      const routeId = leadRoutes?.routes?.[0]?.id || ''
       const documentTypeLabel = DOCUMENT_TYPE_LABELS[document.documentType] || document.documentType
 
       // Build message
@@ -1120,7 +1142,7 @@ export const telegramResolvers = {
             personalDataId: document.personalData || '',
             personName,
             loanId: document.loan || '',
-            routeId: document.loanRelation?.snapshotRouteId || '',
+            routeId,
             routeName,
             issueType,
             description: document.errorDescription || '',
@@ -1147,7 +1169,7 @@ export const telegramResolvers = {
             personalDataId: document.personalData || '',
             personName,
             loanId: document.loan || '',
-            routeId: document.loanRelation?.snapshotRouteId || '',
+            routeId,
             routeName,
             issueType,
             description: document.errorDescription || '',

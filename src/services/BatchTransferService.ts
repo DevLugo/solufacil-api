@@ -132,7 +132,6 @@ export class BatchTransferService {
           sourceType: 'TRANSFER_OUT',
           entryDate: new Date(),
           destinationAccountId: input.destinationAccountId,
-          snapshotRouteId: routeAccount.routeId,
           description,
         }, tx)
 
@@ -143,7 +142,6 @@ export class BatchTransferService {
           amount: routeAccount.balance,
           sourceType: 'TRANSFER_IN',
           entryDate: new Date(),
-          snapshotRouteId: routeAccount.routeId,
           description,
         }, tx)
 
@@ -263,7 +261,6 @@ export class BatchTransferService {
           sourceType: 'TRANSFER_OUT',
           entryDate: new Date(),
           destinationAccountId: routeAccount.account.id,
-          snapshotRouteId: routeAccount.routeId,
           description,
         }, tx)
 
@@ -274,7 +271,6 @@ export class BatchTransferService {
           amount,
           sourceType: 'TRANSFER_IN',
           entryDate: new Date(),
-          snapshotRouteId: routeAccount.routeId,
           description,
         }, tx)
 

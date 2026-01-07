@@ -69,7 +69,11 @@ export class PortfolioCleanupService {
     }
 
     if (routeId) {
-      where.snapshotRouteId = routeId
+      where.leadRelation = {
+        routes: {
+          some: { id: routeId },
+        },
+      }
     }
 
     return where
@@ -104,8 +108,10 @@ export class PortfolioCleanupService {
             },
           },
         },
-        snapshotRoute: {
-          select: { name: true },
+        leadRelation: {
+          include: {
+            routes: { take: 1, select: { name: true } },
+          },
         },
       },
     })
@@ -116,7 +122,7 @@ export class PortfolioCleanupService {
       clientCode: loan.borrowerRelation?.personalDataRelation?.clientCode || 'N/A',
       signDate: loan.signDate!,
       pendingAmount: new Decimal(loan.pendingAmountStored.toString()),
-      routeName: loan.snapshotRoute?.name || 'N/A',
+      routeName: loan.leadRelation?.routes?.[0]?.name || 'N/A',
     }))
 
     return {
@@ -306,7 +312,11 @@ export class PortfolioCleanupService {
     toDate?: Date
   }) {
     const where: any = {
-      snapshotRouteId: routeId,
+      leadRelation: {
+        routes: {
+          some: { id: routeId },
+        },
+      },
       badDebtDate: { not: null },
       cleanupExcludedById: null,
     }

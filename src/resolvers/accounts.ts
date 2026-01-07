@@ -90,7 +90,7 @@ export const accountResolvers = {
         ...e,
         date: e.entryDate,
         sourceAccount: e.accountId,
-        route: e.snapshotRouteId,
+        route: null, // Route is resolved via Transaction resolver using snapshotLeadId
         lead: e.snapshotLeadId,
       }))
     },
@@ -106,7 +106,7 @@ export const accountResolvers = {
         ...e,
         date: e.entryDate,
         sourceAccount: e.accountId,
-        route: e.snapshotRouteId,
+        route: null, // Route is resolved via Transaction resolver using snapshotLeadId
         lead: e.snapshotLeadId,
       }))
     },

@@ -112,7 +112,14 @@ export class TransactionService {
     }
 
     if (options?.routeId) {
-      where.snapshotRouteId = options.routeId
+      // Filter by loan's lead current routes
+      where.loan = {
+        leadRelation: {
+          routes: {
+            some: { id: options.routeId },
+          },
+        },
+      }
     }
 
     if (options?.accountId) {
@@ -180,22 +187,24 @@ export class TransactionService {
   private async mapEntryToTransaction(entry: any) {
     const { type, incomeSource, expenseSource } = this.mapSourceTypeToLegacy(entry.sourceType)
 
-    // Fetch route and lead if we have snapshot IDs
-    let routeRelation = null
+    // Fetch lead if we have snapshot ID
     let leadRelation = null
-
-    if (entry.snapshotRouteId) {
-      routeRelation = await this.prisma.route.findUnique({
-        where: { id: entry.snapshotRouteId },
-        select: { id: true, name: true },
-      })
-    }
 
     if (entry.snapshotLeadId) {
       leadRelation = await this.prisma.employee.findUnique({
         where: { id: entry.snapshotLeadId },
         select: { id: true, personalData: true, personalDataRelation: { select: { id: true, fullName: true } } },
       })
+    }
+
+    // Get route from lead's current routes
+    let routeRelation = null
+    if (leadRelation) {
+      const leadWithRoutes = await this.prisma.employee.findUnique({
+        where: { id: entry.snapshotLeadId },
+        select: { routes: { select: { id: true, name: true }, take: 1 } },
+      })
+      routeRelation = leadWithRoutes?.routes?.[0] || null
     }
 
     // Fetch destination account if it's a transfer
@@ -218,12 +227,11 @@ export class TransactionService {
       profitAmount: entry.profitAmount,
       returnToCapital: entry.returnToCapital,
       snapshotLeadId: entry.snapshotLeadId,
-      snapshotRouteId: entry.snapshotRouteId,
       sourceAccount: entry.accountId,
       destinationAccount: entry.destinationAccountId,
       loan: entry.loanId,
       loanPayment: entry.loanPaymentId,
-      route: entry.snapshotRouteId,
+      route: routeRelation?.id || null,
       lead: entry.snapshotLeadId,
       createdAt: entry.createdAt,
       updatedAt: entry.createdAt,
@@ -303,7 +311,6 @@ export class TransactionService {
           loanId: input.loanId,
           loanPaymentId: input.loanPaymentId,
           snapshotLeadId: input.leadId || '',
-          snapshotRouteId: input.routeId || '',
           description: input.incomeSource || '',
         }, tx)
       } else if (input.type === 'EXPENSE' && input.sourceAccountId) {
@@ -316,7 +323,6 @@ export class TransactionService {
           entryDate: input.date,
           loanId: input.loanId,
           snapshotLeadId: input.leadId || '',
-          snapshotRouteId: input.routeId || '',
           description: input.description || '',
         }, tx)
       } else if (input.type === 'TRANSFER') {
@@ -329,7 +335,6 @@ export class TransactionService {
             sourceType: 'TRANSFER_OUT',
             entryDate: input.date,
             snapshotLeadId: input.leadId || '',
-            snapshotRouteId: input.routeId || '',
             destinationAccountId: input.destinationAccountId,
           }, tx)
         }
@@ -341,7 +346,6 @@ export class TransactionService {
             sourceType: 'TRANSFER_IN',
             entryDate: input.date,
             snapshotLeadId: input.leadId || '',
-            snapshotRouteId: input.routeId || '',
           }, tx)
         }
       }

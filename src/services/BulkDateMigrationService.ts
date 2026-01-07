@@ -41,20 +41,24 @@ export class BulkDateMigrationService {
       },
     }
 
-    // Build where clauses with optional routeId filter
+    // Build where clauses with optional routeId filter (via lead's current routes)
+    const routeFilter = input.routeId
+      ? { loan: { leadRelation: { routes: { some: { id: input.routeId } } } } }
+      : {}
+
     const accountEntryWhere = {
       ...baseCreatedAtFilter,
-      ...(input.routeId && { snapshotRouteId: input.routeId }),
+      ...routeFilter,
     }
 
     const loanPaymentWhere = {
       ...baseCreatedAtFilter,
-      ...(input.routeId && { loanRelation: { snapshotRouteId: input.routeId } }),
+      ...(input.routeId && { loanRelation: { leadRelation: { routes: { some: { id: input.routeId } } } } }),
     }
 
     const loanWhere = {
       ...baseCreatedAtFilter,
-      ...(input.routeId && { snapshotRouteId: input.routeId }),
+      ...(input.routeId && { leadRelation: { routes: { some: { id: input.routeId } } } }),
     }
 
     // Count records in parallel for performance
@@ -104,20 +108,24 @@ export class BulkDateMigrationService {
         },
       }
 
-      // Build where clauses with optional routeId filter
+      // Build where clauses with optional routeId filter (via lead's current routes)
+      const routeFilter = input.routeId
+        ? { loan: { leadRelation: { routes: { some: { id: input.routeId } } } } }
+        : {}
+
       const accountEntryWhere = {
         ...baseCreatedAtFilter,
-        ...(input.routeId && { snapshotRouteId: input.routeId }),
+        ...routeFilter,
       }
 
       const loanPaymentWhere = {
         ...baseCreatedAtFilter,
-        ...(input.routeId && { loanRelation: { snapshotRouteId: input.routeId } }),
+        ...(input.routeId && { loanRelation: { leadRelation: { routes: { some: { id: input.routeId } } } } }),
       }
 
       const loanWhere = {
         ...baseCreatedAtFilter,
-        ...(input.routeId && { snapshotRouteId: input.routeId }),
+        ...(input.routeId && { leadRelation: { routes: { some: { id: input.routeId } } } }),
       }
 
       // Update all three entity types in parallel

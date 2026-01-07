@@ -42,6 +42,7 @@ function serializePortfolioReport(report: PortfolioReport) {
         nuevos: report.summary.clientBalance.nuevos,
         terminadosSinRenovar: report.summary.clientBalance.terminadosSinRenovar,
         renovados: report.summary.clientBalance.renovados,
+        reintegros: report.summary.clientBalance.reintegros,
         balance: report.summary.clientBalance.balance,
         trend: report.summary.clientBalance.trend,
       },

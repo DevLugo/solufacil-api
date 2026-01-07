@@ -253,15 +253,8 @@ export class LoanService {
       })
     }
 
-    // Crear snapshot histórico
-    const routeId = lead.routes?.[0]?.id || undefined
-    const routeName = lead.routes?.[0]?.name || undefined
-    const snapshot = createLoanSnapshot(
-      lead.id,
-      lead.personalDataRelation?.fullName || '',
-      routeId,
-      routeName
-    )
+    // Crear snapshot histórico (solo del lead, la ruta se determina vía LocationHistoryService)
+    const snapshot = createLoanSnapshot(lead.id)
 
     // Calcular métricas finales (incluyendo profit pendiente de renovación)
     const finalProfitAmount = metrics.profitAmount.plus(pendingProfit)
@@ -428,21 +421,8 @@ export class LoanService {
       })
     }
 
-    // Validar que el lead tenga una ruta asignada
-    const routeId = lead.routes?.[0]?.id
-    const routeName = lead.routes?.[0]?.name
-    if (!routeId) {
-      throw new GraphQLError('El líder no tiene una ruta asignada. Por favor asigne una ruta al líder antes de crear préstamos.', {
-        extensions: { code: 'BAD_USER_INPUT' },
-      })
-    }
-
-    const snapshot = createLoanSnapshot(
-      lead.id,
-      lead.personalDataRelation?.fullName || '',
-      routeId,
-      routeName
-    )
+    // Crear snapshot histórico (solo del lead, la ruta se determina vía LocationHistoryService)
+    const snapshot = createLoanSnapshot(lead.id)
 
     // Ejecutar todo en una transacción
     return this.prisma.$transaction(async (tx) => {
@@ -641,7 +621,6 @@ export class LoanService {
           entryDate: input.signDate,
           loanId: loan.id,
           snapshotLeadId: input.leadId,
-          snapshotRouteId: routeId || '',
         }, tx)
 
         // 7.1. DEBIT: Comisión de otorgamiento
@@ -654,7 +633,6 @@ export class LoanService {
             entryDate: input.signDate,
             loanId: loan.id,
             snapshotLeadId: input.leadId,
-            snapshotRouteId: routeId || '',
           }, tx)
         }
 
@@ -708,7 +686,6 @@ export class LoanService {
             profitAmount,
             returnToCapital,
             snapshotLeadId: input.leadId,
-            snapshotRouteId: routeId || '',
           }, tx)
 
           // DEBIT: Comisión del primer pago
@@ -721,7 +698,6 @@ export class LoanService {
               entryDate: input.signDate,
               loanPaymentId: payment.id,
               snapshotLeadId: input.leadId,
-              snapshotRouteId: routeId || '',
             }, tx)
           }
 

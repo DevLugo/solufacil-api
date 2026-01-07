@@ -29,7 +29,14 @@ export const transactionResolvers = {
         where.accountId = args.accountId
       }
       if (args.routeId) {
-        where.snapshotRouteId = args.routeId
+        // Filter by loan's lead current routes
+        where.loan = {
+          leadRelation: {
+            routes: {
+              some: { id: args.routeId },
+            },
+          },
+        }
       }
       if (args.sourceTypes && args.sourceTypes.length > 0) {
         where.sourceType = { in: args.sourceTypes }
@@ -419,14 +426,17 @@ export const transactionResolvers = {
     },
 
     route: async (
-      parent: { snapshotRouteId?: string | null },
+      parent: { snapshotLeadId?: string | null },
       _args: unknown,
       context: GraphQLContext
     ) => {
-      if (!parent.snapshotRouteId) return null
-      return context.prisma.route.findUnique({
-        where: { id: parent.snapshotRouteId },
+      // Get route from lead's current routes
+      if (!parent.snapshotLeadId) return null
+      const lead = await context.prisma.employee.findUnique({
+        where: { id: parent.snapshotLeadId },
+        select: { routes: { take: 1 } },
       })
+      return lead?.routes?.[0] || null
     },
 
     lead: async (
