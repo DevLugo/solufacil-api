@@ -1,5 +1,6 @@
 import { Decimal } from 'decimal.js'
 import type { PrismaClient, Loan, LoanPayment } from '@solufacil/database'
+import { currentSchema } from '@solufacil/database'
 import { LocationHistoryService } from './LocationHistoryService'
 import {
   getActiveWeekRange,
@@ -44,6 +45,16 @@ export class PortfolioReportService {
 
   constructor(private prisma: PrismaClient) {
     this.locationHistoryService = new LocationHistoryService(prisma)
+  }
+
+  /**
+   * Sets the search_path for raw queries.
+   * This is necessary because $queryRawUnsafe doesn't use Prisma's schema configuration.
+   */
+  private async setSearchPath(): Promise<void> {
+    if (currentSchema && currentSchema !== 'public') {
+      await this.prisma.$executeRawUnsafe(`SET search_path TO "${currentSchema}"`)
+    }
   }
 
   // ========== Helper Methods for Building Queries ==========
@@ -1732,6 +1743,9 @@ export class PortfolioReportService {
 
     const whereClause = conditions.join(' AND ')
 
+    // Set search_path for raw queries (required for production schema)
+    await this.setSearchPath()
+
     // Query 1: Loans with lead's locationId for historical route lookup
     // Query 2: Payments for the period
     // Run both in parallel
@@ -2363,6 +2377,9 @@ export class PortfolioReportService {
       conditions.push(`l.loantype IN (${placeholders})`)
       params.push(...filters.loantypeIds)
     }
+
+    // Set search_path for raw queries (required for production schema)
+    await this.setSearchPath()
 
     const loans = await this.prisma.$queryRawUnsafe<Array<{
       id: string

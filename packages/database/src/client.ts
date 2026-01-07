@@ -15,7 +15,7 @@ const pool = globalForPrisma.pool ?? new Pool({
 })
 
 // Extract schema from DATABASE_URL or default to 'public'
-const getSchemaFromUrl = (url?: string): string => {
+export const getSchemaFromUrl = (url?: string): string => {
   if (!url) return 'public'
   try {
     const parsed = new URL(url)
@@ -24,6 +24,9 @@ const getSchemaFromUrl = (url?: string): string => {
     return 'public'
   }
 }
+
+// Export the current schema for use in raw queries
+export const currentSchema = getSchemaFromUrl(process.env.DATABASE_URL)
 
 const adapter = new PrismaPg(pool, {
   schema: getSchemaFromUrl(process.env.DATABASE_URL),
