@@ -53,10 +53,14 @@ export class PortfolioReportService {
    * This is needed because $queryRawUnsafe doesn't use Prisma's schema configuration.
    */
   private get schemaPrefix(): string {
-    if (currentSchema && currentSchema !== 'public') {
-      return `"${currentSchema}".`
-    }
-    return ''
+    // Use currentSchema from DATABASE_URL, fallback to POSTGRES_SCHEMA env var, or 'solufacil_mono' for production
+    const schema = currentSchema && currentSchema !== 'public'
+      ? currentSchema
+      : process.env.POSTGRES_SCHEMA || (process.env.NODE_ENV === 'production' ? 'solufacil_mono' : '')
+
+    const prefix = schema ? `"${schema}".` : ''
+    console.log(`[PortfolioReportService] schemaPrefix: "${prefix}", currentSchema: "${currentSchema}", env.POSTGRES_SCHEMA: "${process.env.POSTGRES_SCHEMA}"`)
+    return prefix
   }
 
   // ========== Helper Methods for Building Queries ==========
