@@ -45,3 +45,4 @@ next-env.d.ts
 
 # Prisma
 prisma/migrations/**/migration.sql
+packages/database/migration-dump.sql
