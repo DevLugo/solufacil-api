@@ -48,13 +48,15 @@ export class PortfolioReportService {
   }
 
   /**
-   * Sets the search_path for raw queries.
-   * This is necessary because $queryRawUnsafe doesn't use Prisma's schema configuration.
+   * Gets the schema prefix for raw queries.
+   * Returns empty string for 'public' schema, otherwise returns '"schema".'
+   * This is needed because $queryRawUnsafe doesn't use Prisma's schema configuration.
    */
-  private async setSearchPath(): Promise<void> {
+  private get schemaPrefix(): string {
     if (currentSchema && currentSchema !== 'public') {
-      await this.prisma.$executeRawUnsafe(`SET search_path TO "${currentSchema}"`)
+      return `"${currentSchema}".`
     }
+    return ''
   }
 
   // ========== Helper Methods for Building Queries ==========
@@ -1742,9 +1744,7 @@ export class PortfolioReportService {
     }
 
     const whereClause = conditions.join(' AND ')
-
-    // Set search_path for raw queries (required for production schema)
-    await this.setSearchPath()
+    const s = this.schemaPrefix // Schema prefix for raw queries
 
     // Query 1: Loans with lead's locationId for historical route lookup
     // Query 2: Payments for the period
@@ -1791,13 +1791,13 @@ export class PortfolioReportService {
           lt."weekDuration",
           l."amountGived"::text,
           l."profitAmount"::text
-        FROM "Loan" l
-        LEFT JOIN "Loan" prev ON l."previousLoan" = prev.id
-        LEFT JOIN "Loantype" lt ON l.loantype = lt.id
-        LEFT JOIN "PortfolioCleanup" c ON l."excludedByCleanup" = c.id
-        LEFT JOIN "Employee" e ON l.lead = e.id
-        LEFT JOIN "PersonalData" pd ON e."personalData" = pd.id
-        LEFT JOIN "Address" a ON pd.id = a."personalData"
+        FROM ${s}"Loan" l
+        LEFT JOIN ${s}"Loan" prev ON l."previousLoan" = prev.id
+        LEFT JOIN ${s}"Loantype" lt ON l.loantype = lt.id
+        LEFT JOIN ${s}"PortfolioCleanup" c ON l."excludedByCleanup" = c.id
+        LEFT JOIN ${s}"Employee" e ON l.lead = e.id
+        LEFT JOIN ${s}"PersonalData" pd ON e."personalData" = pd.id
+        LEFT JOIN ${s}"Address" a ON pd.id = a."personalData"
         WHERE ${whereClause}
         ORDER BY l.id, a.id
       `, ...params),
@@ -1812,8 +1812,8 @@ export class PortfolioReportService {
         receivedAt: Date
       }>>(`
         SELECT p.id, p.loan, p.amount::text, p."receivedAt"
-        FROM "LoanPayment" p
-        INNER JOIN "Loan" l ON p.loan = l.id
+        FROM ${s}"LoanPayment" p
+        INNER JOIN ${s}"Loan" l ON p.loan = l.id
         WHERE p."receivedAt" <= $1
           AND l."signDate" <= $2
           AND (l."finishedDate" IS NULL OR l."finishedDate" >= $3)
@@ -2378,8 +2378,7 @@ export class PortfolioReportService {
       params.push(...filters.loantypeIds)
     }
 
-    // Set search_path for raw queries (required for production schema)
-    await this.setSearchPath()
+    const s = this.schemaPrefix // Schema prefix for raw queries
 
     const loans = await this.prisma.$queryRawUnsafe<Array<{
       id: string
@@ -2405,8 +2404,8 @@ export class PortfolioReportService {
         l."pendingAmountStored"::text,
         l."requestedAmount"::text,
         l."amountGived"::text,
-        EXISTS (SELECT 1 FROM "Loan" l2 WHERE l2."previousLoan" = l.id) as "wasRenewed"
-      FROM "Loan" l
+        EXISTS (SELECT 1 FROM ${s}"Loan" l2 WHERE l2."previousLoan" = l.id) as "wasRenewed"
+      FROM ${s}"Loan" l
       WHERE ${conditions.join(' AND ')}
     `, ...params)
 

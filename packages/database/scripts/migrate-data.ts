@@ -1659,7 +1659,7 @@ async function reconcileBalances(): Promise<ReconciliationResult[]> {
 // ============================================================================
 
 async function populateLocationRouteHistory(): Promise<void> {
-  console.log('\n📍 Poblando LocationRouteHistory (desde Employee → Route)...\n')
+  console.log('\n📍 Poblando LocationRouteHistory (desde Location.route)...\n')
   const client = await targetPool.connect()
 
   try {
@@ -1669,17 +1669,15 @@ async function populateLocationRouteHistory(): Promise<void> {
     )
     const existing = parseInt(currentCount.rows[0].count)
 
+    // Always clear and repopulate
     if (existing > 0) {
-      console.log(`   ⏭️  Ya existen ${existing} registros en LocationRouteHistory, omitiendo`)
-      return
+      console.log(`   🗑️  Limpiando ${existing} registros existentes...`)
+      await client.query(`DELETE FROM "${TARGET_SCHEMA}"."LocationRouteHistory"`)
     }
 
-    // ÚNICA FUENTE DE VERDAD: Employee → Route (via _RouteEmployees)
-    // La localidad del empleado determina a qué ruta pertenece esa localidad
-    // Lógica: Employee ↔ Route + Employee → PersonalData → Address → Location
-    console.log(`   🔄 Poblando desde Employee → Route...`)
-
-    const insertFromEmployees = await client.query(`
+    // ÚNICA FUENTE DE VERDAD: Location.route
+    console.log(`   🔄 Poblando desde Location.route...`)
+    const insertFromLocationRoute = await client.query(`
       INSERT INTO "${TARGET_SCHEMA}"."LocationRouteHistory" (
         "id",
         "locationId",
@@ -1689,34 +1687,18 @@ async function populateLocationRouteHistory(): Promise<void> {
         "createdAt",
         "updatedAt"
       )
-      SELECT DISTINCT ON (loc.id)
+      SELECT
         gen_random_uuid()::text,
         loc.id,
-        re."B",
+        loc.route,
         '2020-01-01'::timestamp,
         NULL::timestamp,
         NOW(),
         NOW()
-      FROM "${TARGET_SCHEMA}"."_RouteEmployees" re
-      JOIN "${TARGET_SCHEMA}"."Employee" e ON e.id = re."A"
-      JOIN "${TARGET_SCHEMA}"."PersonalData" pd ON pd.id = e."personalData"
-      JOIN "${TARGET_SCHEMA}"."Address" a ON a."personalData" = pd.id
-      JOIN "${TARGET_SCHEMA}"."Location" loc ON loc.id = a.location
-      WHERE loc.id IS NOT NULL
-        AND re."B" IS NOT NULL
-      ORDER BY loc.id, e."createdAt" DESC
+      FROM "${TARGET_SCHEMA}"."Location" loc
+      WHERE loc.route IS NOT NULL
     `)
-    console.log(`   ✅ ${insertFromEmployees.rowCount} registros desde Employee → Route`)
-
-    // Sync Location.route con LocationRouteHistory
-    console.log(`\n   🔄 Sincronizando Location.route...`)
-    const updateLocationRoute = await client.query(`
-      UPDATE "${TARGET_SCHEMA}"."Location" loc
-      SET route = lrh."routeId"
-      FROM "${TARGET_SCHEMA}"."LocationRouteHistory" lrh
-      WHERE lrh."locationId" = loc.id
-    `)
-    console.log(`   ✅ ${updateLocationRoute.rowCount} Location.route actualizados`)
+    console.log(`   ✅ ${insertFromLocationRoute.rowCount} registros insertados`)
 
     // Show distribution by route
     console.log(`\n   📊 Distribución por ruta:`)
