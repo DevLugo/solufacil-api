@@ -200,6 +200,37 @@ export type BankIncomeTransactionsResponse = {
   transactions: Array<BankIncomeTransaction>;
 };
 
+export type BatchChangeLocationRouteInput = {
+  effectiveDate: Scalars['DateTime']['input'];
+  locationIds: Array<Scalars['ID']['input']>;
+  newRouteId: Scalars['ID']['input'];
+};
+
+export type BatchLocationRouteChangeDetail = {
+  __typename?: 'BatchLocationRouteChangeDetail';
+  locationId: Scalars['ID']['output'];
+  locationName: Scalars['String']['output'];
+  newRouteId: Scalars['ID']['output'];
+  newRouteName: Scalars['String']['output'];
+  previousRouteId?: Maybe<Scalars['ID']['output']>;
+  previousRouteName?: Maybe<Scalars['String']['output']>;
+};
+
+export type BatchLocationRouteChangeError = {
+  __typename?: 'BatchLocationRouteChangeError';
+  error: Scalars['String']['output'];
+  locationId: Scalars['ID']['output'];
+};
+
+export type BatchLocationRouteChangeResult = {
+  __typename?: 'BatchLocationRouteChangeResult';
+  changesApplied: Scalars['Int']['output'];
+  details: Array<BatchLocationRouteChangeDetail>;
+  errors: Array<BatchLocationRouteChangeError>;
+  message: Scalars['String']['output'];
+  success: Scalars['Boolean']['output'];
+};
+
 export type BatchTransferResult = {
   __typename?: 'BatchTransferResult';
   message: Scalars['String']['output'];
@@ -207,6 +238,40 @@ export type BatchTransferResult = {
   totalAmount: Scalars['Decimal']['output'];
   transactions: Array<Transaction>;
   transactionsCreated: Scalars['Int']['output'];
+};
+
+export type BatchUpsertHistoricalDetail = {
+  __typename?: 'BatchUpsertHistoricalDetail';
+  endDate: Scalars['DateTime']['output'];
+  locationId: Scalars['ID']['output'];
+  locationName: Scalars['String']['output'];
+  routeId: Scalars['ID']['output'];
+  routeName: Scalars['String']['output'];
+  startDate: Scalars['DateTime']['output'];
+};
+
+export type BatchUpsertHistoricalError = {
+  __typename?: 'BatchUpsertHistoricalError';
+  error: Scalars['String']['output'];
+  locationId: Scalars['ID']['output'];
+};
+
+export type BatchUpsertHistoricalInput = {
+  endDate: Scalars['DateTime']['input'];
+  locationIds: Array<Scalars['ID']['input']>;
+  routeId: Scalars['ID']['input'];
+  startDate: Scalars['DateTime']['input'];
+};
+
+export type BatchUpsertHistoricalResult = {
+  __typename?: 'BatchUpsertHistoricalResult';
+  details: Array<BatchUpsertHistoricalDetail>;
+  errors: Array<BatchUpsertHistoricalError>;
+  message: Scalars['String']['output'];
+  recordsAdjusted: Scalars['Int']['output'];
+  recordsCreated: Scalars['Int']['output'];
+  recordsDeleted: Scalars['Int']['output'];
+  success: Scalars['Boolean']['output'];
 };
 
 export type Borrower = {
@@ -1182,6 +1247,8 @@ export type Mutation = {
   __typename?: 'Mutation';
   activateTelegramUser: TelegramUser;
   addLocationRouteHistory: LocationRouteHistory;
+  batchChangeLocationRoutes: BatchLocationRouteChangeResult;
+  batchUpsertHistoricalAssignment: BatchUpsertHistoricalResult;
   cancelLoan: Loan;
   cancelLoanWithAccountRestore: CancelLoanResult;
   changeLocationRoute: LocationRouteHistory;
@@ -1260,6 +1327,16 @@ export type MutationActivateTelegramUserArgs = {
 
 export type MutationAddLocationRouteHistoryArgs = {
   input: LocationRouteHistoryInput;
+};
+
+
+export type MutationBatchChangeLocationRoutesArgs = {
+  input: BatchChangeLocationRouteInput;
+};
+
+
+export type MutationBatchUpsertHistoricalAssignmentArgs = {
+  input: BatchUpsertHistoricalInput;
 };
 
 
@@ -2939,7 +3016,15 @@ export type ResolversTypes = ResolversObject<{
   BadDebtSummary: ResolverTypeWrapper<BadDebtSummary>;
   BankIncomeTransaction: ResolverTypeWrapper<BankIncomeTransaction>;
   BankIncomeTransactionsResponse: ResolverTypeWrapper<BankIncomeTransactionsResponse>;
+  BatchChangeLocationRouteInput: BatchChangeLocationRouteInput;
+  BatchLocationRouteChangeDetail: ResolverTypeWrapper<BatchLocationRouteChangeDetail>;
+  BatchLocationRouteChangeError: ResolverTypeWrapper<BatchLocationRouteChangeError>;
+  BatchLocationRouteChangeResult: ResolverTypeWrapper<BatchLocationRouteChangeResult>;
   BatchTransferResult: ResolverTypeWrapper<BatchTransferResult>;
+  BatchUpsertHistoricalDetail: ResolverTypeWrapper<BatchUpsertHistoricalDetail>;
+  BatchUpsertHistoricalError: ResolverTypeWrapper<BatchUpsertHistoricalError>;
+  BatchUpsertHistoricalInput: BatchUpsertHistoricalInput;
+  BatchUpsertHistoricalResult: ResolverTypeWrapper<BatchUpsertHistoricalResult>;
   Boolean: ResolverTypeWrapper<Scalars['Boolean']['output']>;
   Borrower: ResolverTypeWrapper<Borrower>;
   BorrowerSearchResult: ResolverTypeWrapper<BorrowerSearchResult>;
@@ -3137,7 +3222,15 @@ export type ResolversParentTypes = ResolversObject<{
   BadDebtSummary: BadDebtSummary;
   BankIncomeTransaction: BankIncomeTransaction;
   BankIncomeTransactionsResponse: BankIncomeTransactionsResponse;
+  BatchChangeLocationRouteInput: BatchChangeLocationRouteInput;
+  BatchLocationRouteChangeDetail: BatchLocationRouteChangeDetail;
+  BatchLocationRouteChangeError: BatchLocationRouteChangeError;
+  BatchLocationRouteChangeResult: BatchLocationRouteChangeResult;
   BatchTransferResult: BatchTransferResult;
+  BatchUpsertHistoricalDetail: BatchUpsertHistoricalDetail;
+  BatchUpsertHistoricalError: BatchUpsertHistoricalError;
+  BatchUpsertHistoricalInput: BatchUpsertHistoricalInput;
+  BatchUpsertHistoricalResult: BatchUpsertHistoricalResult;
   Boolean: Scalars['Boolean']['output'];
   Borrower: Borrower;
   BorrowerSearchResult: BorrowerSearchResult;
@@ -3478,12 +3571,64 @@ export type BankIncomeTransactionsResponseResolvers<ContextType = GraphQLContext
   __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
 }>;
 
+export type BatchLocationRouteChangeDetailResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BatchLocationRouteChangeDetail'] = ResolversParentTypes['BatchLocationRouteChangeDetail']> = ResolversObject<{
+  locationId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  locationName?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  newRouteId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  newRouteName?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  previousRouteId?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType>;
+  previousRouteName?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type BatchLocationRouteChangeErrorResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BatchLocationRouteChangeError'] = ResolversParentTypes['BatchLocationRouteChangeError']> = ResolversObject<{
+  error?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  locationId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type BatchLocationRouteChangeResultResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BatchLocationRouteChangeResult'] = ResolversParentTypes['BatchLocationRouteChangeResult']> = ResolversObject<{
+  changesApplied?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  details?: Resolver<Array<ResolversTypes['BatchLocationRouteChangeDetail']>, ParentType, ContextType>;
+  errors?: Resolver<Array<ResolversTypes['BatchLocationRouteChangeError']>, ParentType, ContextType>;
+  message?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  success?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
 export type BatchTransferResultResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BatchTransferResult'] = ResolversParentTypes['BatchTransferResult']> = ResolversObject<{
   message?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   success?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
   totalAmount?: Resolver<ResolversTypes['Decimal'], ParentType, ContextType>;
   transactions?: Resolver<Array<ResolversTypes['Transaction']>, ParentType, ContextType>;
   transactionsCreated?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type BatchUpsertHistoricalDetailResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BatchUpsertHistoricalDetail'] = ResolversParentTypes['BatchUpsertHistoricalDetail']> = ResolversObject<{
+  endDate?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
+  locationId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  locationName?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  routeId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  routeName?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  startDate?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type BatchUpsertHistoricalErrorResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BatchUpsertHistoricalError'] = ResolversParentTypes['BatchUpsertHistoricalError']> = ResolversObject<{
+  error?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  locationId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type BatchUpsertHistoricalResultResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['BatchUpsertHistoricalResult'] = ResolversParentTypes['BatchUpsertHistoricalResult']> = ResolversObject<{
+  details?: Resolver<Array<ResolversTypes['BatchUpsertHistoricalDetail']>, ParentType, ContextType>;
+  errors?: Resolver<Array<ResolversTypes['BatchUpsertHistoricalError']>, ParentType, ContextType>;
+  message?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  recordsAdjusted?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  recordsCreated?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  recordsDeleted?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  success?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
   __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
 }>;
 
@@ -4201,6 +4346,8 @@ export type MunicipalityResolvers<ContextType = GraphQLContext, ParentType exten
 export type MutationResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['Mutation'] = ResolversParentTypes['Mutation']> = ResolversObject<{
   activateTelegramUser?: Resolver<ResolversTypes['TelegramUser'], ParentType, ContextType, RequireFields<MutationActivateTelegramUserArgs, 'id'>>;
   addLocationRouteHistory?: Resolver<ResolversTypes['LocationRouteHistory'], ParentType, ContextType, RequireFields<MutationAddLocationRouteHistoryArgs, 'input'>>;
+  batchChangeLocationRoutes?: Resolver<ResolversTypes['BatchLocationRouteChangeResult'], ParentType, ContextType, RequireFields<MutationBatchChangeLocationRoutesArgs, 'input'>>;
+  batchUpsertHistoricalAssignment?: Resolver<ResolversTypes['BatchUpsertHistoricalResult'], ParentType, ContextType, RequireFields<MutationBatchUpsertHistoricalAssignmentArgs, 'input'>>;
   cancelLoan?: Resolver<ResolversTypes['Loan'], ParentType, ContextType, RequireFields<MutationCancelLoanArgs, 'id'>>;
   cancelLoanWithAccountRestore?: Resolver<ResolversTypes['CancelLoanResult'], ParentType, ContextType, RequireFields<MutationCancelLoanWithAccountRestoreArgs, 'accountId' | 'id'>>;
   changeLocationRoute?: Resolver<ResolversTypes['LocationRouteHistory'], ParentType, ContextType, RequireFields<MutationChangeLocationRouteArgs, 'effectiveDate' | 'locationId' | 'routeId'>>;
@@ -4791,7 +4938,13 @@ export type Resolvers<ContextType = GraphQLContext> = ResolversObject<{
   BadDebtSummary?: BadDebtSummaryResolvers<ContextType>;
   BankIncomeTransaction?: BankIncomeTransactionResolvers<ContextType>;
   BankIncomeTransactionsResponse?: BankIncomeTransactionsResponseResolvers<ContextType>;
+  BatchLocationRouteChangeDetail?: BatchLocationRouteChangeDetailResolvers<ContextType>;
+  BatchLocationRouteChangeError?: BatchLocationRouteChangeErrorResolvers<ContextType>;
+  BatchLocationRouteChangeResult?: BatchLocationRouteChangeResultResolvers<ContextType>;
   BatchTransferResult?: BatchTransferResultResolvers<ContextType>;
+  BatchUpsertHistoricalDetail?: BatchUpsertHistoricalDetailResolvers<ContextType>;
+  BatchUpsertHistoricalError?: BatchUpsertHistoricalErrorResolvers<ContextType>;
+  BatchUpsertHistoricalResult?: BatchUpsertHistoricalResultResolvers<ContextType>;
   Borrower?: BorrowerResolvers<ContextType>;
   BorrowerSearchResult?: BorrowerSearchResultResolvers<ContextType>;
   BulkDateMigrationPreview?: BulkDateMigrationPreviewResolvers<ContextType>;
