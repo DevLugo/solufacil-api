@@ -344,18 +344,20 @@ export class PortfolioReportService {
     // Use last completed week for route breakdown, or first week if none completed
     const weekForBreakdown = lastCompletedWeek || weeks[0]
 
-    // Get route breakdown for display (kept for byLocation in response)
-    const byLocation = await this.getRouteBreakdownWithAverages(
-      loans,
-      allPayments,
-      weekForBreakdown,
-      filters,
-      routeInfoMap,
-      routeWeeklyStats
-    )
-
-    // Call getRouteKPIs to get totals for "Por Rutas" tab
-    const routeKPIs = await this.getRouteKPIs(year, month, filters)
+    // OPTIMIZATION: Run route breakdown and route KPIs in parallel
+    const [byLocation, routeKPIs] = await Promise.all([
+      // Get route breakdown for display (kept for byLocation in response)
+      this.getRouteBreakdownWithAverages(
+        loans,
+        allPayments,
+        weekForBreakdown,
+        filters,
+        routeInfoMap,
+        routeWeeklyStats
+      ),
+      // Call getRouteKPIs to get totals for "Por Rutas" tab
+      this.getRouteKPIs(year, month, filters),
+    ])
     const totalClientesActivos = routeKPIs.reduce((sum, r) => sum + r.clientesTotal, 0)
     const pagandoPromedio = routeKPIs.reduce((sum, r) => sum + r.pagandoPromedio, 0)
     const cvPromedio = routeKPIs.reduce((sum, r) => sum + r.cvPromedio, 0)
