@@ -1,5 +1,9 @@
 import type { GraphQLContext } from '@solufacil/graphql-schema'
-import { LocationHistoryService, LocationRouteHistoryInput } from '../services/LocationHistoryService'
+import {
+  LocationHistoryService,
+  LocationRouteHistoryInput,
+  BatchChangeLocationRouteInput,
+} from '../services/LocationHistoryService'
 import { authenticateUser } from '../middleware/auth'
 
 export interface LocationRouteHistoryParent {
@@ -104,6 +108,21 @@ export const locationHistoryResolvers = {
       const service = new LocationHistoryService(context.prisma)
       await service.deleteHistoricalAssignment(args.id)
       return true
+    },
+
+    batchChangeLocationRoutes: async (
+      _parent: unknown,
+      args: { input: BatchChangeLocationRouteInput },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      const service = new LocationHistoryService(context.prisma)
+      return service.batchChangeLocationRoutes({
+        locationIds: args.input.locationIds,
+        newRouteId: args.input.newRouteId,
+        effectiveDate: new Date(args.input.effectiveDate),
+      })
     },
   },
 

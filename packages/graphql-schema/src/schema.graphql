@@ -374,6 +374,34 @@ input LocationRouteHistoryInput {
   endDate: DateTime
 }
 
+input BatchChangeLocationRouteInput {
+  locationIds: [ID!]!
+  newRouteId: ID!
+  effectiveDate: DateTime!
+}
+
+type BatchLocationRouteChangeError {
+  locationId: ID!
+  error: String!
+}
+
+type BatchLocationRouteChangeDetail {
+  locationId: ID!
+  locationName: String!
+  previousRouteId: ID
+  previousRouteName: String
+  newRouteId: ID!
+  newRouteName: String!
+}
+
+type BatchLocationRouteChangeResult {
+  success: Boolean!
+  message: String!
+  changesApplied: Int!
+  errors: [BatchLocationRouteChangeError!]!
+  details: [BatchLocationRouteChangeDetail!]!
+}
+
 type Municipality {
   id: ID!
   name: String!
@@ -1677,6 +1705,7 @@ type Mutation {
   addLocationRouteHistory(input: LocationRouteHistoryInput!): LocationRouteHistory! @auth
   updateLocationRouteHistory(id: ID!, input: LocationRouteHistoryInput!): LocationRouteHistory! @auth
   deleteLocationRouteHistory(id: ID!): Boolean! @auth
+  batchChangeLocationRoutes(input: BatchChangeLocationRouteInput!): BatchLocationRouteChangeResult! @auth
 
   # Loan types
   createLoantype(input: CreateLoantypeInput!): Loantype! @requireRole(roles: [ADMIN])
