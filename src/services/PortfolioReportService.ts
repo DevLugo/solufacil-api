@@ -354,11 +354,11 @@ export class PortfolioReportService {
       routeWeeklyStats
     )
 
-    // Calculate totals from byLocation (already computed above) instead of calling getRouteKPIs again
-    // This eliminates a duplicate expensive query
-    const totalClientesActivos = byLocation.reduce((sum, loc) => sum + loc.clientesActivos, 0)
-    const pagandoPromedio = byLocation.reduce((sum, loc) => sum + (loc.pagandoPromedio || 0), 0)
-    const cvPromedio = byLocation.reduce((sum, loc) => sum + (loc.cvPromedio || 0), 0)
+    // Call getRouteKPIs to get totals for "Por Rutas" tab
+    const routeKPIs = await this.getRouteKPIs(year, month, filters)
+    const totalClientesActivos = routeKPIs.reduce((sum, r) => sum + r.clientesTotal, 0)
+    const pagandoPromedio = routeKPIs.reduce((sum, r) => sum + r.pagandoPromedio, 0)
+    const cvPromedio = routeKPIs.reduce((sum, r) => sum + r.cvPromedio, 0)
 
     // Client balance for the period
     const clientBalance = calculateClientBalance(loans, periodStart, periodEnd)
@@ -433,45 +433,121 @@ export class PortfolioReportService {
     if (completedWeeks.length === 0) return []
 
     const lastCompletedWeek = completedWeeks[completedWeeks.length - 1]
+    const s = this.schemaPrefix
 
-    // Query loans with lead's location for historical route lookup
-    const loansWithLeadLocation = await this.prisma.loan.findMany({
-      where: {
-        signDate: { lte: lastCompletedWeek.end },
-        excludedByCleanup: null,
-        AND: [
-          { OR: [{ finishedDate: null }, { finishedDate: { gte: lastCompletedWeek.start } }] },
-          { OR: [{ renewedDate: null }, { renewedDate: { gte: lastCompletedWeek.start } }] },
-        ],
-        ...(filters?.loantypeIds?.length && { loantype: { in: filters.loantypeIds } }),
-      },
-      include: {
-        leadRelation: {
-          include: {
-            personalDataRelation: {
-              include: {
-                addresses: {
-                  take: 1,
-                  select: { location: true },
-                },
-              },
-            },
-          },
-        },
-        loantypeRelation: true,
-        payments: {
-          where: { receivedAt: { lte: lastCompletedWeek.end } },
-          orderBy: { receivedAt: 'asc' },
-        },
-      },
-    })
+    // Build WHERE conditions for raw SQL (with explicit timestamp casts for PostgreSQL)
+    const conditions: string[] = [
+      `l."signDate" <= $1::timestamp`,
+      `l."excludedByCleanup" IS NULL`,
+      `(l."finishedDate" IS NULL OR l."finishedDate" >= $2::timestamp)`,
+      `(l."renewedDate" IS NULL OR l."renewedDate" >= $2::timestamp)`,
+    ]
+    const loansParams: unknown[] = [lastCompletedWeek.end, lastCompletedWeek.start]
+    let paramIndex = 3
+
+    if (filters?.loantypeIds?.length) {
+      const ltPlaceholders = filters.loantypeIds.map((_, i) => `$${paramIndex + i}`).join(', ')
+      conditions.push(`l.loantype IN (${ltPlaceholders})`)
+      loansParams.push(...filters.loantypeIds)
+      paramIndex += filters.loantypeIds.length
+    }
+
+    const whereClause = conditions.join(' AND ')
+
+    // Build WHERE conditions for payments query (different param indices)
+    const paymentsConditions: string[] = [
+      `l."signDate" <= $2::timestamp`,
+      `l."excludedByCleanup" IS NULL`,
+      `(l."finishedDate" IS NULL OR l."finishedDate" >= $3::timestamp)`,
+      `(l."renewedDate" IS NULL OR l."renewedDate" >= $3::timestamp)`,
+    ]
+    const paymentsParams: unknown[] = [lastCompletedWeek.end, lastCompletedWeek.end, lastCompletedWeek.start]
+    let paymentsParamIndex = 4
+
+    if (filters?.loantypeIds?.length) {
+      const ltPlaceholders = filters.loantypeIds.map((_, i) => `$${paymentsParamIndex + i}`).join(', ')
+      paymentsConditions.push(`l.loantype IN (${ltPlaceholders})`)
+      paymentsParams.push(...filters.loantypeIds)
+    }
+
+    const paymentsWhereClause = paymentsConditions.join(' AND ')
+
+    // OPTIMIZATION: Run loans and payments queries in parallel using raw SQL
+    const [loansResult, paymentsResult] = await Promise.all([
+      // Query 1: Loans with lead's locationId (no payments - fetched separately)
+      this.prisma.$queryRawUnsafe<Array<{
+        id: string
+        signDate: Date
+        finishedDate: Date | null
+        renewedDate: Date | null
+        badDebtDate: Date | null
+        previousLoan: string | null
+        status: string
+        pendingAmountStored: string
+        requestedAmount: string
+        totalPaid: string
+        excludedByCleanup: string | null
+        leadLocationId: string | null
+        rate: string | null
+        weekDuration: number | null
+      }>>(`
+        SELECT DISTINCT ON (l.id)
+          l.id,
+          l."signDate",
+          l."finishedDate",
+          l."renewedDate",
+          l."badDebtDate",
+          l."previousLoan",
+          l.status,
+          l."pendingAmountStored"::text,
+          l."requestedAmount"::text,
+          l."totalPaid"::text,
+          l."excludedByCleanup",
+          a.location as "leadLocationId",
+          lt.rate::text,
+          lt."weekDuration"
+        FROM ${s}"Loan" l
+        LEFT JOIN ${s}"Loantype" lt ON l.loantype = lt.id
+        LEFT JOIN ${s}"Employee" e ON l.lead = e.id
+        LEFT JOIN ${s}"PersonalData" pd ON e."personalData" = pd.id
+        LEFT JOIN ${s}"Address" a ON pd.id = a."personalData"
+        WHERE ${whereClause}
+        ORDER BY l.id, a.id
+      `, ...loansParams),
+
+      // Query 2: Payments for loans matching the same conditions
+      this.prisma.$queryRawUnsafe<Array<{
+        id: string
+        loan: string
+        amount: string
+        receivedAt: Date
+      }>>(`
+        SELECT p.id, p.loan, p.amount::text, p."receivedAt"
+        FROM ${s}"LoanPayment" p
+        INNER JOIN ${s}"Loan" l ON p.loan = l.id
+        WHERE p."receivedAt" <= $1::timestamp
+          AND ${paymentsWhereClause}
+      `, ...paymentsParams),
+    ])
+
+    // Build payments map
+    const paymentsMap = new Map<string, PaymentForCV[]>()
+    for (const payment of paymentsResult) {
+      if (!paymentsMap.has(payment.loan)) {
+        paymentsMap.set(payment.loan, [])
+      }
+      paymentsMap.get(payment.loan)!.push({
+        id: payment.id,
+        receivedAt: payment.receivedAt,
+        amount: parseFloat(payment.amount),
+      })
+    }
 
     // Build a map of loanId -> locationId for easy lookup
     const loanLocationMap = new Map<string, string>()
-    for (const loan of loansWithLeadLocation) {
-      const locationId = loan.leadRelation?.personalDataRelation?.addresses[0]?.location
-      if (locationId) {
-        loanLocationMap.set(loan.id, locationId)
+    for (const loan of loansResult) {
+      if (loan.leadLocationId) {
+        loanLocationMap.set(loan.id, loan.leadLocationId)
       }
     }
 
@@ -510,7 +586,7 @@ export class PortfolioReportService {
     // Build a map of loanId -> routeId for FILTERING ONLY (using signDate for initial filter)
     // The actual weekly attribution will use getRouteForLoanAtWeek
     const loanRouteMapForFilter = new Map<string, string>()
-    for (const loan of loansWithLeadLocation) {
+    for (const loan of loansResult) {
       const locationId = loanLocationMap.get(loan.id)
       if (locationId) {
         // For initial filtering, use the last completed week's route
@@ -523,21 +599,21 @@ export class PortfolioReportService {
 
     // Filter by routeIds if specified (using current week's route assignment)
     const filteredLoans = filters?.routeIds?.length
-      ? loansWithLeadLocation.filter((loan) => {
+      ? loansResult.filter((loan) => {
           const routeId = loanRouteMapForFilter.get(loan.id)
           return routeId && filters.routeIds!.includes(routeId)
         })
-      : loansWithLeadLocation
+      : loansResult
 
     // Convert loans to LoanForPortfolio format
     const loansForPortfolio = filteredLoans.map((loan) => {
-      const rate = loan.loantypeRelation?.rate ? new Decimal(loan.loantypeRelation.rate).toNumber() : 0
-      const requestedAmount = new Decimal(loan.requestedAmount).toNumber()
+      const rate = loan.rate ? parseFloat(loan.rate) : 0
+      const requestedAmount = loan.requestedAmount ? parseFloat(loan.requestedAmount) : 0
       const totalDebt = requestedAmount * (1 + rate)
 
       return {
         id: loan.id,
-        pendingAmountStored: new Decimal(loan.pendingAmountStored).toNumber(),
+        pendingAmountStored: loan.pendingAmountStored ? parseFloat(loan.pendingAmountStored) : 0,
         signDate: loan.signDate,
         finishedDate: loan.finishedDate,
         renewedDate: loan.renewedDate,
@@ -547,18 +623,14 @@ export class PortfolioReportService {
         status: loan.status,
         rate,
         requestedAmount,
-        totalPaid: new Decimal(loan.totalPaid).toNumber(),
-        weekDuration: loan.loantypeRelation?.weekDuration ?? 16,
+        totalPaid: loan.totalPaid ? parseFloat(loan.totalPaid) : 0,
+        weekDuration: loan.weekDuration ?? 16,
         totalDebt,
-        payments: this.toPaymentsForCV(loan.payments),
       }
     })
 
-    // Create payments map
-    const allPaymentsMap = new Map<string, PaymentForCV[]>()
-    for (const loan of loansForPortfolio) {
-      allPaymentsMap.set(loan.id, loan.payments)
-    }
+    // Use the pre-built payments map (already populated from paymentsResult)
+    const allPaymentsMap = paymentsMap
 
     // Calculate metrics per route
     // Each week, loans are attributed to the route based on that week's date (not signDate)
