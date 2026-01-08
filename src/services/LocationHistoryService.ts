@@ -390,6 +390,19 @@ export class LocationHistoryService {
     const dayAfterEndDate = new Date(newEndDate)
     dayAfterEndDate.setDate(dayAfterEndDate.getDate() + 1)
 
+    console.log('[LocationHistoryService] upsertHistoricalAssignment - Input:', {
+      locationId: input.locationId,
+      routeId: input.routeId,
+      startDate: input.startDate,
+      endDate: input.endDate,
+    })
+    console.log('[LocationHistoryService] Found overlapping assignments:', overlappingAssignments.map(a => ({
+      id: a.id,
+      routeId: a.routeId,
+      startDate: a.startDate,
+      endDate: a.endDate,
+    })))
+
     return this.prisma.$transaction(async (tx) => {
       // Process each overlapping assignment
       for (const existing of overlappingAssignments) {
@@ -397,6 +410,7 @@ export class LocationHistoryService {
         if (newEndDate >= existing.startDate) {
           if (existing.endDate === null) {
             // Current assignment: just adjust startDate
+            console.log(`[LocationHistoryService] Adjusting current assignment ${existing.id} (routeId: ${existing.routeId}) startDate to:`, dayAfterEndDate)
             await tx.locationRouteHistory.update({
               where: { id: existing.id },
               data: { startDate: dayAfterEndDate },
@@ -406,11 +420,13 @@ export class LocationHistoryService {
             // If dayAfterEndDate > existing.endDate, the record would be invalid (startDate > endDate)
             if (dayAfterEndDate > existing.endDate) {
               // Delete the record as it's completely contained within the new period
+              console.log(`[LocationHistoryService] Deleting contained assignment ${existing.id} (routeId: ${existing.routeId})`)
               await tx.locationRouteHistory.delete({
                 where: { id: existing.id },
               })
             } else {
               // Adjust the startDate
+              console.log(`[LocationHistoryService] Adjusting historical assignment ${existing.id} (routeId: ${existing.routeId}) startDate to:`, dayAfterEndDate)
               await tx.locationRouteHistory.update({
                 where: { id: existing.id },
                 data: { startDate: dayAfterEndDate },
@@ -421,7 +437,8 @@ export class LocationHistoryService {
       }
 
       // Create the new historical assignment
-      return tx.locationRouteHistory.create({
+      console.log('[LocationHistoryService] Creating new assignment with routeId:', input.routeId)
+      const newRecord = await tx.locationRouteHistory.create({
         data: {
           locationId: input.locationId,
           routeId: input.routeId,
@@ -429,6 +446,8 @@ export class LocationHistoryService {
           endDate: input.endDate,
         },
       })
+      console.log('[LocationHistoryService] Created record:', newRecord)
+      return newRecord
     })
   }
 
