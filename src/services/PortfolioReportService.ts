@@ -466,44 +466,65 @@ export class PortfolioReportService {
       },
     })
 
-    // Build lookups for historical route determination
-    const routeLookups: Array<{ locationId: string; date: Date; loanId: string }> = []
+    // Build a map of loanId -> locationId for easy lookup
+    const loanLocationMap = new Map<string, string>()
     for (const loan of loansWithLeadLocation) {
       const locationId = loan.leadRelation?.personalDataRelation?.addresses[0]?.location
       if (locationId) {
+        loanLocationMap.set(loan.id, locationId)
+      }
+    }
+
+    // Build lookups for ALL (location, week) combinations
+    // This allows us to determine the route for each loan in EACH week based on that week's date
+    const routeLookups: Array<{ locationId: string; date: Date }> = []
+    const uniqueLocationIds = new Set(loanLocationMap.values())
+
+    for (const locationId of uniqueLocationIds) {
+      for (const week of completedWeeks) {
+        // Use week.end as the reference date for route lookup
         routeLookups.push({
           locationId,
-          date: loan.signDate,
-          loanId: loan.id,
+          date: week.end,
         })
       }
     }
 
     // Batch lookup historical routes using LocationHistoryService
-    const historicalRouteMap = await this.locationHistoryService.getRoutesForLocationsAtDates(
-      routeLookups.map((l) => ({ locationId: l.locationId, date: l.date }))
-    )
+    const historicalRouteMap = await this.locationHistoryService.getRoutesForLocationsAtDates(routeLookups)
 
-    // Build a map of loanId -> routeId (single route per loan based on historical lookup)
-    const loanRouteMap = new Map<string, string>()
+    // Helper function to get route for a loan at a specific week
+    const getRouteForLoanAtWeek = (loanId: string, week: WeekRange): { routeId: string; routeName: string } | null => {
+      const locationId = loanLocationMap.get(loanId)
+      if (!locationId) return null
+      const key = `${locationId}:${week.end.toISOString()}`
+      return historicalRouteMap.get(key) || null
+    }
+
+    // Collect all route names from the lookups
     const routeNames = new Map<string, string>()
+    for (const routeInfo of historicalRouteMap.values()) {
+      routeNames.set(routeInfo.routeId, routeInfo.routeName)
+    }
 
+    // Build a map of loanId -> routeId for FILTERING ONLY (using signDate for initial filter)
+    // The actual weekly attribution will use getRouteForLoanAtWeek
+    const loanRouteMapForFilter = new Map<string, string>()
     for (const loan of loansWithLeadLocation) {
-      const locationId = loan.leadRelation?.personalDataRelation?.addresses[0]?.location
+      const locationId = loanLocationMap.get(loan.id)
       if (locationId) {
-        const key = `${locationId}:${loan.signDate.toISOString()}`
-        const routeInfo = historicalRouteMap.get(key)
+        // For initial filtering, use the last completed week's route
+        const routeInfo = getRouteForLoanAtWeek(loan.id, lastCompletedWeek)
         if (routeInfo) {
-          loanRouteMap.set(loan.id, routeInfo.routeId)
-          routeNames.set(routeInfo.routeId, routeInfo.routeName)
+          loanRouteMapForFilter.set(loan.id, routeInfo.routeId)
         }
       }
     }
 
-    // Filter by routeIds if specified (using historical route assignment)
+    // Filter by routeIds if specified (using current week's route assignment)
     const filteredLoans = filters?.routeIds?.length
       ? loansWithLeadLocation.filter((loan) => {
-          const routeId = loanRouteMap.get(loan.id)
+          const routeId = loanRouteMapForFilter.get(loan.id)
           return routeId && filters.routeIds!.includes(routeId)
         })
       : loansWithLeadLocation
@@ -539,16 +560,8 @@ export class PortfolioReportService {
       allPaymentsMap.set(loan.id, loan.payments)
     }
 
-    // Get all unique routes from the filtered loans
-    const allRouteIds = new Set<string>()
-    for (const loan of filteredLoans) {
-      const routeId = loanRouteMap.get(loan.id)
-      if (routeId) {
-        allRouteIds.add(routeId)
-      }
-    }
-
     // Calculate metrics per route
+    // Each week, loans are attributed to the route based on that week's date (not signDate)
     const routeStats = new Map<string, {
       weeklyAlCorriente: number[]
       weeklyEnCV: number[]
@@ -569,13 +582,21 @@ export class PortfolioReportService {
 
       const isLastWeek = week.weekNumber === lastCompletedWeek.weekNumber
 
-      // For each route, calculate stats
-      for (const routeId of allRouteIds) {
-        // Filter loans that belong to this route (using historical route from signDate)
-        const routeLoans = activeLoansThisWeek.filter((loan) => {
-          return loanRouteMap.get(loan.id) === routeId
-        })
+      // Group active loans by their route AT THIS WEEK (not signDate)
+      const loansByRouteThisWeek = new Map<string, typeof loansForPortfolio>()
+      for (const loan of activeLoansThisWeek) {
+        const routeInfo = getRouteForLoanAtWeek(loan.id, week)
+        if (routeInfo) {
+          const routeId = routeInfo.routeId
+          if (!loansByRouteThisWeek.has(routeId)) {
+            loansByRouteThisWeek.set(routeId, [])
+          }
+          loansByRouteThisWeek.get(routeId)!.push(loan)
+        }
+      }
 
+      // Calculate stats for each route this week
+      for (const [routeId, routeLoans] of loansByRouteThisWeek) {
         if (routeLoans.length === 0) continue
 
         // Create payments map for these loans
