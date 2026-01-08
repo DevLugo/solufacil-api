@@ -63,6 +63,26 @@ export class LocationHistoryService {
   constructor(private prisma: PrismaClient) {}
 
   /**
+   * Normalize a date to the start of day (00:00:00.000)
+   * Used for startDate to ensure any query on that day matches
+   */
+  private startOfDay(date: Date): Date {
+    const result = new Date(date)
+    result.setHours(0, 0, 0, 0)
+    return result
+  }
+
+  /**
+   * Normalize a date to the end of day (23:59:59.999)
+   * Used for endDate to ensure any query on that day matches
+   */
+  private endOfDay(date: Date): Date {
+    const result = new Date(date)
+    result.setHours(23, 59, 59, 999)
+    return result
+  }
+
+  /**
    * Get the full route history for a location
    */
   async getLocationHistory(locationId: string) {
@@ -74,15 +94,21 @@ export class LocationHistoryService {
 
   /**
    * Get all locations that were in a specific route at a given date
+   * Date comparison is normalized to ignore time components
    */
   async getLocationsInRouteAtDate(routeId: string, date: Date) {
+    // Normalize: for startDate check, use end of day so any startDate on that day matches
+    // For endDate check, use start of day so any endDate on that day matches
+    const dateEndOfDay = this.endOfDay(date)
+    const dateStartOfDay = this.startOfDay(date)
+
     const historyRecords = await this.prisma.locationRouteHistory.findMany({
       where: {
         routeId,
-        startDate: { lte: date },
+        startDate: { lte: dateEndOfDay },
         OR: [
           { endDate: null },
-          { endDate: { gte: date } },
+          { endDate: { gte: dateStartOfDay } },
         ],
       },
       include: {
@@ -103,15 +129,19 @@ export class LocationHistoryService {
 
   /**
    * Get the route a location was assigned to at a specific date
+   * Date comparison is normalized to ignore time components
    */
   async getRouteForLocationAtDate(locationId: string, date: Date): Promise<string | null> {
+    const dateEndOfDay = this.endOfDay(date)
+    const dateStartOfDay = this.startOfDay(date)
+
     const history = await this.prisma.locationRouteHistory.findFirst({
       where: {
         locationId,
-        startDate: { lte: date },
+        startDate: { lte: dateEndOfDay },
         OR: [
           { endDate: null },
-          { endDate: { gte: date } },
+          { endDate: { gte: dateStartOfDay } },
         ],
       },
       orderBy: { startDate: 'desc' },
@@ -123,19 +153,23 @@ export class LocationHistoryService {
   /**
    * Get the routes for multiple locations at a specific date (batch lookup)
    * Returns a Map of locationId -> routeId
+   * Date comparison is normalized to ignore time components
    */
   async getRoutesForLocationsAtDate(locationIds: string[], date: Date): Promise<Map<string, string>> {
     if (locationIds.length === 0) {
       return new Map()
     }
 
+    const dateEndOfDay = this.endOfDay(date)
+    const dateStartOfDay = this.startOfDay(date)
+
     const histories = await this.prisma.locationRouteHistory.findMany({
       where: {
         locationId: { in: locationIds },
-        startDate: { lte: date },
+        startDate: { lte: dateEndOfDay },
         OR: [
           { endDate: null },
-          { endDate: { gte: date } },
+          { endDate: { gte: dateStartOfDay } },
         ],
       },
       orderBy: { startDate: 'desc' },
@@ -154,19 +188,23 @@ export class LocationHistoryService {
 
   /**
    * Get all location IDs that were in any of the specified routes at a given date
+   * Date comparison is normalized to ignore time components
    */
   async getLocationIdsInRoutesAtDate(routeIds: string[], date: Date): Promise<Set<string>> {
     if (routeIds.length === 0) {
       return new Set()
     }
 
+    const dateEndOfDay = this.endOfDay(date)
+    const dateStartOfDay = this.startOfDay(date)
+
     const histories = await this.prisma.locationRouteHistory.findMany({
       where: {
         routeId: { in: routeIds },
-        startDate: { lte: date },
+        startDate: { lte: dateEndOfDay },
         OR: [
           { endDate: null },
-          { endDate: { gte: date } },
+          { endDate: { gte: dateStartOfDay } },
         ],
       },
       select: { locationId: true },
@@ -248,12 +286,16 @@ export class LocationHistoryService {
 
       const key = `${lookup.locationId}:${lookup.date.toISOString()}`
 
+      // Normalize dates for comparison (ignore time components)
+      const lookupEndOfDay = this.endOfDay(lookup.date)
+      const lookupStartOfDay = this.startOfDay(lookup.date)
+
       // Find matching history record for this location and date
       const matching = histories.find(
         (h) =>
           h.locationId === lookup.locationId &&
-          h.startDate <= lookup.date &&
-          (h.endDate === null || h.endDate >= lookup.date)
+          h.startDate <= lookupEndOfDay &&
+          (h.endDate === null || h.endDate >= lookupStartOfDay)
       )
 
       if (matching) {
