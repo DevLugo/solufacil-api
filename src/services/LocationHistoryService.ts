@@ -8,6 +8,57 @@ export interface LocationRouteHistoryInput {
   endDate?: Date | null
 }
 
+export interface BatchChangeLocationRouteInput {
+  locationIds: string[]
+  newRouteId: string
+  effectiveDate: Date
+}
+
+export interface BatchLocationRouteChangeResult {
+  success: boolean
+  message: string
+  changesApplied: number
+  errors: Array<{
+    locationId: string
+    error: string
+  }>
+  details: Array<{
+    locationId: string
+    locationName: string
+    previousRouteId: string | null
+    previousRouteName: string | null
+    newRouteId: string
+    newRouteName: string
+  }>
+}
+
+export interface BatchUpsertHistoricalInput {
+  locationIds: string[]
+  routeId: string
+  startDate: Date
+  endDate: Date
+}
+
+export interface BatchUpsertHistoricalResult {
+  success: boolean
+  message: string
+  recordsCreated: number
+  recordsAdjusted: number
+  recordsDeleted: number
+  errors: Array<{
+    locationId: string
+    error: string
+  }>
+  details: Array<{
+    locationId: string
+    locationName: string
+    routeId: string
+    routeName: string
+    startDate: Date
+    endDate: Date
+  }>
+}
+
 export class LocationHistoryService {
   constructor(private prisma: PrismaClient) {}
 
@@ -309,6 +360,140 @@ export class LocationHistoryService {
   }
 
   /**
+   * Batch change multiple locations to a new route with an effective date.
+   * All changes are executed in a single transaction for atomicity.
+   *
+   * @param input - Object containing locationIds array, newRouteId, and effectiveDate
+   * @returns Result with success status, counts, and details per location
+   */
+  async batchChangeLocationRoutes(
+    input: BatchChangeLocationRouteInput
+  ): Promise<BatchLocationRouteChangeResult> {
+    const { locationIds, newRouteId, effectiveDate } = input
+    const errors: BatchLocationRouteChangeResult['errors'] = []
+    const details: BatchLocationRouteChangeResult['details'] = []
+
+    if (locationIds.length === 0) {
+      return {
+        success: true,
+        message: 'No locations to process',
+        changesApplied: 0,
+        errors: [],
+        details: [],
+      }
+    }
+
+    // Validate route exists
+    const route = await this.prisma.route.findUnique({
+      where: { id: newRouteId },
+    })
+    if (!route) {
+      throw new GraphQLError('Route not found', {
+        extensions: { code: 'NOT_FOUND' },
+      })
+    }
+
+    // Get all locations with their current route info
+    const locations = await this.prisma.location.findMany({
+      where: { id: { in: locationIds } },
+      include: {
+        routeRelation: { select: { id: true, name: true } },
+      },
+    })
+
+    // Check for missing locations
+    const foundIds = new Set(locations.map((l) => l.id))
+    for (const id of locationIds) {
+      if (!foundIds.has(id)) {
+        errors.push({ locationId: id, error: 'Location not found' })
+      }
+    }
+
+    // Get current active assignments for all locations
+    const currentAssignments = await this.prisma.locationRouteHistory.findMany({
+      where: {
+        locationId: { in: locationIds },
+        endDate: null,
+      },
+      include: {
+        route: { select: { id: true, name: true } },
+      },
+    })
+
+    // Map by locationId for quick lookup
+    const assignmentByLocation = new Map(
+      currentAssignments.map((a) => [a.locationId, a])
+    )
+
+    // Calculate the day before effectiveDate
+    const dayBeforeEffective = new Date(effectiveDate)
+    dayBeforeEffective.setDate(dayBeforeEffective.getDate() - 1)
+
+    // Execute all changes in a single transaction
+    await this.prisma.$transaction(async (tx) => {
+      for (const location of locations) {
+        const currentAssignment = assignmentByLocation.get(location.id)
+        const previousRouteId = currentAssignment?.routeId ?? location.route
+        const previousRouteName =
+          currentAssignment?.route.name ?? location.routeRelation?.name ?? null
+
+        // Close current assignment if exists
+        if (currentAssignment) {
+          if (effectiveDate > currentAssignment.startDate) {
+            await tx.locationRouteHistory.update({
+              where: { id: currentAssignment.id },
+              data: { endDate: dayBeforeEffective },
+            })
+          } else {
+            // If effectiveDate is on or before current startDate, delete it
+            await tx.locationRouteHistory.delete({
+              where: { id: currentAssignment.id },
+            })
+          }
+        }
+
+        // Create new assignment
+        await tx.locationRouteHistory.create({
+          data: {
+            locationId: location.id,
+            routeId: newRouteId,
+            startDate: effectiveDate,
+            endDate: null,
+          },
+        })
+
+        // Update Location.route field
+        await tx.location.update({
+          where: { id: location.id },
+          data: { route: newRouteId },
+        })
+
+        details.push({
+          locationId: location.id,
+          locationName: location.name,
+          previousRouteId,
+          previousRouteName,
+          newRouteId: route.id,
+          newRouteName: route.name,
+        })
+      }
+    })
+
+    const changesApplied = details.length
+    const hasErrors = errors.length > 0
+
+    return {
+      success: !hasErrors || changesApplied > 0,
+      message: hasErrors
+        ? `${changesApplied} locations moved, ${errors.length} errors`
+        : `${changesApplied} locations moved to ${route.name}`,
+      changesApplied,
+      errors,
+      details,
+    }
+  }
+
+  /**
    * Upsert a historical assignment (for manual corrections or imports)
    *
    * SMART BEHAVIOR: Automatically adjusts overlapping assignments by moving
@@ -390,6 +575,19 @@ export class LocationHistoryService {
     const dayAfterEndDate = new Date(newEndDate)
     dayAfterEndDate.setDate(dayAfterEndDate.getDate() + 1)
 
+    console.log('[LocationHistoryService] upsertHistoricalAssignment - Input:', {
+      locationId: input.locationId,
+      routeId: input.routeId,
+      startDate: input.startDate,
+      endDate: input.endDate,
+    })
+    console.log('[LocationHistoryService] Found overlapping assignments:', overlappingAssignments.map(a => ({
+      id: a.id,
+      routeId: a.routeId,
+      startDate: a.startDate,
+      endDate: a.endDate,
+    })))
+
     return this.prisma.$transaction(async (tx) => {
       // Process each overlapping assignment
       for (const existing of overlappingAssignments) {
@@ -397,6 +595,7 @@ export class LocationHistoryService {
         if (newEndDate >= existing.startDate) {
           if (existing.endDate === null) {
             // Current assignment: just adjust startDate
+            console.log(`[LocationHistoryService] Adjusting current assignment ${existing.id} (routeId: ${existing.routeId}) startDate to:`, dayAfterEndDate)
             await tx.locationRouteHistory.update({
               where: { id: existing.id },
               data: { startDate: dayAfterEndDate },
@@ -406,11 +605,13 @@ export class LocationHistoryService {
             // If dayAfterEndDate > existing.endDate, the record would be invalid (startDate > endDate)
             if (dayAfterEndDate > existing.endDate) {
               // Delete the record as it's completely contained within the new period
+              console.log(`[LocationHistoryService] Deleting contained assignment ${existing.id} (routeId: ${existing.routeId})`)
               await tx.locationRouteHistory.delete({
                 where: { id: existing.id },
               })
             } else {
               // Adjust the startDate
+              console.log(`[LocationHistoryService] Adjusting historical assignment ${existing.id} (routeId: ${existing.routeId}) startDate to:`, dayAfterEndDate)
               await tx.locationRouteHistory.update({
                 where: { id: existing.id },
                 data: { startDate: dayAfterEndDate },
@@ -421,7 +622,8 @@ export class LocationHistoryService {
       }
 
       // Create the new historical assignment
-      return tx.locationRouteHistory.create({
+      console.log('[LocationHistoryService] Creating new assignment with routeId:', input.routeId)
+      const newRecord = await tx.locationRouteHistory.create({
         data: {
           locationId: input.locationId,
           routeId: input.routeId,
@@ -429,7 +631,149 @@ export class LocationHistoryService {
           endDate: input.endDate,
         },
       })
+      console.log('[LocationHistoryService] Created record:', newRecord)
+      return newRecord
     })
+  }
+
+  /**
+   * Batch upsert historical assignments for multiple locations.
+   * Applies the same historical period to all specified locations.
+   * Each location is processed with the same "smart" overlap adjustment logic.
+   *
+   * @param input - Object containing locationIds array, routeId, startDate, and endDate
+   * @returns Result with counts of records created, adjusted, and deleted
+   */
+  async batchUpsertHistoricalAssignment(
+    input: BatchUpsertHistoricalInput
+  ): Promise<BatchUpsertHistoricalResult> {
+    const { locationIds, routeId, startDate, endDate } = input
+    const errors: BatchUpsertHistoricalResult['errors'] = []
+    const details: BatchUpsertHistoricalResult['details'] = []
+    let recordsCreated = 0
+    let recordsAdjusted = 0
+    let recordsDeleted = 0
+
+    if (locationIds.length === 0) {
+      return {
+        success: true,
+        message: 'No locations to process',
+        recordsCreated: 0,
+        recordsAdjusted: 0,
+        recordsDeleted: 0,
+        errors: [],
+        details: [],
+      }
+    }
+
+    // Validate route exists
+    const route = await this.prisma.route.findUnique({
+      where: { id: routeId },
+    })
+    if (!route) {
+      throw new GraphQLError('Route not found', {
+        extensions: { code: 'NOT_FOUND' },
+      })
+    }
+
+    // Get all locations
+    const locations = await this.prisma.location.findMany({
+      where: { id: { in: locationIds } },
+    })
+
+    // Check for missing locations
+    const foundIds = new Set(locations.map((l) => l.id))
+    for (const id of locationIds) {
+      if (!foundIds.has(id)) {
+        errors.push({ locationId: id, error: 'Location not found' })
+      }
+    }
+
+    // Calculate the day after the new assignment ends
+    const dayAfterEndDate = new Date(endDate)
+    dayAfterEndDate.setDate(dayAfterEndDate.getDate() + 1)
+
+    // Execute all changes in a single transaction
+    await this.prisma.$transaction(async (tx) => {
+      for (const location of locations) {
+        // Find overlapping assignments for this location
+        const overlappingAssignments = await tx.locationRouteHistory.findMany({
+          where: {
+            locationId: location.id,
+            startDate: { lte: endDate },
+            OR: [
+              { endDate: null },
+              { endDate: { gte: startDate } },
+            ],
+          },
+          orderBy: { startDate: 'asc' },
+        })
+
+        // Process each overlapping assignment
+        for (const existing of overlappingAssignments) {
+          if (endDate >= existing.startDate) {
+            if (existing.endDate === null) {
+              // Current assignment: adjust startDate
+              await tx.locationRouteHistory.update({
+                where: { id: existing.id },
+                data: { startDate: dayAfterEndDate },
+              })
+              recordsAdjusted++
+            } else {
+              // Historical assignment: check if adjustment would be valid
+              if (dayAfterEndDate > existing.endDate) {
+                // Delete the record as it's completely contained
+                await tx.locationRouteHistory.delete({
+                  where: { id: existing.id },
+                })
+                recordsDeleted++
+              } else {
+                // Adjust the startDate
+                await tx.locationRouteHistory.update({
+                  where: { id: existing.id },
+                  data: { startDate: dayAfterEndDate },
+                })
+                recordsAdjusted++
+              }
+            }
+          }
+        }
+
+        // Create the new historical assignment
+        await tx.locationRouteHistory.create({
+          data: {
+            locationId: location.id,
+            routeId,
+            startDate,
+            endDate,
+          },
+        })
+        recordsCreated++
+
+        details.push({
+          locationId: location.id,
+          locationName: location.name,
+          routeId: route.id,
+          routeName: route.name,
+          startDate,
+          endDate,
+        })
+      }
+    })
+
+    const hasErrors = errors.length > 0
+
+    return {
+      success: !hasErrors || recordsCreated > 0,
+      message: hasErrors
+        ? `${recordsCreated} records created, ${errors.length} errors`
+        : `${recordsCreated} historical records created for ${route.name}`,
+      recordsCreated,
+      recordsAdjusted,
+      recordsDeleted,
+      errors,
+      details,
+    }
   }
 
   /**

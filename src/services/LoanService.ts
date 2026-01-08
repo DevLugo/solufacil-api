@@ -256,9 +256,11 @@ export class LoanService {
     // Crear snapshot histórico (solo del lead, la ruta se determina vía LocationHistoryService)
     const snapshot = createLoanSnapshot(lead.id)
 
-    // Calcular métricas finales (incluyendo profit pendiente de renovación)
+    // Calcular métricas finales
+    // REGLA CRÍTICA: profitHeredado solo se suma a profitAmount para distribución de pagos
+    // La deuda total (totalDebtAcquired) NO incluye profitHeredado
+    // Deuda siempre es: requestedAmount + profitBase
     const finalProfitAmount = metrics.profitAmount.plus(pendingProfit)
-    const finalTotalDebt = metrics.totalDebtAcquired.plus(pendingProfit)
 
     // Crear el préstamo
     return this.loanRepository.create({
@@ -266,9 +268,9 @@ export class LoanService {
       amountGived: amountGived,
       signDate: input.signDate,
       profitAmount: finalProfitAmount,
-      totalDebtAcquired: finalTotalDebt,
+      totalDebtAcquired: metrics.totalDebtAcquired,
       expectedWeeklyPayment: metrics.expectedWeeklyPayment,
-      pendingAmountStored: finalTotalDebt,
+      pendingAmountStored: metrics.totalDebtAcquired,
       borrower: input.borrowerId,
       loantype: input.loantypeId,
       grantor: input.grantorId,
@@ -567,17 +569,22 @@ export class LoanService {
 
         // 6. Crear el préstamo
         // Note: La deuda anterior ya está descontada en amountGived
-        // totalDebtAcquired y pendingAmountStored siempre son: requestedAmount + profitAmount
+        // REGLA CRÍTICA: profitHeredado solo se suma a profitAmount para distribución de pagos
+        // La deuda total (totalDebtAcquired) NO incluye profitHeredado
+        // Deuda siempre es: requestedAmount + profitBase
         const comissionAmount = loanInput.comissionAmount
           ? new Decimal(loanInput.comissionAmount)
           : new Decimal(0)
+
+        // Calcular profit final (incluye heredado para distribución de pagos)
+        const finalProfitAmount = metrics.profitAmount.plus(pendingProfit)
 
         const loan = await tx.loan.create({
           data: {
             requestedAmount,
             amountGived,
             signDate: input.signDate,
-            profitAmount: metrics.profitAmount,
+            profitAmount: finalProfitAmount,
             totalDebtAcquired: metrics.totalDebtAcquired,
             expectedWeeklyPayment: metrics.expectedWeeklyPayment,
             pendingAmountStored: metrics.totalDebtAcquired,
