@@ -402,6 +402,37 @@ type BatchLocationRouteChangeResult {
   details: [BatchLocationRouteChangeDetail!]!
 }
 
+input BatchUpsertHistoricalInput {
+  locationIds: [ID!]!
+  routeId: ID!
+  startDate: DateTime!
+  endDate: DateTime!
+}
+
+type BatchUpsertHistoricalError {
+  locationId: ID!
+  error: String!
+}
+
+type BatchUpsertHistoricalDetail {
+  locationId: ID!
+  locationName: String!
+  routeId: ID!
+  routeName: String!
+  startDate: DateTime!
+  endDate: DateTime!
+}
+
+type BatchUpsertHistoricalResult {
+  success: Boolean!
+  message: String!
+  recordsCreated: Int!
+  recordsAdjusted: Int!
+  recordsDeleted: Int!
+  errors: [BatchUpsertHistoricalError!]!
+  details: [BatchUpsertHistoricalDetail!]!
+}
+
 type Municipality {
   id: ID!
   name: String!
@@ -1706,6 +1737,7 @@ type Mutation {
   updateLocationRouteHistory(id: ID!, input: LocationRouteHistoryInput!): LocationRouteHistory! @auth
   deleteLocationRouteHistory(id: ID!): Boolean! @auth
   batchChangeLocationRoutes(input: BatchChangeLocationRouteInput!): BatchLocationRouteChangeResult! @auth
+  batchUpsertHistoricalAssignment(input: BatchUpsertHistoricalInput!): BatchUpsertHistoricalResult! @auth
 
   # Loan types
   createLoantype(input: CreateLoantypeInput!): Loantype! @requireRole(roles: [ADMIN])

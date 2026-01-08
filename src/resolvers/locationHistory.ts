@@ -3,6 +3,7 @@ import {
   LocationHistoryService,
   LocationRouteHistoryInput,
   BatchChangeLocationRouteInput,
+  BatchUpsertHistoricalInput,
 } from '../services/LocationHistoryService'
 import { authenticateUser } from '../middleware/auth'
 
@@ -122,6 +123,22 @@ export const locationHistoryResolvers = {
         locationIds: args.input.locationIds,
         newRouteId: args.input.newRouteId,
         effectiveDate: new Date(args.input.effectiveDate),
+      })
+    },
+
+    batchUpsertHistoricalAssignment: async (
+      _parent: unknown,
+      args: { input: BatchUpsertHistoricalInput },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+
+      const service = new LocationHistoryService(context.prisma)
+      return service.batchUpsertHistoricalAssignment({
+        locationIds: args.input.locationIds,
+        routeId: args.input.routeId,
+        startDate: new Date(args.input.startDate),
+        endDate: new Date(args.input.endDate),
       })
     },
   },
