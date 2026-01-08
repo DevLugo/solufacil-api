@@ -59,29 +59,9 @@ export class LoanRepository {
   }) {
     const where: Prisma.LoanWhereInput = {}
 
-    // Handle multiple statuses (takes precedence over single status)
+    // Filter by status - now using the normalized status field directly
     if (options?.statuses && options.statuses.length > 0) {
-      // Build OR conditions for each status
-      const statusConditions: Prisma.LoanWhereInput[] = options.statuses.map((status) => {
-        if (status === 'ACTIVE') {
-          // ACTIVE uses special filters (not finished, has pending amount)
-          return {
-            finishedDate: null,
-            pendingAmountStored: { gt: 0 },
-            excludedByCleanup: null,
-          }
-        }
-        return { status }
-      })
-      where.OR = statusConditions
-    } else if (options?.status === 'ACTIVE') {
-      // When status is ACTIVE, use the same filters as the original Keystone implementation:
-      // - finishedDate: null (not finished)
-      // - pendingAmountStored > 0 (has pending payments)
-      // - excludedByCleanup: null (not excluded by cleanup)
-      where.finishedDate = null
-      where.pendingAmountStored = { gt: 0 }
-      where.excludedByCleanup = null
+      where.status = { in: options.statuses }
     } else if (options?.status) {
       where.status = options.status
     }
