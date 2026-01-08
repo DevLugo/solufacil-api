@@ -354,11 +354,11 @@ export class PortfolioReportService {
       routeWeeklyStats
     )
 
-    // Call getRouteKPIs to get totals for "Por Rutas" tab
-    const routeKPIs = await this.getRouteKPIs(year, month, filters)
-    const totalClientesActivos = routeKPIs.reduce((sum, r) => sum + r.clientesTotal, 0)
-    const pagandoPromedio = routeKPIs.reduce((sum, r) => sum + r.pagandoPromedio, 0)
-    const cvPromedio = routeKPIs.reduce((sum, r) => sum + r.cvPromedio, 0)
+    // Calculate totals from byLocation (already computed above) instead of calling getRouteKPIs again
+    // This eliminates a duplicate expensive query
+    const totalClientesActivos = byLocation.reduce((sum, loc) => sum + loc.clientesActivos, 0)
+    const pagandoPromedio = byLocation.reduce((sum, loc) => sum + (loc.pagandoPromedio || 0), 0)
+    const cvPromedio = byLocation.reduce((sum, loc) => sum + (loc.cvPromedio || 0), 0)
 
     // Client balance for the period
     const clientBalance = calculateClientBalance(loans, periodStart, periodEnd)
