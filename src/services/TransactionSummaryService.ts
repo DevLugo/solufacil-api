@@ -195,15 +195,15 @@ export class TransactionSummaryService {
           },
           // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
           {
-            loanId: null,
+            loan: { is: null },
             snapshotLeadId: {
               in: leaderIdsInRoute,
             },
           },
           // General route expenses (no loan, no leader - on route accounts)
           {
-            loanId: null,
-            snapshotLeadId: '',
+            loan: { is: null },
+            snapshotLeadId: { equals: '' },
             accountId: {
               in: routeAccountIds,
             },
