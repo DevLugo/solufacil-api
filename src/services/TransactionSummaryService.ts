@@ -160,10 +160,22 @@ export class TransactionSummaryService {
     })
     const leaderIdsInRoute = leadersInRoute.map(l => l.id)
 
+    // Get all account IDs that belong to this route (for general expenses)
+    const routeAccounts = await this.prisma.account.findMany({
+      where: {
+        routes: {
+          some: { id: routeId },
+        },
+      },
+      select: { id: true },
+    })
+    const routeAccountIds = routeAccounts.map(a => a.id)
+
     // Fetch all AccountEntry records for the route in the date range
     // Include entries that either:
     // 1. Have a loan where the lead is in the route, OR
-    // 2. Have a snapshotLeadId pointing to a leader in the route (for PAYMENT_COMMISSION)
+    // 2. Have a snapshotLeadId pointing to a leader in the route (for PAYMENT_COMMISSION), OR
+    // 3. Are general expenses on route accounts (no loan, no snapshotLeadId)
     const entries = await this.prisma.accountEntry.findMany({
       where: {
         entryDate: {
@@ -183,9 +195,17 @@ export class TransactionSummaryService {
           },
           // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
           {
-            loan: null,
+            loanId: null,
             snapshotLeadId: {
               in: leaderIdsInRoute,
+            },
+          },
+          // General route expenses (no loan, no leader - on route accounts)
+          {
+            loanId: null,
+            snapshotLeadId: '',
+            accountId: {
+              in: routeAccountIds,
             },
           },
         ],
@@ -264,9 +284,16 @@ export class TransactionSummaryService {
 
       const leader = leaderMap.get(leaderId) || entry.loan?.leadRelation
 
+      // Check if this is a general route expense (no leader associated)
+      const isGeneralRouteExpense = !leaderId && !leader
+
       const locationAddress = leader?.personalDataRelation?.addresses?.[0]
-      const localityName = locationAddress?.locationRelation?.name || 'Sin localidad'
-      const leaderName = leader?.personalDataRelation?.fullName || 'Sin líder'
+      const localityName = isGeneralRouteExpense
+        ? 'Gastos de Ruta'
+        : (locationAddress?.locationRelation?.name || 'Sin localidad')
+      const leaderName = isGeneralRouteExpense
+        ? ''
+        : (leader?.personalDataRelation?.fullName || 'Sin líder')
       const locationKey = `${localityName}|${leaderName}`
 
       // Initialize locality if not exists
@@ -416,10 +443,14 @@ export class TransactionSummaryService {
       loc.balance = loc.balanceEfectivo.plus(loc.balanceBanco)
     }
 
-    // Sort by total payments (descending)
-    const localities = Object.values(grouped).sort((a, b) =>
-      b.totalPayments.minus(a.totalPayments).toNumber()
-    )
+    // Sort by total payments (descending), but keep "Gastos de Ruta" at the end
+    const localities = Object.values(grouped).sort((a, b) => {
+      // "Gastos de Ruta" always goes last
+      if (a.localityName === 'Gastos de Ruta') return 1
+      if (b.localityName === 'Gastos de Ruta') return -1
+      // Otherwise sort by total payments descending
+      return b.totalPayments.minus(a.totalPayments).toNumber()
+    })
 
     // Calculate executive summary
     const executiveSummary = localities.reduce<ExecutiveSummary>(

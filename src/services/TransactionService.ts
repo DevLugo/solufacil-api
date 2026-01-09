@@ -104,38 +104,89 @@ export class TransactionService {
     const where: any = {}
 
     // Map TransactionType to SourceTypes
-    if (options?.type) {
-      const sourceTypes = this.getSourceTypesForTransactionType(options.type)
-      if (sourceTypes.length > 0) {
-        where.sourceType = { in: sourceTypes }
-      }
-    }
+    const sourceTypes = options?.type
+      ? this.getSourceTypesForTransactionType(options.type)
+      : []
 
     if (options?.routeId) {
-      // Filter by loan's lead current routes
-      where.loan = {
-        leadRelation: {
-          routes: {
-            some: { id: options.routeId },
+      // Get leaders and accounts for this route to support OR conditions
+      const [leadersInRoute, routeAccounts] = await Promise.all([
+        this.prisma.employee.findMany({
+          where: { routes: { some: { id: options.routeId } } },
+          select: { id: true },
+        }),
+        this.prisma.account.findMany({
+          where: { routes: { some: { id: options.routeId } } },
+          select: { id: true },
+        }),
+      ])
+
+      const leaderIdsInRoute = leadersInRoute.map(l => l.id)
+      const routeAccountIds = routeAccounts.map(a => a.id)
+
+      // Build OR conditions for route filtering
+      const routeConditions: any[] = [
+        // Entries with loan where lead is in route
+        {
+          loan: {
+            leadRelation: {
+              routes: { some: { id: options.routeId } },
+            },
           },
         },
+        // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
+        {
+          loanId: null,
+          snapshotLeadId: { in: leaderIdsInRoute },
+        },
+        // General expenses on route accounts (no loan, empty snapshotLeadId)
+        {
+          loanId: null,
+          snapshotLeadId: '',
+          accountId: { in: routeAccountIds },
+        },
+      ]
+
+      // If filtering by sourceTypes, add to each OR condition
+      if (sourceTypes.length > 0) {
+        where.AND = [
+          { sourceType: { in: sourceTypes } },
+          { OR: routeConditions },
+        ]
+      } else {
+        where.OR = routeConditions
       }
+    } else if (sourceTypes.length > 0) {
+      where.sourceType = { in: sourceTypes }
     }
 
     if (options?.accountId) {
-      where.OR = [
-        { accountId: options.accountId },
-        { destinationAccountId: options.accountId },
-      ]
+      // Append to existing AND or create new one
+      const accountCondition = {
+        OR: [
+          { accountId: options.accountId },
+          { destinationAccountId: options.accountId },
+        ],
+      }
+      if (where.AND) {
+        where.AND.push(accountCondition)
+      } else {
+        where.AND = [accountCondition]
+      }
     }
 
     if (options?.fromDate || options?.toDate) {
-      where.entryDate = {}
+      const dateCondition: any = { entryDate: {} }
       if (options?.fromDate) {
-        where.entryDate.gte = options.fromDate
+        dateCondition.entryDate.gte = options.fromDate
       }
       if (options?.toDate) {
-        where.entryDate.lte = options.toDate
+        dateCondition.entryDate.lte = options.toDate
+      }
+      if (where.AND) {
+        where.AND.push(dateCondition)
+      } else {
+        where.AND = [dateCondition]
       }
     }
 
