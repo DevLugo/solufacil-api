@@ -64,7 +64,7 @@ const MANUAL_EXPENSE_TYPES: SourceType[] = [
   'VIATIC',
   'TRAVEL_EXPENSES',
   'FALCO_LOSS',
-  'FALCO_COMPENSATORY',
+  // Note: FALCO_COMPENSATORY is INCOME (compensation received), not an expense
   'EMPLOYEE_EXPENSE',
   'GENERAL_EXPENSE',
   'CAR_PAYMENT',
