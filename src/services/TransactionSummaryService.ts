@@ -149,21 +149,46 @@ export class TransactionSummaryService {
     startDate: Date,
     endDate: Date
   ): Promise<TransactionSummaryResponse> {
+    // First, get all leaders that belong to this route
+    const leadersInRoute = await this.prisma.employee.findMany({
+      where: {
+        routes: {
+          some: { id: routeId },
+        },
+      },
+      select: { id: true },
+    })
+    const leaderIdsInRoute = leadersInRoute.map(l => l.id)
+
     // Fetch all AccountEntry records for the route in the date range
-    // Filter by loan's lead current routes
+    // Include entries that either:
+    // 1. Have a loan where the lead is in the route, OR
+    // 2. Have a snapshotLeadId pointing to a leader in the route (for PAYMENT_COMMISSION)
     const entries = await this.prisma.accountEntry.findMany({
       where: {
-        loan: {
-          leadRelation: {
-            routes: {
-              some: { id: routeId },
-            },
-          },
-        },
         entryDate: {
           gte: startDate,
           lte: endDate,
         },
+        OR: [
+          // Entries with loan where lead is in route
+          {
+            loan: {
+              leadRelation: {
+                routes: {
+                  some: { id: routeId },
+                },
+              },
+            },
+          },
+          // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
+          {
+            loan: null,
+            snapshotLeadId: {
+              in: leaderIdsInRoute,
+            },
+          },
+        ],
       },
       include: {
         loan: {
