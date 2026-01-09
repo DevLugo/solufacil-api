@@ -853,6 +853,24 @@ type RouteKPI {
   cvPromedio: Float!
 }
 
+"Totales únicos (sin duplicar préstamos en múltiples rutas)"
+type RouteKPIsTotals {
+  "Total de clientes activos únicos (sin duplicados)"
+  clientesTotal: Float!
+  "Total de clientes al corriente únicos"
+  pagandoTotal: Float!
+  "Total de clientes en CV únicos"
+  cvTotal: Float!
+}
+
+"Respuesta de KPIs por ruta con totales únicos"
+type RouteKPIsResponse {
+  "Lista de KPIs por cada ruta"
+  routes: [RouteKPI!]!
+  "Totales calculados sin duplicar préstamos en múltiples rutas"
+  uniqueTotals: RouteKPIsTotals!
+}
+
 type PortfolioReport {
   reportDate: DateTime!
   periodType: PeriodType!
@@ -1222,8 +1240,8 @@ type Query {
   # Portfolio Report (Reporte de Cartera)
   portfolioReportWeekly(year: Int!, weekNumber: Int!, filters: PortfolioFiltersInput): PortfolioReport! @auth
   portfolioReportMonthly(year: Int!, month: Int!, filters: PortfolioFiltersInput): PortfolioReport! @auth
-  "KPIs simplificados por ruta - retorna solo clientesTotal, pagandoPromedio, cvPromedio por cada ruta"
-  portfolioRouteKPIs(year: Int!, month: Int!, filters: PortfolioFiltersInput): [RouteKPI!]! @auth
+  "KPIs simplificados por ruta - retorna rutas con métricas y totales únicos (sin duplicar préstamos)"
+  portfolioRouteKPIs(year: Int!, month: Int!, filters: PortfolioFiltersInput): RouteKPIsResponse! @auth
   activeClientsWithCVStatus(filters: PortfolioFiltersInput): [ActiveClientStatus!]! @auth
   currentActiveWeek: WeekRange! @auth
 

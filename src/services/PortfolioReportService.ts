@@ -358,9 +358,10 @@ export class PortfolioReportService {
       // Call getRouteKPIs to get totals for "Por Rutas" tab
       this.getRouteKPIs(year, month, filters),
     ])
-    const totalClientesActivos = routeKPIs.reduce((sum, r) => sum + r.clientesTotal, 0)
-    const pagandoPromedio = routeKPIs.reduce((sum, r) => sum + r.pagandoPromedio, 0)
-    const cvPromedio = routeKPIs.reduce((sum, r) => sum + r.cvPromedio, 0)
+    // Use uniqueTotals from getRouteKPIs (no duplicates across routes)
+    const totalClientesActivos = routeKPIs.uniqueTotals.clientesTotal
+    const pagandoPromedio = routeKPIs.uniqueTotals.pagandoTotal
+    const cvPromedio = routeKPIs.uniqueTotals.cvTotal
 
     // Client balance for the period
     const clientBalance = calculateClientBalance(loans, periodStart, periodEnd)
@@ -427,12 +428,20 @@ export class PortfolioReportService {
     year: number,
     month: number,
     filters?: PortfolioFilters
-  ): Promise<{ routeId: string; routeName: string; clientesTotal: number; pagandoPromedio: number; cvPromedio: number }[]> {
+  ): Promise<{
+    routes: { routeId: string; routeName: string; clientesTotal: number; pagandoPromedio: number; cvPromedio: number }[]
+    uniqueTotals: { clientesTotal: number; pagandoTotal: number; cvTotal: number }
+  }> {
+    const emptyResponse = {
+      routes: [],
+      uniqueTotals: { clientesTotal: 0, pagandoTotal: 0, cvTotal: 0 },
+    }
+
     const weeks = getWeeksInMonth(year, month - 1)
-    if (weeks.length === 0) return []
+    if (weeks.length === 0) return emptyResponse
 
     const completedWeeks = this.getCompletedWeeks(weeks)
-    if (completedWeeks.length === 0) return []
+    if (completedWeeks.length === 0) return emptyResponse
 
     const lastCompletedWeek = completedWeeks[completedWeeks.length - 1]
     const s = this.schemaPrefix
@@ -723,7 +732,17 @@ export class PortfolioReportService {
     }
 
     // Sort by clientesTotal descending
-    return result.sort((a, b) => b.clientesTotal - a.clientesTotal)
+    const routes = result.sort((a, b) => b.clientesTotal - a.clientesTotal)
+
+    // Calculate unique totals (sum across all routes - each loan is in exactly one route)
+    // Round to integers as required by GraphQL schema
+    const uniqueTotals = {
+      clientesTotal: routes.reduce((sum, r) => sum + r.clientesTotal, 0),
+      pagandoTotal: Math.round(routes.reduce((sum, r) => sum + r.pagandoPromedio, 0)),
+      cvTotal: Math.round(routes.reduce((sum, r) => sum + r.cvPromedio, 0)),
+    }
+
+    return { routes, uniqueTotals }
   }
 
   /**
@@ -1189,6 +1208,12 @@ export class PortfolioReportService {
     // IMPORTANT: Use HISTORICAL filters based on targetWeek, not current state
     // This ensures we get loans that were active DURING that week, even if
     // they have since been finished or renewed
+    // IMPORTANT: Do NOT filter by locality in the query. Instead, filter in memory
+    // by the FIRST address of the lead (addresses[0]) to be consistent with
+    // getLocalityReport which groups loans by the first address.
+    // Using `addresses: { some: { location } }` in the query would match ANY address,
+    // causing loans to appear in multiple localities in the modal but only be
+    // counted in ONE locality in the table.
     const whereClause: any = {
       signDate: { lte: targetWeek.end },
       excludedByCleanup: null,
@@ -1197,29 +1222,6 @@ export class PortfolioReportService {
         { OR: [{ finishedDate: null }, { finishedDate: { gte: targetWeek.start } }] },
         { OR: [{ renewedDate: null }, { renewedDate: { gte: targetWeek.start } }] },
       ],
-    }
-
-    // Filter by lead's locality
-    if (localityId === 'sin-localidad') {
-      // Loans where lead has no address
-      whereClause.leadRelation = {
-        personalDataRelation: {
-          addresses: {
-            none: {},
-          },
-        },
-      }
-    } else {
-      // Loans where lead's address is in the specified locality
-      whereClause.leadRelation = {
-        personalDataRelation: {
-          addresses: {
-            some: {
-              location: localityId,
-            },
-          },
-        },
-      }
     }
 
     const loans = await this.prisma.loan.findMany({
@@ -1303,6 +1305,23 @@ export class PortfolioReportService {
       const personalData = loan.borrowerRelation?.personalDataRelation
       const loanForPortfolio = loanForPortfolioMap.get(loan.id)!
       const payments = this.toPaymentsForCV(loan.payments)
+
+      // Filter by lead's FIRST address to be consistent with getLocalityReport grouping
+      // getLocalityReport uses addresses?.[0] to determine locality, so we must do the same
+      const leadFirstAddress = loan.leadRelation?.personalDataRelation?.addresses?.[0]
+      const leadLocalityId = leadFirstAddress?.location || null
+
+      if (localityId === 'sin-localidad') {
+        // Only include loans where lead has NO address
+        if (leadLocalityId !== null) {
+          continue
+        }
+      } else {
+        // Only include loans where lead's FIRST address matches the requested locality
+        if (leadLocalityId !== localityId) {
+          continue
+        }
+      }
 
       // Use isLoanActiveAtDate to check if loan was active at week end
       // This handles: signDate, finishedDate, renewedDate, excludedByCleanup
@@ -1503,30 +1522,34 @@ export class PortfolioReportService {
     })
 
     // Build lookups for historical route determination
+    // IMPORTANT: Use weekRange.end (not loan.signDate) to determine route
+    // This ensures consistency with getRouteKPIs which also uses week.end
+    // The route is determined by where the location was assigned AT THE TIME OF THE WEEK,
+    // not at the time the loan was signed
     const allLoans = [...activeLoans, ...finishedLoans]
-    const routeLookups: Array<{ locationId: string; date: Date; loanId: string }> = []
+    const uniqueLocationIds = new Set<string>()
     for (const loan of allLoans) {
       const locationId = loan.leadRelation?.personalDataRelation?.addresses?.[0]?.location
       if (locationId) {
-        routeLookups.push({
-          locationId,
-          date: loan.signDate,
-          loanId: loan.id,
-        })
+        uniqueLocationIds.add(locationId)
       }
     }
 
+    // Lookup route for each unique location at weekRange.end
+    const routeLookups = Array.from(uniqueLocationIds).map((locationId) => ({
+      locationId,
+      date: weekRange.end,
+    }))
+
     // Batch lookup historical routes using LocationHistoryService
-    const historicalRouteMap = await this.locationHistoryService.getRoutesForLocationsAtDates(
-      routeLookups.map((l) => ({ locationId: l.locationId, date: l.date }))
-    )
+    const historicalRouteMap = await this.locationHistoryService.getRoutesForLocationsAtDates(routeLookups)
 
     // Build a map of loanId -> route info for quick lookup
     const loanRouteMap = new Map<string, { routeId: string; routeName: string }>()
     for (const loan of allLoans) {
       const locationId = loan.leadRelation?.personalDataRelation?.addresses?.[0]?.location
       if (locationId) {
-        const key = `${locationId}:${loan.signDate.toISOString()}`
+        const key = `${locationId}:${weekRange.end.toISOString()}`
         const routeInfo = historicalRouteMap.get(key)
         if (routeInfo) {
           loanRouteMap.set(loan.id, routeInfo)
