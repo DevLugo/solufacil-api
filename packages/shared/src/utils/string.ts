@@ -1,13 +1,13 @@
 /**
- * Genera un código de cliente alfanumérico de 6 caracteres
+ * Genera un código de cliente: 1 letra + 4 números (ej: A0001, B1234, Z9999)
+ * Fácil de escribir, dictar y buscar
  */
 export function generateClientCode(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-  let code = ''
-  for (let i = 0; i < 6; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
-  return code
+  // Letra aleatoria A-Z
+  const letter = String.fromCharCode(65 + Math.floor(Math.random() * 26))
+  // Número de 4 dígitos (0000-9999)
+  const number = Math.floor(Math.random() * 10000).toString().padStart(4, '0')
+  return letter + number
 }
 
 /**
