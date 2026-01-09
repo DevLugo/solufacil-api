@@ -103,15 +103,14 @@ export class ListadoPDFService {
 
   /**
    * Obtiene préstamos activos de la base de datos
+   * Usa status: ACTIVE para ser consistente con transacciones/abonos
    */
   private async getActiveLoans(leaderId?: string) {
     return this.prisma.loan.findMany({
       where: {
-        AND: [
-          { finishedDate: null },
-          { excludedByCleanup: null },
-          leaderId ? { lead: leaderId } : {}
-        ]
+        status: 'ACTIVE',
+        excludedByCleanup: null,
+        ...(leaderId ? { lead: leaderId } : {})
       },
       include: {
         borrowerRelation: {
