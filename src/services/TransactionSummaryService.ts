@@ -70,6 +70,7 @@ const MANUAL_EXPENSE_TYPES: SourceType[] = [
   'CAR_PAYMENT',
   'BANK_EXPENSE',
   'OTHER_EXPENSE',
+  'ASSET_ACQUISITION',
 ]
 
 interface PaymentSummary {
@@ -284,8 +285,9 @@ export class TransactionSummaryService {
 
       const leader = leaderMap.get(leaderId) || entry.loan?.leadRelation
 
-      // Check if this is a general route expense (no leader associated)
-      const isGeneralRouteExpense = !leaderId && !leader
+      // Check if this is a general route expense (no leader associated AND is a manual expense type)
+      // Only manual expenses should go to "Gastos de Ruta", not transfers or other entries without leader
+      const isGeneralRouteExpense = !leaderId && !leader && MANUAL_EXPENSE_TYPES.includes(entry.sourceType)
 
       const locationAddress = leader?.personalDataRelation?.addresses?.[0]
       const localityName = isGeneralRouteExpense
