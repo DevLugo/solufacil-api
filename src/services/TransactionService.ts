@@ -46,18 +46,41 @@ function mapToSourceType(type: TransactionType, incomeSource?: string, expenseSo
     }
   } else if (type === 'EXPENSE') {
     switch (expenseSource) {
+      // System-generated expenses
       case 'LOAN_GRANTED': return 'LOAN_GRANT'
       case 'LOAN_GRANTED_COMISSION': return 'LOAN_GRANT_COMMISSION'
       case 'LOAN_PAYMENT_COMISSION': return 'PAYMENT_COMMISSION'
+      case 'FALCO_LOSS': return 'FALCO_LOSS'
+      case 'FALCO_COMPENSATORY': return 'FALCO_COMPENSATORY'
+
+      // Direct mappings (same name)
       case 'GASOLINE': return 'GASOLINE'
       case 'GASOLINE_TOKA': return 'GASOLINE_TOKA'
       case 'NOMINA_SALARY': return 'NOMINA_SALARY'
       case 'EXTERNAL_SALARY': return 'EXTERNAL_SALARY'
       case 'VIATIC': return 'VIATIC'
       case 'TRAVEL_EXPENSES': return 'TRAVEL_EXPENSES'
-      case 'FALCO_LOSS': return 'FALCO_LOSS'
-      case 'FALCO_COMPENSATORY': return 'FALCO_COMPENSATORY'
       case 'ASSET_ACQUISITION': return 'ASSET_ACQUISITION'
+      case 'CAR_PAYMENT': return 'CAR_PAYMENT'
+      case 'EMPLOYEE_EXPENSE': return 'EMPLOYEE_EXPENSE'
+      case 'GENERAL_EXPENSE': return 'GENERAL_EXPENSE'
+      case 'BANK_EXPENSE': return 'BANK_EXPENSE'
+      case 'OTHER_EXPENSE': return 'OTHER_EXPENSE'
+
+      // Frontend expense types mapped to SourceType categories
+      case 'OTRO': return 'OTHER_EXPENSE'
+      case 'ACCOMMODATION': return 'VIATIC'
+      case 'CASETA': return 'TRAVEL_EXPENSES'
+      case 'VEHICULE_MAINTENANCE': return 'CAR_PAYMENT'
+      case 'LAVADO_DE_AUTO': return 'CAR_PAYMENT'
+      case 'LEAD_EXPENSE': return 'EMPLOYEE_EXPENSE'
+      case 'IMSS_INFONAVIT': return 'EMPLOYEE_EXPENSE'
+      case 'POSADA': return 'EMPLOYEE_EXPENSE'
+      case 'REGALOS_LIDERES': return 'EMPLOYEE_EXPENSE'
+      case 'AGUINALDO': return 'NOMINA_SALARY'
+      case 'PAPELERIA': return 'GENERAL_EXPENSE'
+      case 'HOUSE_RENT': return 'GENERAL_EXPENSE'
+
       default: return 'BALANCE_ADJUSTMENT'
     }
   }
@@ -104,38 +127,89 @@ export class TransactionService {
     const where: any = {}
 
     // Map TransactionType to SourceTypes
-    if (options?.type) {
-      const sourceTypes = this.getSourceTypesForTransactionType(options.type)
-      if (sourceTypes.length > 0) {
-        where.sourceType = { in: sourceTypes }
-      }
-    }
+    const sourceTypes = options?.type
+      ? this.getSourceTypesForTransactionType(options.type)
+      : []
 
     if (options?.routeId) {
-      // Filter by loan's lead current routes
-      where.loan = {
-        leadRelation: {
-          routes: {
-            some: { id: options.routeId },
+      // Get leaders and accounts for this route to support OR conditions
+      const [leadersInRoute, routeAccounts] = await Promise.all([
+        this.prisma.employee.findMany({
+          where: { routes: { some: { id: options.routeId } } },
+          select: { id: true },
+        }),
+        this.prisma.account.findMany({
+          where: { routes: { some: { id: options.routeId } } },
+          select: { id: true },
+        }),
+      ])
+
+      const leaderIdsInRoute = leadersInRoute.map(l => l.id)
+      const routeAccountIds = routeAccounts.map(a => a.id)
+
+      // Build OR conditions for route filtering
+      const routeConditions: any[] = [
+        // Entries with loan where lead is in route
+        {
+          loan: {
+            leadRelation: {
+              routes: { some: { id: options.routeId } },
+            },
           },
         },
+        // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
+        {
+          loan: { is: null },
+          snapshotLeadId: { in: leaderIdsInRoute },
+        },
+        // General expenses on route accounts (no loan, empty snapshotLeadId)
+        {
+          loan: { is: null },
+          snapshotLeadId: { equals: '' },
+          accountId: { in: routeAccountIds },
+        },
+      ]
+
+      // If filtering by sourceTypes, add to each OR condition
+      if (sourceTypes.length > 0) {
+        where.AND = [
+          { sourceType: { in: sourceTypes } },
+          { OR: routeConditions },
+        ]
+      } else {
+        where.OR = routeConditions
       }
+    } else if (sourceTypes.length > 0) {
+      where.sourceType = { in: sourceTypes }
     }
 
     if (options?.accountId) {
-      where.OR = [
-        { accountId: options.accountId },
-        { destinationAccountId: options.accountId },
-      ]
+      // Append to existing AND or create new one
+      const accountCondition = {
+        OR: [
+          { accountId: options.accountId },
+          { destinationAccountId: options.accountId },
+        ],
+      }
+      if (where.AND) {
+        where.AND.push(accountCondition)
+      } else {
+        where.AND = [accountCondition]
+      }
     }
 
     if (options?.fromDate || options?.toDate) {
-      where.entryDate = {}
+      const dateCondition: any = { entryDate: {} }
       if (options?.fromDate) {
-        where.entryDate.gte = options.fromDate
+        dateCondition.entryDate.gte = options.fromDate
       }
       if (options?.toDate) {
-        where.entryDate.lte = options.toDate
+        dateCondition.entryDate.lte = options.toDate
+      }
+      if (where.AND) {
+        where.AND.push(dateCondition)
+      } else {
+        where.AND = [dateCondition]
       }
     }
 
