@@ -966,36 +966,47 @@ export class ReportService {
 
     // Get all account entries for the year
     // Filter by:
-    // 1. Entries WITH loans: loan's lead location was in one of the routes
-    // 2. Entries whose account is linked to one of the routes (for expenses, commissions, transfers, etc.)
-    //    This catches entries with loans that have no lead or lead without valid address
+    // 1. Entries with snapshotRouteId set (new behavior - most accurate)
+    // 2. Legacy fallback for entries without snapshotRouteId:
+    //    a. Entries WITH loans: loan's lead location was in one of the routes
+    //    b. Entries whose account is linked to one of the routes (for expenses, commissions, transfers, etc.)
     const entries = await this.prisma.accountEntry.findMany({
       where: {
         entryDate: { gte: yearStart, lte: yearEnd },
         OR: [
-          // Entries associated with loans whose lead's location is in the routes
+          // Primary: Use snapshotRouteId when available (prevents duplicate counting)
           {
-            loan: {
-              leadRelation: {
-                personalDataRelation: {
-                  addresses: {
-                    some: {
-                      location: { in: Array.from(locationIdsInRoutes) },
+            snapshotRouteId: { in: routeIds },
+          },
+          // Legacy fallback: entries without snapshotRouteId
+          {
+            snapshotRouteId: { equals: '' },
+            OR: [
+              // Entries associated with loans whose lead's location is in the routes
+              {
+                loan: {
+                  leadRelation: {
+                    personalDataRelation: {
+                      addresses: {
+                        some: {
+                          location: { in: Array.from(locationIdsInRoutes) },
+                        },
+                      },
                     },
                   },
                 },
               },
-            },
-          },
-          // Entries (with or without loans) whose account is linked to the routes
-          // This includes: gasoline, salaries, general expenses, transfers,
-          // and commissions from loans that have no lead or invalid lead address
-          {
-            account: {
-              routes: {
-                some: { id: { in: routeIds } },
+              // Entries (with or without loans) whose account is linked to the routes
+              // This includes: gasoline, salaries, general expenses, transfers,
+              // and commissions from loans that have no lead or invalid lead address
+              {
+                account: {
+                  routes: {
+                    some: { id: { in: routeIds } },
+                  },
+                },
               },
-            },
+            ],
           },
         ],
       },

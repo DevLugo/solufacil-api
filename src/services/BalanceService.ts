@@ -60,6 +60,7 @@ export interface CreateEntryInput {
   profitAmount?: Decimal | number | string
   returnToCapital?: Decimal | number | string
   snapshotLeadId?: string
+  snapshotRouteId?: string
 }
 
 export interface ReconciliationResult {
@@ -133,6 +134,7 @@ export class BalanceService {
         profitAmount: input.profitAmount ? new Decimal(input.profitAmount.toString()) : undefined,
         returnToCapital: input.returnToCapital ? new Decimal(input.returnToCapital.toString()) : undefined,
         snapshotLeadId: input.snapshotLeadId || '',
+        snapshotRouteId: input.snapshotRouteId || '',
       },
     })
 
@@ -160,6 +162,7 @@ export class BalanceService {
       entryDate?: Date
       description?: string
       snapshotLeadId?: string
+      snapshotRouteId?: string
       leadPaymentReceivedId?: string
     },
     tx?: PrismaTransactionClient
@@ -178,6 +181,7 @@ export class BalanceService {
         description: input.description,
         destinationAccountId: input.destinationAccountId,
         snapshotLeadId: input.snapshotLeadId,
+        snapshotRouteId: input.snapshotRouteId,
         leadPaymentReceivedId: input.leadPaymentReceivedId,
       },
       client as PrismaTransactionClient
@@ -194,6 +198,7 @@ export class BalanceService {
         description: input.description,
         destinationAccountId: input.sourceAccountId, // Link back to source
         snapshotLeadId: input.snapshotLeadId,
+        snapshotRouteId: input.snapshotRouteId,
         leadPaymentReceivedId: input.leadPaymentReceivedId,
       },
       client as PrismaTransactionClient

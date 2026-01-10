@@ -174,9 +174,11 @@ export class TransactionSummaryService {
 
     // Fetch all AccountEntry records for the route in the date range
     // Include entries that either:
-    // 1. Have a loan where the lead is in the route, OR
-    // 2. Have a snapshotLeadId pointing to a leader in the route (for PAYMENT_COMMISSION), OR
-    // 3. Are general expenses on route accounts (no loan, no snapshotLeadId)
+    // 1. Have snapshotRouteId matching the route (primary - most accurate), OR
+    // 2. Legacy fallback for entries without snapshotRouteId:
+    //    a. Have a loan where the lead is in the route, OR
+    //    b. Have a snapshotLeadId pointing to a leader in the route (for PAYMENT_COMMISSION), OR
+    //    c. Are general expenses on route accounts (no loan, no snapshotLeadId)
     const entries = await this.prisma.accountEntry.findMany({
       where: {
         entryDate: {
@@ -184,34 +186,49 @@ export class TransactionSummaryService {
           lte: endDate,
         },
         OR: [
-          // Entries with loan where lead is in route
+          // Primary: Use snapshotRouteId when available (prevents duplicate counting)
           {
-            loan: {
-              leadRelation: {
-                routes: {
-                  some: { id: routeId },
+            snapshotRouteId: routeId,
+          },
+          // Legacy fallback: entries without snapshotRouteId
+          {
+            snapshotRouteId: { equals: '' },
+            OR: [
+              // Entries with loan where lead is in route
+              {
+                loan: {
+                  leadRelation: {
+                    routes: {
+                      some: { id: routeId },
+                    },
+                  },
                 },
               },
-            },
-          },
-          // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
-          {
-            loan: { is: null },
-            snapshotLeadId: {
-              in: leaderIdsInRoute,
-            },
-          },
-          // General route expenses (no loan, no leader - on route accounts)
-          {
-            loan: { is: null },
-            snapshotLeadId: { equals: '' },
-            accountId: {
-              in: routeAccountIds,
-            },
+              // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
+              {
+                loan: { is: null },
+                snapshotLeadId: {
+                  in: leaderIdsInRoute,
+                },
+              },
+              // General route expenses (no loan, no leader - on route accounts)
+              {
+                loan: { is: null },
+                snapshotLeadId: { equals: '' },
+                accountId: {
+                  in: routeAccountIds,
+                },
+              },
+            ],
           },
         ],
       },
       include: {
+        account: {
+          select: {
+            type: true,
+          },
+        },
         loan: {
           include: {
             borrowerRelation: {
@@ -415,7 +432,11 @@ export class TransactionSummaryService {
 
         default: {
           // Check if it's a manual expense
-          if (MANUAL_EXPENSE_TYPES.includes(entry.sourceType) && entry.entryType === 'DEBIT') {
+          // Exclude expenses from BANK and OFFICE_CASH_FUND accounts (these are shown separately with toggle)
+          const accountType = entry.account?.type
+          const isExcludedAccountType = accountType === 'BANK' || accountType === 'OFFICE_CASH_FUND'
+
+          if (MANUAL_EXPENSE_TYPES.includes(entry.sourceType) && entry.entryType === 'DEBIT' && !isExcludedAccountType) {
             const expense: ExpenseSummary = {
               id: entry.id,
               source: entry.sourceType,

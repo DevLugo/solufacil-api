@@ -1163,6 +1163,7 @@ type Query {
   transactions(
     type: TransactionType
     routeId: ID
+    leadId: ID
     accountId: ID
     fromDate: DateTime
     toDate: DateTime

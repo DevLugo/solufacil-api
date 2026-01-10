@@ -73,7 +73,6 @@ function mapToSourceType(type: TransactionType, incomeSource?: string, expenseSo
       case 'CASETA': return 'TRAVEL_EXPENSES'
       case 'VEHICULE_MAINTENANCE': return 'CAR_PAYMENT'
       case 'LAVADO_DE_AUTO': return 'CAR_PAYMENT'
-      case 'LEAD_EXPENSE': return 'EMPLOYEE_EXPENSE'
       case 'IMSS_INFONAVIT': return 'EMPLOYEE_EXPENSE'
       case 'POSADA': return 'EMPLOYEE_EXPENSE'
       case 'REGALOS_LIDERES': return 'EMPLOYEE_EXPENSE'
@@ -118,6 +117,7 @@ export class TransactionService {
   async findMany(options?: {
     type?: TransactionType
     routeId?: string
+    leadId?: string
     accountId?: string
     fromDate?: Date
     toDate?: Date
@@ -131,8 +131,25 @@ export class TransactionService {
       ? this.getSourceTypesForTransactionType(options.type)
       : []
 
-    if (options?.routeId) {
-      // Get leaders and accounts for this route to support OR conditions
+    // If filtering by specific leadId, use simple snapshotLeadId filter
+    // If leadId is explicitly null/undefined but routeId is present, filter by route
+    if (options?.leadId) {
+      // Filter by specific lead
+      where.snapshotLeadId = options.leadId
+
+      if (sourceTypes.length > 0) {
+        where.sourceType = { in: sourceTypes }
+      }
+    } else if (options?.routeId) {
+      // Primary filter: use snapshotRouteId for entries that have it
+      // Fallback: for legacy entries without snapshotRouteId, use account/lead based filtering
+      const routeConditions: any[] = [
+        // Entries with snapshotRouteId set (new entries after migration)
+        { snapshotRouteId: options.routeId },
+      ]
+
+      // Fallback for legacy entries without snapshotRouteId
+      // Get leaders and accounts for this route
       const [leadersInRoute, routeAccounts] = await Promise.all([
         this.prisma.employee.findMany({
           where: { routes: { some: { id: options.routeId } } },
@@ -147,28 +164,31 @@ export class TransactionService {
       const leaderIdsInRoute = leadersInRoute.map(l => l.id)
       const routeAccountIds = routeAccounts.map(a => a.id)
 
-      // Build OR conditions for route filtering
-      const routeConditions: any[] = [
-        // Entries with loan where lead is in route
+      // Legacy fallback conditions (only for entries without snapshotRouteId)
+      routeConditions.push(
+        // Entries with loan where lead is in route (legacy)
         {
+          snapshotRouteId: { equals: '' },
           loan: {
             leadRelation: {
               routes: { some: { id: options.routeId } },
             },
           },
         },
-        // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
+        // Entries without loan but with snapshotLeadId in route (legacy)
         {
+          snapshotRouteId: { equals: '' },
           loan: { is: null },
           snapshotLeadId: { in: leaderIdsInRoute },
         },
-        // General expenses on route accounts (no loan, empty snapshotLeadId)
+        // General expenses on route accounts (legacy - no loan, empty snapshotLeadId)
         {
+          snapshotRouteId: { equals: '' },
           loan: { is: null },
           snapshotLeadId: { equals: '' },
           accountId: { in: routeAccountIds },
         },
-      ]
+      )
 
       // If filtering by sourceTypes, add to each OR condition
       if (sourceTypes.length > 0) {
@@ -385,10 +405,19 @@ export class TransactionService {
           loanId: input.loanId,
           loanPaymentId: input.loanPaymentId,
           snapshotLeadId: input.leadId || '',
+          snapshotRouteId: input.routeId || '',
           description: input.incomeSource || '',
         }, tx)
       } else if (input.type === 'EXPENSE' && input.sourceAccountId) {
         // EXPENSE = DEBIT (dinero sale)
+        // Guardar expenseSource original en description para recuperarlo al leer
+        // Formato: "EXPENSE_TYPE:XXX" o "EXPENSE_TYPE:XXX|Notas del usuario"
+        const expenseDescription = input.expenseSource
+          ? input.description
+            ? `EXPENSE_TYPE:${input.expenseSource}|${input.description}`
+            : `EXPENSE_TYPE:${input.expenseSource}`
+          : input.description || ''
+
         await balanceService.createEntry({
           accountId: input.sourceAccountId,
           entryType: 'DEBIT',
@@ -397,7 +426,8 @@ export class TransactionService {
           entryDate: input.date,
           loanId: input.loanId,
           snapshotLeadId: input.leadId || '',
-          description: input.description || '',
+          snapshotRouteId: input.routeId || '',
+          description: expenseDescription,
         }, tx)
       } else if (input.type === 'TRANSFER') {
         // TRANSFER = DEBIT del origen + CREDIT al destino
@@ -409,6 +439,7 @@ export class TransactionService {
             sourceType: 'TRANSFER_OUT',
             entryDate: input.date,
             snapshotLeadId: input.leadId || '',
+            snapshotRouteId: input.routeId || '',
             destinationAccountId: input.destinationAccountId,
           }, tx)
         }
@@ -420,6 +451,7 @@ export class TransactionService {
             sourceType: 'TRANSFER_IN',
             entryDate: input.date,
             snapshotLeadId: input.leadId || '',
+            snapshotRouteId: input.routeId || '',
           }, tx)
         }
       }

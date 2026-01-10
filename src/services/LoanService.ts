@@ -464,6 +464,9 @@ export class LoanService {
     // Crear snapshot histórico (solo del lead, la ruta se determina vía LocationHistoryService)
     const snapshot = createLoanSnapshot(lead.id)
 
+    // Obtener routeId de la cuenta fuente
+    const routeId = sourceAccount.routes[0]?.id || ''
+
     // Ejecutar todo en una transacción
     return this.prisma.$transaction(async (tx) => {
       const balanceService = new BalanceService(tx as any)
@@ -624,6 +627,7 @@ export class LoanService {
           entryDate: input.signDate,
           loanId: loan.id,
           snapshotLeadId: input.leadId,
+          snapshotRouteId: routeId,
         }, tx)
 
         // 7.1. DEBIT: Comisión de otorgamiento
@@ -636,6 +640,7 @@ export class LoanService {
             entryDate: input.signDate,
             loanId: loan.id,
             snapshotLeadId: input.leadId,
+            snapshotRouteId: routeId,
           }, tx)
         }
 
@@ -689,6 +694,7 @@ export class LoanService {
             profitAmount,
             returnToCapital,
             snapshotLeadId: input.leadId,
+            snapshotRouteId: routeId,
           }, tx)
 
           // DEBIT: Comisión del primer pago
@@ -701,6 +707,7 @@ export class LoanService {
               entryDate: input.signDate,
               loanPaymentId: payment.id,
               snapshotLeadId: input.leadId,
+              snapshotRouteId: routeId,
             }, tx)
           }
 
