@@ -134,70 +134,117 @@ export class TransactionService {
     // If filtering by specific leadId, use simple snapshotLeadId filter
     // If leadId is explicitly null/undefined but routeId is present, filter by route
     if (options?.leadId) {
-      // Filter by specific lead
-      where.snapshotLeadId = options.leadId
+      // For EXPENSE type, include:
+      // 1. Leader's specific expenses (snapshotLeadId = leadId)
+      // 2. Route-level expenses from BANK/OFFICE accounts (shared expenses, no specific leader)
+      if (options.type === 'EXPENSE' && options.routeId) {
+        const routeBankOfficeAccounts = await this.prisma.account.findMany({
+          where: {
+            type: { in: ['BANK', 'OFFICE_CASH_FUND'] },
+            routes: { some: { id: options.routeId } },
+          },
+          select: { id: true },
+        })
+        const routeAccountIds = routeBankOfficeAccounts.map(a => a.id)
 
-      if (sourceTypes.length > 0) {
-        where.sourceType = { in: sourceTypes }
+        where.OR = [
+          // Leader's specific expenses
+          { snapshotLeadId: options.leadId },
+          // Route-level bank/office expenses (no leader assigned)
+          ...(routeAccountIds.length > 0
+            ? [{ accountId: { in: routeAccountIds }, snapshotLeadId: '' }]
+            : []),
+        ]
+
+        if (sourceTypes.length > 0) {
+          where.sourceType = { in: sourceTypes }
+        }
+      } else {
+        // For other types, filter by specific lead only
+        where.snapshotLeadId = options.leadId
+
+        if (sourceTypes.length > 0) {
+          where.sourceType = { in: sourceTypes }
+        }
       }
     } else if (options?.routeId) {
-      // Primary filter: use snapshotRouteId for entries that have it
-      // Fallback: for legacy entries without snapshotRouteId, use account/lead based filtering
-      const routeConditions: any[] = [
-        // Entries with snapshotRouteId set (new entries after migration)
-        { snapshotRouteId: options.routeId },
-      ]
-
-      // Fallback for legacy entries without snapshotRouteId
-      // Get leaders and accounts for this route
-      const [leadersInRoute, routeAccounts] = await Promise.all([
-        this.prisma.employee.findMany({
+      // For EXPENSE type without leadId, return only route-level expenses (no leader assigned)
+      if (options.type === 'EXPENSE') {
+        const routeAccounts = await this.prisma.account.findMany({
           where: { routes: { some: { id: options.routeId } } },
           select: { id: true },
-        }),
-        this.prisma.account.findMany({
-          where: { routes: { some: { id: options.routeId } } },
-          select: { id: true },
-        }),
-      ])
+        })
+        const routeAccountIds = routeAccounts.map(a => a.id)
 
-      const leaderIdsInRoute = leadersInRoute.map(l => l.id)
-      const routeAccountIds = routeAccounts.map(a => a.id)
+        // Route-level expenses: no snapshotLeadId (empty string) AND from route accounts
+        where.AND = [
+          { snapshotRouteId: options.routeId },
+          { snapshotLeadId: '' },
+          ...(routeAccountIds.length > 0 ? [{ accountId: { in: routeAccountIds } }] : []),
+        ]
 
-      // Legacy fallback conditions (only for entries without snapshotRouteId)
-      routeConditions.push(
-        // Entries with loan where lead is in route (legacy)
-        {
-          snapshotRouteId: { equals: '' },
-          loan: {
-            leadRelation: {
-              routes: { some: { id: options.routeId } },
+        if (sourceTypes.length > 0) {
+          where.AND.push({ sourceType: { in: sourceTypes } })
+        }
+      } else {
+        // Primary filter: use snapshotRouteId for entries that have it
+        // Fallback: for legacy entries without snapshotRouteId, use account/lead based filtering
+        const routeConditions: any[] = [
+          // Entries with snapshotRouteId set (new entries after migration)
+          { snapshotRouteId: options.routeId },
+        ]
+
+        // Fallback for legacy entries without snapshotRouteId
+        // Get leaders and accounts for this route
+        const [leadersInRoute, routeAccounts] = await Promise.all([
+          this.prisma.employee.findMany({
+            where: { routes: { some: { id: options.routeId } } },
+            select: { id: true },
+          }),
+          this.prisma.account.findMany({
+            where: { routes: { some: { id: options.routeId } } },
+            select: { id: true },
+          }),
+        ])
+
+        const leaderIdsInRoute = leadersInRoute.map(l => l.id)
+        const routeAccountIds = routeAccounts.map(a => a.id)
+
+        // Legacy fallback conditions (only for entries without snapshotRouteId)
+        routeConditions.push(
+          // Entries with loan where lead is in route (legacy)
+          {
+            snapshotRouteId: { equals: '' },
+            loan: {
+              leadRelation: {
+                routes: { some: { id: options.routeId } },
+              },
             },
           },
-        },
-        // Entries without loan but with snapshotLeadId in route (legacy)
-        {
-          snapshotRouteId: { equals: '' },
-          loan: { is: null },
-          snapshotLeadId: { in: leaderIdsInRoute },
-        },
-        // General expenses on route accounts (legacy - no loan, empty snapshotLeadId)
-        {
-          snapshotRouteId: { equals: '' },
-          loan: { is: null },
-          snapshotLeadId: { equals: '' },
-          accountId: { in: routeAccountIds },
-        },
-      )
+          // Entries without loan but with snapshotLeadId in route (legacy)
+          {
+            snapshotRouteId: { equals: '' },
+            loan: { is: null },
+            snapshotLeadId: { in: leaderIdsInRoute },
+          },
+          // General expenses on route accounts (legacy - no loan, empty snapshotLeadId)
+          {
+            snapshotRouteId: { equals: '' },
+            loan: { is: null },
+            snapshotLeadId: { equals: '' },
+            accountId: { in: routeAccountIds },
+          },
+        )
 
-      // If filtering by sourceTypes, add to each OR condition
-      if (sourceTypes.length > 0) {
-        where.AND = [
-          { sourceType: { in: sourceTypes } },
-          { OR: routeConditions },
-        ]
-      } else {
-        where.OR = routeConditions
+        // If filtering by sourceTypes, add to each OR condition
+        if (sourceTypes.length > 0) {
+          where.AND = [
+            { sourceType: { in: sourceTypes } },
+            { OR: routeConditions },
+          ]
+        } else {
+          where.OR = routeConditions
+        }
       }
     } else if (sourceTypes.length > 0) {
       where.sourceType = { in: sourceTypes }
@@ -264,8 +311,9 @@ export class TransactionService {
       case 'INCOME':
         return ['LOAN_PAYMENT_CASH', 'LOAN_PAYMENT_BANK']
       case 'EXPENSE':
+        // Excluir gastos relacionados con préstamos (LOAN_GRANT, LOAN_GRANT_COMMISSION, PAYMENT_COMMISSION)
+        // Estos se muestran en otras vistas, no en la pestaña de Gastos
         return [
-          'LOAN_GRANT', 'LOAN_GRANT_COMMISSION', 'PAYMENT_COMMISSION',
           'GASOLINE', 'GASOLINE_TOKA', 'NOMINA_SALARY', 'EXTERNAL_SALARY',
           'VIATIC', 'TRAVEL_EXPENSES', 'EMPLOYEE_EXPENSE', 'GENERAL_EXPENSE',
           'CAR_PAYMENT', 'BANK_EXPENSE', 'OTHER_EXPENSE', 'FALCO_LOSS', 'ASSET_ACQUISITION',
