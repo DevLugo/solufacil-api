@@ -334,6 +334,7 @@ model Transaction {
   incomeSource    String?
   expenseSource   String?
   snapshotLeadId  String @default("")
+  snapshotRouteId String @default("")
   expenseGroupId  String?
 
   profitAmount    Decimal? @db.Decimal(10, 2) @default(0)
@@ -372,6 +373,7 @@ model Transaction {
   @@index([route])
   @@index([lead])
   @@index([leadPaymentReceived])
+  @@index([snapshotRouteId])
 }
 
 enum TransactionType {
@@ -431,6 +433,7 @@ model AccountEntry {
 
   // Snapshots for historical reports
   snapshotLeadId  String @default("")
+  snapshotRouteId String @default("")
 
   // Timestamps
   entryDate DateTime @default(now())
@@ -458,6 +461,7 @@ model AccountEntry {
   @@index([loanId])
   @@index([loanPaymentId])
   @@index([leadPaymentReceivedId])
+  @@index([snapshotRouteId])
 }
 
 enum AccountEntryType {
