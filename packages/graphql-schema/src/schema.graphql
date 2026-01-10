@@ -183,6 +183,24 @@ type BorrowerSearchResult {
   locationId: ID
   locationName: String
   isFromCurrentLocation: Boolean!
+  lastFinishedLoan: LastFinishedLoan
+}
+
+type LastFinishedLoan {
+  id: ID!
+  requestedAmount: String!
+  loantypeId: ID!
+  loantypeName: String!
+  weekDuration: Int!
+  rate: String!
+  signDate: DateTime!
+  collaterals: [LastFinishedLoanCollateral!]!
+}
+
+type LastFinishedLoanCollateral {
+  id: ID!
+  fullName: String!
+  phone: String
 }
 
 type Loantype {

@@ -108,6 +108,29 @@ export class PaymentService {
   }
 
   /**
+   * Incrementa el contador de préstamos finalizados del borrower si el préstamo cambió a FINISHED.
+   */
+  private async incrementLoanFinishedCountIfNeeded(
+    loanId: string,
+    isFinished: boolean,
+    tx: PrismaClient | any
+  ): Promise<void> {
+    if (!isFinished) return
+
+    const loan = await tx.loan.findUnique({
+      where: { id: loanId },
+      select: { borrower: true, status: true }
+    })
+
+    if (loan?.borrower && loan.status !== 'FINISHED') {
+      await tx.borrower.update({
+        where: { id: loan.borrower },
+        data: { loanFinishedCount: { increment: 1 } }
+      })
+    }
+  }
+
+  /**
    * Actualiza las métricas del préstamo recalculándolas desde los pagos.
    * También actualiza el status a FINISHED si pendingAmountStored <= 0.
    *
@@ -123,20 +146,9 @@ export class PaymentService {
     baseComission?: Decimal
   ): Promise<void> {
     const { totalPaid, pendingAmountStored, totalComissions } = await this.recalculateLoanMetrics(loanId, tx)
-
     const isFinished = pendingAmountStored.lessThanOrEqualTo(0)
 
-    // Obtener la comisión base del préstamo si no se proporcionó
-    // (comisión de otorgamiento que no está en los pagos)
-    let loanGrantComission = baseComission
-    if (!loanGrantComission) {
-      const loan = await tx.loan.findUnique({
-        where: { id: loanId },
-        select: { loantypeRelation: { select: { loanGrantedComission: true } } },
-      })
-      // La comisión de otorgamiento ya está en loan.comissionAmount inicial
-      // Aquí solo sumamos las comisiones de los pagos
-    }
+    await this.incrementLoanFinishedCountIfNeeded(loanId, isFinished, tx)
 
     await tx.loan.update({
       where: { id: loanId },
@@ -193,6 +205,8 @@ export class PaymentService {
             profitAmount: true,
             totalDebtAcquired: true,
             badDebtDate: true,
+            borrower: true,
+            status: true,
             loantypeRelation: {
               select: { loanPaymentComission: true }
             }
@@ -497,12 +511,10 @@ export class PaymentService {
       }
 
       // 11. Batch update loan metrics (one update per loan)
-      // First, get current totals for all affected loans
       const loanMetricsPromises = Array.from(loanPaymentTotals.keys()).map(async (loanId) => {
         const loan = loanMap.get(loanId)
         if (!loan) return
 
-        // Get total paid from all payments for this loan
         const paymentsAggregate = await tx.loanPayment.aggregate({
           where: { loan: loanId },
           _sum: { amount: true, comission: true }
@@ -512,6 +524,13 @@ export class PaymentService {
         const totalDebt = new Decimal(loan.totalDebtAcquired.toString())
         const pendingAmountStored = Decimal.max(totalDebt.minus(totalPaid), new Decimal(0))
         const isFinished = pendingAmountStored.lessThanOrEqualTo(0)
+
+        if (isFinished && loan.status !== 'FINISHED') {
+          await tx.borrower.update({
+            where: { id: loan.borrower },
+            data: { loanFinishedCount: { increment: 1 } }
+          })
+        }
 
         return tx.loan.update({
           where: { id: loanId },

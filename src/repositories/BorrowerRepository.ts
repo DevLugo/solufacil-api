@@ -31,7 +31,21 @@ export interface BorrowerSearchResultRaw {
       }
     }[]
   }
-  loans: { id: string; status: string; pendingAmountStored: string; renewedBy?: { id: string } | null }[]
+  loans: {
+    id: string
+    status: string
+    pendingAmountStored: string
+    signDate: Date
+    requestedAmount: string
+    loantype: string
+    loantypeRelation?: {
+      id: string
+      name: string
+      weekDuration: number
+      rate: string
+    } | null
+    renewedBy?: { id: string } | null
+  }[]
   isFromCurrentLocation?: boolean
   locationId?: string
   locationName?: string
@@ -255,6 +269,18 @@ export class BorrowerRepository {
             id: true,
             status: true,
             pendingAmountStored: true,
+            signDate: true,
+            requestedAmount: true,
+            loantype: true,
+            // Incluir relación de loantype para obtener nombre, weekDuration y rate
+            loantypeRelation: {
+              select: {
+                id: true,
+                name: true,
+                weekDuration: true,
+                rate: true,
+              },
+            },
             // Verificar si el préstamo ya fue renovado (tiene otro préstamo que lo referencia como previousLoan)
             renewedBy: {
               select: { id: true },
@@ -280,9 +306,20 @@ export class BorrowerRepository {
                 },
               },
             },
+            // Incluir collaterals (avales) para pre-cargar en reintegros
+            collaterals: {
+              select: {
+                id: true,
+                fullName: true,
+                phones: {
+                  select: { number: true },
+                  take: 1,
+                },
+              },
+            },
           },
           orderBy: { createdAt: 'desc' },
-          take: 5,
+          take: 10,
         },
       },
       orderBy: {
@@ -341,7 +378,12 @@ export class BorrowerRepository {
         loans: borrower.loans.map(loan => ({
           ...loan,
           pendingAmountStored: loan.pendingAmountStored.toString(),
+          requestedAmount: loan.requestedAmount.toString(),
           status: loan.status as string,
+          loantypeRelation: loan.loantypeRelation ? {
+            ...loan.loantypeRelation,
+            rate: loan.loantypeRelation.rate.toString(),
+          } : null,
         })),
         isFromCurrentLocation,
         locationId: finalLocationId,
