@@ -174,9 +174,6 @@ export class LoanService {
     const weekStart = getWeekStartDate(options.year, options.weekNumber)
     const weekEnd = getWeekEndDate(options.year, options.weekNumber)
 
-    console.log('[LoanService.findByWeekAndLocation] options:', JSON.stringify(options))
-    console.log('[LoanService.findByWeekAndLocation] weekStart:', weekStart, 'weekEnd:', weekEnd)
-
     const { loans } = await this.loanRepository.findMany({
       routeId: options.routeId,
       locationId: options.locationId,
@@ -188,6 +185,69 @@ export class LoanService {
     })
 
     return loans
+  }
+
+  /**
+   * Procesa la renovación de un préstamo:
+   * - Calcula profit heredado
+   * - Marca préstamo anterior como FINISHED
+   * - Incrementa loanFinishedCount del borrower
+   *
+   * @returns El profit heredado a sumar al nuevo préstamo
+   */
+  private async processLoanRenewal(
+    previousLoanId: string,
+    signDate: Date,
+    tx?: any
+  ): Promise<Decimal> {
+    const client = tx || this.prisma
+
+    const previousLoan = await client.loan.findUnique({
+      where: { id: previousLoanId },
+      select: {
+        id: true,
+        borrower: true,
+        pendingAmountStored: true,
+        profitAmount: true,
+        totalDebtAcquired: true,
+        renewedBy: true,
+      },
+    })
+
+    if (!previousLoan) {
+      throw new GraphQLError('Previous loan not found', {
+        extensions: { code: 'NOT_FOUND' },
+      })
+    }
+
+    if (previousLoan.renewedBy) {
+      throw new GraphQLError(
+        'Este préstamo ya fue renovado. Por favor, recarga la página para ver los préstamos disponibles actualizados.',
+        { extensions: { code: 'BAD_USER_INPUT' } }
+      )
+    }
+
+    const { profitHeredado } = calculateProfitHeredado(
+      new Decimal(previousLoan.pendingAmountStored.toString()),
+      new Decimal(previousLoan.profitAmount.toString()),
+      new Decimal(previousLoan.totalDebtAcquired.toString())
+    )
+
+    await client.loan.update({
+      where: { id: previousLoanId },
+      data: {
+        status: 'FINISHED',
+        renewedDate: signDate,
+        finishedDate: signDate,
+      },
+    })
+
+    await client.borrower.update({
+      where: { id: previousLoan.borrower },
+      data: { loanFinishedCount: { increment: 1 } }
+    })
+
+    return profitHeredado
   }
 
   async create(input: CreateLoanInput) {
@@ -227,31 +287,9 @@ export class LoanService {
     )
 
     // Manejar profit pendiente si es renovación
-    let pendingProfit = new Decimal(0)
-    if (input.previousLoanId) {
-      const previousLoan = await this.loanRepository.findById(input.previousLoanId)
-      if (!previousLoan) {
-        throw new GraphQLError('Previous loan not found', {
-          extensions: { code: 'NOT_FOUND' },
-        })
-      }
-
-      // Calcular el profit pendiente del préstamo anterior usando la función centralizada
-      // Solo la PORCIÓN de profit de la deuda pendiente se hereda (no la deuda total)
-      const { profitHeredado } = calculateProfitHeredado(
-        new Decimal(previousLoan.pendingAmountStored.toString()),
-        new Decimal(previousLoan.profitAmount.toString()),
-        new Decimal(previousLoan.totalDebtAcquired.toString())
-      )
-      pendingProfit = profitHeredado
-
-      // Marcar el préstamo anterior como FINISHED (renovado)
-      await this.loanRepository.update(input.previousLoanId, {
-        status: 'FINISHED',
-        renewedDate: input.signDate,
-        finishedDate: input.signDate,
-      })
-    }
+    const pendingProfit = input.previousLoanId
+      ? await this.processLoanRenewal(input.previousLoanId, input.signDate)
+      : new Decimal(0)
 
     // Crear snapshot histórico (solo del lead, la ruta se determina vía LocationHistoryService)
     const snapshot = createLoanSnapshot(lead.id)
@@ -521,51 +559,9 @@ export class LoanService {
         const metrics = calculateLoanMetrics(requestedAmount, rate, loantype.weekDuration)
 
         // 5. Manejar profit pendiente si es renovación
-        let pendingProfit = new Decimal(0)
-        console.log('[LoanService] createLoansInBatch - loanInput.previousLoanId:', loanInput.previousLoanId)
-        if (loanInput.previousLoanId) {
-          console.log('[LoanService] Processing renewal for previousLoanId:', loanInput.previousLoanId)
-          const previousLoan = await tx.loan.findUnique({
-            where: { id: loanInput.previousLoanId },
-            include: { renewedBy: true },
-          })
-
-          if (!previousLoan) {
-            throw new GraphQLError(`Previous loan not found`, {
-              extensions: { code: 'NOT_FOUND' },
-            })
-          }
-
-          // Check if loan has already been renewed
-          // Este caso no debería ocurrir si el frontend filtra correctamente (mostrando solo el préstamo más reciente)
-          if (previousLoan.renewedBy) {
-            throw new GraphQLError(
-              `Este préstamo ya fue renovado. Por favor, recarga la página para ver los préstamos disponibles actualizados.`,
-              { extensions: { code: 'BAD_USER_INPUT' } }
-            )
-          }
-
-          // Calcular el profit pendiente del préstamo anterior usando la función centralizada
-          // Solo la PORCIÓN de profit de la deuda pendiente se hereda (no la deuda total)
-          const { profitHeredado } = calculateProfitHeredado(
-            new Decimal(previousLoan.pendingAmountStored.toString()),
-            new Decimal(previousLoan.profitAmount.toString()),
-            new Decimal(previousLoan.totalDebtAcquired.toString())
-          )
-          pendingProfit = profitHeredado
-
-          // Marcar préstamo anterior como FINISHED (renovado)
-          console.log('[LoanService] Updating previous loan to FINISHED (renewed):', loanInput.previousLoanId)
-          const updatedPreviousLoan = await tx.loan.update({
-            where: { id: loanInput.previousLoanId },
-            data: {
-              status: 'FINISHED',
-              renewedDate: input.signDate,
-              finishedDate: input.signDate,
-            },
-          })
-          console.log('[LoanService] Previous loan updated:', updatedPreviousLoan.id, 'status:', updatedPreviousLoan.status)
-        }
+        const pendingProfit = loanInput.previousLoanId
+          ? await this.processLoanRenewal(loanInput.previousLoanId, input.signDate, tx)
+          : new Decimal(0)
 
         // 6. Crear el préstamo
         // Note: La deuda anterior ya está descontada en amountGived
@@ -1176,6 +1172,20 @@ export class LoanService {
 
       // 5. Si es renovación, reactivar el préstamo anterior
       if (loan.previousLoan) {
+        const previousLoan = await tx.loan.findUnique({
+          where: { id: loan.previousLoan },
+          select: { borrower: true, pendingAmountStored: true }
+        })
+
+        // Solo decrementar loanFinishedCount si el préstamo anterior tenía deuda pendiente
+        // (es decir, se "terminó" por renovación, no porque se pagó completamente)
+        if (previousLoan && parseFloat(previousLoan.pendingAmountStored.toString()) > 0) {
+          await tx.borrower.update({
+            where: { id: previousLoan.borrower },
+            data: { loanFinishedCount: { decrement: 1 } }
+          })
+        }
+
         await tx.loan.update({
           where: { id: loan.previousLoan },
           data: {

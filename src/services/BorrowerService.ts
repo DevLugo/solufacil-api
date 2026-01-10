@@ -77,6 +77,28 @@ export class BorrowerService {
     return this.borrowerRepository.update(id, input)
   }
 
+  private getActiveLoans(borrower: any) {
+    return borrower.loans.filter(
+      (loan: any) => loan.status === 'ACTIVE' && !loan.renewedBy
+    )
+  }
+
+  private calculatePendingDebt(activeLoans: any[]) {
+    return activeLoans.reduce(
+      (sum, loan) => sum + parseFloat(loan.pendingAmountStored || '0'),
+      0
+    )
+  }
+
+  private getLastFinishedLoan(borrower: any) {
+    const finishedLoans = borrower.loans.filter((loan: any) => loan.status === 'FINISHED')
+    if (finishedLoans.length === 0) return null
+
+    return finishedLoans.sort((a: any, b: any) =>
+      new Date(b.signDate).getTime() - new Date(a.signDate).getTime()
+    )[0]
+  }
+
   async searchByName(input: SearchBorrowersInput) {
     if (input.searchTerm.length < 2) {
       return []
@@ -89,19 +111,10 @@ export class BorrowerService {
       limit: input.limit || 10,
     })
 
-    // Transformar resultados al formato BorrowerSearchResult
     return results.map((borrower) => {
-      // Filtrar solo préstamos activos:
-      // - status ACTIVE (no FINISHED, CANCELLED)
-      // - Sin renewedBy (no han sido renovados por otro préstamo)
-      const activeLoans = borrower.loans.filter(
-        (loan) => loan.status === 'ACTIVE' && !loan.renewedBy
-      )
-
-      const pendingDebtAmount = activeLoans.reduce(
-        (sum, loan) => sum + parseFloat(loan.pendingAmountStored || '0'),
-        0
-      )
+      const activeLoans = this.getActiveLoans(borrower)
+      const pendingDebtAmount = this.calculatePendingDebt(activeLoans)
+      const lastFinishedLoan = this.getLastFinishedLoan(borrower)
 
       return {
         id: borrower.id,
@@ -112,6 +125,20 @@ export class BorrowerService {
         locationId: borrower.locationId,
         locationName: borrower.locationName,
         isFromCurrentLocation: borrower.isFromCurrentLocation ?? true,
+        lastFinishedLoan: lastFinishedLoan ? {
+          id: lastFinishedLoan.id,
+          requestedAmount: lastFinishedLoan.requestedAmount.toString(),
+          loantypeId: lastFinishedLoan.loantype,
+          loantypeName: lastFinishedLoan.loantypeRelation?.name || '',
+          weekDuration: lastFinishedLoan.loantypeRelation?.weekDuration || 0,
+          rate: lastFinishedLoan.loantypeRelation?.rate?.toString() || '0',
+          signDate: lastFinishedLoan.signDate,
+          collaterals: ((lastFinishedLoan as any).collaterals || []).map((c: any) => ({
+            id: c.id,
+            fullName: c.fullName,
+            phone: c.phones?.[0]?.number || null,
+          })),
+        } : undefined,
       }
     })
   }
