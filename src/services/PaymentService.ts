@@ -732,6 +732,7 @@ export class PaymentService {
       const agentAccounts = agent?.routes?.flatMap(r => r.accounts) || []
       const cashAccount = agentAccounts.find(a => a.type === 'EMPLOYEE_CASH_FUND')
       const bankAccount = agentAccounts.find(a => a.type === 'BANK')
+      const routeId = agent?.routes?.[0]?.id || ''
 
       // 2. Delete all existing AccountEntry for this LPR (this reverses all balance changes)
       await balanceService.deleteEntriesByLeadPaymentReceived(id, tx)
@@ -868,6 +869,7 @@ export class PaymentService {
             profitAmount,
             returnToCapital,
             snapshotLeadId: existingRecord.lead,
+            snapshotRouteId: routeId,
           }, tx)
         }
 
@@ -887,6 +889,7 @@ export class PaymentService {
             loanPaymentId: payment.id,
             leadPaymentReceivedId: id,
             snapshotLeadId: existingRecord.lead,
+            snapshotRouteId: routeId,
           }, tx)
         }
       }
@@ -902,6 +905,7 @@ export class PaymentService {
           entryDate: existingRecord.createdAt,
           description: `Depósito efectivo a banco - LPR ${id}`,
           snapshotLeadId: existingRecord.lead,
+          snapshotRouteId: routeId,
           leadPaymentReceivedId: id,
         }, tx)
       }
@@ -917,6 +921,7 @@ export class PaymentService {
           description: `Pérdida por falco - LPR ${id}`,
           leadPaymentReceivedId: id,
           snapshotLeadId: existingRecord.lead,
+          snapshotRouteId: routeId,
         }, tx)
       }
 
@@ -990,8 +995,10 @@ export class PaymentService {
       )
     }
 
-    // Get the cash account for the lead
-    const cashAccount = leadPaymentReceived.leadRelation?.routes?.[0]?.accounts?.[0]
+    // Get the cash account and routeId for the lead
+    const leadRoute = leadPaymentReceived.leadRelation?.routes?.[0]
+    const cashAccount = leadRoute?.accounts?.[0]
+    const routeId = leadRoute?.id || ''
 
     return this.prisma.$transaction(async (tx) => {
       const balanceService = new BalanceService(tx as any)
@@ -1019,6 +1026,7 @@ export class PaymentService {
             : `Compensación de falco (${newCompensatedTotal} de ${originalFalcoAmount}) - LPR ${input.leadPaymentReceivedId}`,
           leadPaymentReceivedId: input.leadPaymentReceivedId,
           snapshotLeadId: leadPaymentReceived.lead,
+          snapshotRouteId: routeId,
         }, tx)
       }
 

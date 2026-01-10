@@ -133,6 +133,7 @@ export class BatchTransferService {
           entryDate: new Date(),
           destinationAccountId: input.destinationAccountId,
           description,
+          snapshotRouteId: routeAccount.routeId,
         }, tx)
 
         // CREDIT to destination
@@ -143,6 +144,7 @@ export class BatchTransferService {
           sourceType: 'TRANSFER_IN',
           entryDate: new Date(),
           description,
+          snapshotRouteId: routeAccount.routeId,
         }, tx)
 
         entries.push(debitEntry, creditEntry)
@@ -262,6 +264,7 @@ export class BatchTransferService {
           entryDate: new Date(),
           destinationAccountId: routeAccount.account.id,
           description,
+          snapshotRouteId: routeAccount.routeId,
         }, tx)
 
         // CREDIT to destination (route cash account)
@@ -272,6 +275,7 @@ export class BatchTransferService {
           sourceType: 'TRANSFER_IN',
           entryDate: new Date(),
           description,
+          snapshotRouteId: routeAccount.routeId,
         }, tx)
 
         entries.push(debitEntry, creditEntry)

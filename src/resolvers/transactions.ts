@@ -97,6 +97,7 @@ export const transactionResolvers = {
       args: {
         type?: TransactionType
         routeId?: string
+        leadId?: string
         accountId?: string
         fromDate?: Date
         toDate?: Date
@@ -111,6 +112,7 @@ export const transactionResolvers = {
       const { transactions, totalCount } = await transactionService.findMany({
         type: args.type ?? undefined,
         routeId: args.routeId ?? undefined,
+        leadId: args.leadId ?? undefined,
         accountId: args.accountId ?? undefined,
         fromDate: args.fromDate ?? undefined,
         toDate: args.toDate ?? undefined,
