@@ -1,6 +1,6 @@
 import { GraphQLError } from 'graphql'
 import { Decimal } from 'decimal.js'
-import type { PrismaClient, PaymentMethod } from '@solufacil/database'
+import type { PrismaClient, PaymentMethod, SourceType, AccountEntryType } from '@solufacil/database'
 import { PaymentRepository } from '../repositories/PaymentRepository'
 import { LoanRepository } from '../repositories/LoanRepository'
 import { AccountRepository } from '../repositories/AccountRepository'
@@ -167,59 +167,180 @@ export class PaymentService {
       ? 'COMPLETE'
       : 'PARTIAL'
 
-    return this.prisma.$transaction(async (tx) => {
-      const balanceService = new BalanceService(tx as any)
+    // Collect unique loan IDs for bulk fetch
+    const loanIds = [...new Set(input.payments.map(p => p.loanId))]
 
-      // 1. Obtener cuentas del agente (EMPLOYEE_CASH_FUND y BANK)
-      const agent = await tx.employee.findUnique({
-        where: { id: input.agentId },
-        include: {
-          routes: {
-            include: {
-              accounts: {
-                where: {
-                  type: { in: ['EMPLOYEE_CASH_FUND', 'BANK'] }
+    return this.prisma.$transaction(async (tx) => {
+      // 1. Bulk fetch: agent accounts + all loans in a single parallel call
+      const [agent, loans] = await Promise.all([
+        tx.employee.findUnique({
+          where: { id: input.agentId },
+          include: {
+            routes: {
+              include: {
+                accounts: {
+                  where: { type: { in: ['EMPLOYEE_CASH_FUND', 'BANK'] } }
                 }
               }
             }
           }
-        }
-      })
+        }),
+        // Minimal fields needed for payment processing
+        tx.loan.findMany({
+          where: { id: { in: loanIds } },
+          select: {
+            id: true,
+            profitAmount: true,
+            totalDebtAcquired: true,
+            badDebtDate: true,
+            loantypeRelation: {
+              select: { loanPaymentComission: true }
+            }
+          }
+        })
+      ])
 
       const agentAccounts = agent?.routes?.flatMap(r => r.accounts) || []
       const cashAccount = agentAccounts.find(a => a.type === 'EMPLOYEE_CASH_FUND')
       const bankAccount = agentAccounts.find(a => a.type === 'BANK')
 
-      // 2. Crear el registro de pago del lead
-      const leadPaymentReceived = await this.paymentRepository.createLeadPaymentReceived({
-        expectedAmount,
-        paidAmount,
-        cashPaidAmount,
-        bankPaidAmount,
-        falcoAmount,
-        paymentStatus,
-        lead: input.leadId,
-        agent: input.agentId,
-        createdAt: paymentDate,
+      // Validar que exista cuenta de efectivo - es crítica para el ledger
+      if (!cashAccount) {
+        throw new GraphQLError(
+          `No se encontró cuenta de efectivo (EMPLOYEE_CASH_FUND) para el empleado ${input.agentId}. Verifique que el empleado esté asignado a una ruta con cuentas configuradas.`,
+          { extensions: { code: 'ACCOUNT_NOT_FOUND' } }
+        )
+      }
+
+      // Create loan lookup map
+      const loanMap = new Map(loans.map(l => [l.id, l]))
+
+      // Detectar loans no encontrados y advertir
+      const missingLoanIds = input.payments
+        .map(p => p.loanId)
+        .filter(loanId => !loanMap.has(loanId))
+
+      if (missingLoanIds.length > 0) {
+        console.warn(
+          `[PaymentService.createLeadPaymentReceived] Préstamos no encontrados: ${missingLoanIds.join(', ')}. Estos pagos serán ignorados.`
+        )
+      }
+
+      // 2. Create LeadPaymentReceived record
+      const leadPaymentReceived = await tx.leadPaymentReceived.create({
+        data: {
+          expectedAmount,
+          paidAmount,
+          cashPaidAmount,
+          bankPaidAmount,
+          falcoAmount,
+          paymentStatus,
+          lead: input.leadId,
+          agent: input.agentId,
+          createdAt: paymentDate,
+        }
       })
 
-      // Track bank payments that came via MONEY_TRANSFER (direct bank deposits)
+      // 3. Prepare all payments and account entries in memory
+      const paymentDataList: {
+        amount: Decimal
+        comission: Decimal
+        receivedAt: Date
+        paymentMethod: PaymentMethod
+        type: string
+        loan: string
+        leadPaymentReceived: string
+      }[] = []
+
+      // Track payment amounts per loan for metrics calculation
+      const loanPaymentTotals = new Map<string, { totalPaid: Decimal; totalComission: Decimal }>()
+
+      // Track direct bank payments
       let directBankPayments = new Decimal(0)
 
-      // 3. Crear los pagos individuales y sus entries en el ledger
+      // Process each payment input
       for (const paymentInput of input.payments) {
-        const loan = await this.loanRepository.findById(paymentInput.loanId)
+        const loan = loanMap.get(paymentInput.loanId)
         if (!loan) continue
 
         const paymentAmount = new Decimal(paymentInput.amount)
-        // Use commission from input, otherwise default to loantype's loanPaymentComission
         const comissionAmount = paymentInput.comission !== undefined
           ? new Decimal(paymentInput.comission)
           : loan.loantypeRelation?.loanPaymentComission
             ? new Decimal(loan.loantypeRelation.loanPaymentComission.toString())
             : new Decimal(0)
 
-        // Calcular profit y return to capital
+        paymentDataList.push({
+          amount: paymentAmount,
+          comission: comissionAmount,
+          receivedAt: paymentDate,
+          paymentMethod: paymentInput.paymentMethod,
+          type: 'PAYMENT',
+          loan: paymentInput.loanId,
+          leadPaymentReceived: leadPaymentReceived.id,
+        })
+
+        // Accumulate totals per loan
+        const existing = loanPaymentTotals.get(paymentInput.loanId) || {
+          totalPaid: new Decimal(0),
+          totalComission: new Decimal(0)
+        }
+        existing.totalPaid = existing.totalPaid.plus(paymentAmount)
+        existing.totalComission = existing.totalComission.plus(comissionAmount)
+        loanPaymentTotals.set(paymentInput.loanId, existing)
+
+        if (paymentInput.paymentMethod === 'MONEY_TRANSFER') {
+          directBankPayments = directBankPayments.plus(paymentAmount)
+        }
+      }
+
+      // 4. Batch insert all payments using createMany
+      if (paymentDataList.length > 0) {
+        await tx.loanPayment.createMany({
+          data: paymentDataList.map(p => ({
+            amount: p.amount,
+            comission: p.comission,
+            receivedAt: p.receivedAt,
+            paymentMethod: p.paymentMethod,
+            type: p.type,
+            loan: p.loan,
+            leadPaymentReceived: p.leadPaymentReceived,
+          }))
+        })
+      }
+
+      // 5. Fetch created payments to get their IDs for AccountEntry linking
+      const createdPayments = await tx.loanPayment.findMany({
+        where: { leadPaymentReceived: leadPaymentReceived.id },
+        select: { id: true, loan: true, amount: true, comission: true, paymentMethod: true }
+      })
+
+      // 6. Prepare all AccountEntry records
+      const accountEntries: {
+        accountId: string
+        amount: Decimal
+        entryType: AccountEntryType
+        sourceType: SourceType
+        entryDate: Date
+        description: string
+        loanId: string | null
+        loanPaymentId: string | null
+        leadPaymentReceivedId: string | null
+        profitAmount: Decimal | null
+        returnToCapital: Decimal | null
+        snapshotLeadId: string
+        destinationAccountId: string | null
+      }[] = []
+
+      // Track balance changes per account
+      const balanceChanges = new Map<string, Decimal>()
+
+      for (const payment of createdPayments) {
+        const loan = loanMap.get(payment.loan)
+        if (!loan) continue
+
+        const paymentAmount = new Decimal(payment.amount.toString())
+        const comissionAmount = new Decimal(payment.comission.toString())
         const totalProfit = new Decimal(loan.profitAmount.toString())
         const totalDebt = new Decimal(loan.totalDebtAcquired.toString())
         const isBadDebt = !!loan.badDebtDate
@@ -231,98 +352,198 @@ export class PaymentService {
           isBadDebt
         )
 
-        // Crear el pago
-        const payment = await this.paymentRepository.create(
-          {
-            amount: paymentAmount,
-            comission: comissionAmount.greaterThan(0) ? comissionAmount : undefined,
-            receivedAt: paymentDate,
-            paymentMethod: paymentInput.paymentMethod,
-            type: 'PAYMENT',
-            loan: paymentInput.loanId,
-            leadPaymentReceived: leadPaymentReceived.id,
-          },
-          tx
-        )
-
-        // Determinar cuenta destino según método de pago
-        const isTransfer = paymentInput.paymentMethod === 'MONEY_TRANSFER'
+        const isTransfer = payment.paymentMethod === 'MONEY_TRANSFER'
         const destinationAccountId = isTransfer ? bankAccount?.id : cashAccount?.id
 
-        // CREDIT: Pago recibido (suma a la cuenta)
+        // CREDIT: Payment received
         if (destinationAccountId) {
-          await balanceService.createEntry({
+          accountEntries.push({
             accountId: destinationAccountId,
-            entryType: 'CREDIT',
             amount: paymentAmount,
+            entryType: 'CREDIT',
             sourceType: isTransfer ? 'LOAN_PAYMENT_BANK' : 'LOAN_PAYMENT_CASH',
             entryDate: paymentDate,
+            description: '',
             loanId: loan.id,
             loanPaymentId: payment.id,
             leadPaymentReceivedId: leadPaymentReceived.id,
             profitAmount,
             returnToCapital,
             snapshotLeadId: input.leadId,
-          }, tx)
+            destinationAccountId: null,
+          })
+          // Accumulate balance change (CREDIT = add)
+          const current = balanceChanges.get(destinationAccountId) || new Decimal(0)
+          balanceChanges.set(destinationAccountId, current.plus(paymentAmount))
         }
 
-        // Track direct bank payments for cashToBank calculation
-        if (isTransfer) {
-          directBankPayments = directBankPayments.plus(paymentAmount)
-        }
-
-        // DEBIT: Comisión (resta de efectivo)
+        // DEBIT: Commission
         if (comissionAmount.greaterThan(0) && cashAccount) {
-          await balanceService.createEntry({
+          accountEntries.push({
             accountId: cashAccount.id,
-            entryType: 'DEBIT',
             amount: comissionAmount,
+            entryType: 'DEBIT',
             sourceType: 'PAYMENT_COMMISSION',
             entryDate: paymentDate,
+            description: '',
+            loanId: null,
             loanPaymentId: payment.id,
             leadPaymentReceivedId: leadPaymentReceived.id,
+            profitAmount: null,
+            returnToCapital: null,
             snapshotLeadId: input.leadId,
-          }, tx)
+            destinationAccountId: null,
+          })
+          // Accumulate balance change (DEBIT = subtract)
+          const current = balanceChanges.get(cashAccount.id) || new Decimal(0)
+          balanceChanges.set(cashAccount.id, current.minus(comissionAmount))
         }
-
-        // Recalcular métricas del préstamo desde la fuente de verdad (pagos)
-        await this.updateLoanMetricsFromPayments(loan.id, tx, paymentDate)
       }
 
-      // 4. Calcular si el líder depositó efectivo al banco
-      // bankPaidAmount = total que terminó en banco
-      // directBankPayments = pagos que fueron directo por MONEY_TRANSFER
-      // La diferencia = efectivo que el líder depositó al banco
+      // 7. Handle cash-to-bank transfer entries
       const cashToBank = bankPaidAmount.minus(directBankPayments)
-
       if (cashToBank.greaterThan(0) && cashAccount && bankAccount) {
-        // TRANSFER: Efectivo depositado al banco
-        await balanceService.createTransfer({
-          sourceAccountId: cashAccount.id,
-          destinationAccountId: bankAccount.id,
+        // DEBIT from cash (TRANSFER_OUT)
+        accountEntries.push({
+          accountId: cashAccount.id,
           amount: cashToBank,
+          entryType: 'DEBIT',
+          sourceType: 'TRANSFER_OUT',
           entryDate: paymentDate,
           description: `Depósito efectivo a banco - LPR ${leadPaymentReceived.id}`,
-          snapshotLeadId: input.leadId,
+          loanId: null,
+          loanPaymentId: null,
           leadPaymentReceivedId: leadPaymentReceived.id,
-        }, tx)
+          profitAmount: null,
+          returnToCapital: null,
+          snapshotLeadId: input.leadId,
+          destinationAccountId: bankAccount.id,
+        })
+        const cashCurrent = balanceChanges.get(cashAccount.id) || new Decimal(0)
+        balanceChanges.set(cashAccount.id, cashCurrent.minus(cashToBank))
+
+        // CREDIT to bank (TRANSFER_IN)
+        accountEntries.push({
+          accountId: bankAccount.id,
+          amount: cashToBank,
+          entryType: 'CREDIT',
+          sourceType: 'TRANSFER_IN',
+          entryDate: paymentDate,
+          description: `Depósito efectivo a banco - LPR ${leadPaymentReceived.id}`,
+          loanId: null,
+          loanPaymentId: null,
+          leadPaymentReceivedId: leadPaymentReceived.id,
+          profitAmount: null,
+          returnToCapital: null,
+          snapshotLeadId: input.leadId,
+          destinationAccountId: cashAccount.id,
+        })
+        const bankCurrent = balanceChanges.get(bankAccount.id) || new Decimal(0)
+        balanceChanges.set(bankAccount.id, bankCurrent.plus(cashToBank))
       }
 
-      // 5. Si hay falco, crear DEBIT por pérdida
+      // 8. Handle falco entry
       if (falcoAmount.greaterThan(0) && cashAccount) {
-        await balanceService.createEntry({
+        accountEntries.push({
           accountId: cashAccount.id,
-          entryType: 'DEBIT',
           amount: falcoAmount,
+          entryType: 'DEBIT',
           sourceType: 'FALCO_LOSS',
           entryDate: paymentDate,
           description: `Pérdida por falco - LPR ${leadPaymentReceived.id}`,
+          loanId: null,
+          loanPaymentId: null,
           leadPaymentReceivedId: leadPaymentReceived.id,
+          profitAmount: null,
+          returnToCapital: null,
           snapshotLeadId: input.leadId,
-        }, tx)
+          destinationAccountId: null,
+        })
+        const current = balanceChanges.get(cashAccount.id) || new Decimal(0)
+        balanceChanges.set(cashAccount.id, current.minus(falcoAmount))
       }
 
-      return leadPaymentReceived
+      // 9. Batch insert all AccountEntry records
+      if (accountEntries.length > 0) {
+        await tx.accountEntry.createMany({
+          data: accountEntries.map(e => ({
+            accountId: e.accountId,
+            amount: e.amount,
+            entryType: e.entryType,
+            sourceType: e.sourceType,
+            entryDate: e.entryDate,
+            description: e.description,
+            loanId: e.loanId,
+            loanPaymentId: e.loanPaymentId,
+            leadPaymentReceivedId: e.leadPaymentReceivedId,
+            profitAmount: e.profitAmount,
+            returnToCapital: e.returnToCapital,
+            snapshotLeadId: e.snapshotLeadId,
+            destinationAccountId: e.destinationAccountId,
+          }))
+        })
+      }
+
+      // 10. Batch update account balances (one update per account)
+      const accountUpdatePromises = Array.from(balanceChanges.entries()).map(
+        ([accountId, change]) =>
+          tx.account.update({
+            where: { id: accountId },
+            data: { amount: { increment: change } }
+          })
+      )
+      if (accountUpdatePromises.length > 0) {
+        await Promise.all(accountUpdatePromises)
+      }
+
+      // 11. Batch update loan metrics (one update per loan)
+      // First, get current totals for all affected loans
+      const loanMetricsPromises = Array.from(loanPaymentTotals.keys()).map(async (loanId) => {
+        const loan = loanMap.get(loanId)
+        if (!loan) return
+
+        // Get total paid from all payments for this loan
+        const paymentsAggregate = await tx.loanPayment.aggregate({
+          where: { loan: loanId },
+          _sum: { amount: true, comission: true }
+        })
+
+        const totalPaid = new Decimal(paymentsAggregate._sum.amount?.toString() || '0')
+        const totalDebt = new Decimal(loan.totalDebtAcquired.toString())
+        const pendingAmountStored = Decimal.max(totalDebt.minus(totalPaid), new Decimal(0))
+        const isFinished = pendingAmountStored.lessThanOrEqualTo(0)
+
+        return tx.loan.update({
+          where: { id: loanId },
+          data: {
+            totalPaid,
+            pendingAmountStored,
+            ...(isFinished && {
+              status: 'FINISHED',
+              finishedDate: paymentDate,
+            }),
+            ...(!isFinished && {
+              status: 'ACTIVE',
+              finishedDate: null,
+            }),
+          }
+        })
+      })
+      await Promise.all(loanMetricsPromises)
+
+      // 12. Fetch and return the complete LeadPaymentReceived with payments
+      return tx.leadPaymentReceived.findUniqueOrThrow({
+        where: { id: leadPaymentReceived.id },
+        include: {
+          leadRelation: {
+            include: { personalDataRelation: true }
+          },
+          agentRelation: {
+            include: { personalDataRelation: true }
+          },
+          payments: true,
+        }
+      })
     })
   }
 
