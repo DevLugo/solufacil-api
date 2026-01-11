@@ -828,11 +828,14 @@ export class PaymentService {
       })
 
       if (remainingPayments.length === 0) {
-        // Delete the LeadPaymentReceived
-        await tx.leadPaymentReceived.delete({
-          where: { id },
-        })
-        return null
+        // Only delete the LeadPaymentReceived if it has no active Falco
+        // If there's a Falco, keep the LPR so compensations can still be recorded
+        if (falcoAmount.lessThanOrEqualTo(0)) {
+          await tx.leadPaymentReceived.delete({
+            where: { id },
+          })
+          return null
+        }
       }
 
       // 6. Recreate AccountEntry for all remaining payments

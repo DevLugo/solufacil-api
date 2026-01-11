@@ -1159,11 +1159,16 @@ export class LoanService {
             })
 
             if (remainingPaymentsCount === 0) {
-              // Delete entries associated with this LPR (transfers, falco, etc)
-              await balanceService.deleteEntriesByLeadPaymentReceived(lpr.id, tx)
-              await tx.leadPaymentReceived.delete({
-                where: { id: lpr.id },
-              })
+              // Only delete the LPR if it has no active Falco
+              // If there's a Falco, keep the LPR so compensations can still be recorded
+              const lprFalcoAmount = new Decimal(lpr.falcoAmount?.toString() || '0')
+              if (lprFalcoAmount.lessThanOrEqualTo(0)) {
+                // Delete entries associated with this LPR (transfers, falco, etc)
+                await balanceService.deleteEntriesByLeadPaymentReceived(lpr.id, tx)
+                await tx.leadPaymentReceived.delete({
+                  where: { id: lpr.id },
+                })
+              }
             }
           }
         }
