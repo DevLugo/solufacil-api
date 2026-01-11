@@ -1006,11 +1006,20 @@ export class PaymentService {
     return this.prisma.$transaction(async (tx) => {
       const balanceService = new BalanceService(tx as any)
 
-      // 1. Create the FalcoCompensatoryPayment record
+      // 1. Create the FalcoCompensatoryPayment record with the relation included
       const falcoCompensatoryPayment = await tx.falcoCompensatoryPayment.create({
         data: {
           amount: compensationAmount,
-          leadPaymentReceived: input.leadPaymentReceivedId,
+          leadPaymentReceivedRelation: {
+            connect: { id: input.leadPaymentReceivedId },
+          },
+        },
+        include: {
+          leadPaymentReceivedRelation: {
+            include: {
+              falcoCompensatoryPayments: true,
+            },
+          },
         },
       })
 
@@ -1033,7 +1042,12 @@ export class PaymentService {
         }, tx)
       }
 
-      return falcoCompensatoryPayment
+      // Transform the response to match GraphQL schema field names
+      // Prisma uses leadPaymentReceivedRelation, but GraphQL expects leadPaymentReceived
+      return {
+        ...falcoCompensatoryPayment,
+        leadPaymentReceived: falcoCompensatoryPayment.leadPaymentReceivedRelation,
+      }
     })
   }
 }
