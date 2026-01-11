@@ -157,6 +157,7 @@ export class LoanService {
     borrowerId?: string
     fromDate?: Date
     toDate?: Date
+    excludePortfolioCleanup?: boolean
     limit?: number
     offset?: number
   }) {

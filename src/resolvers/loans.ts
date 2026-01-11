@@ -29,6 +29,7 @@ export const loanResolvers = {
         borrowerId?: string
         fromDate?: Date
         toDate?: Date
+        excludePortfolioCleanup?: boolean
         limit?: number
         offset?: number
       },
@@ -46,6 +47,7 @@ export const loanResolvers = {
         borrowerId: args.borrowerId ?? undefined,
         fromDate: args.fromDate ?? undefined,
         toDate: args.toDate ?? undefined,
+        excludePortfolioCleanup: args.excludePortfolioCleanup ?? undefined,
         limit: args.limit ?? undefined,
         offset: args.offset ?? undefined,
       })

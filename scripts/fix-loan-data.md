@@ -152,6 +152,145 @@ WHERE l.status != 'CANCELLED'
 
 ---
 
+## 7. Corregir préstamos renovados sin relación previousLoan
+
+Detecta y corrige casos donde un cliente sacó un nuevo préstamo el mismo día que hizo el último pago de otro préstamo, pero:
+- El préstamo viejo quedó como ACTIVE en lugar de FINISHED
+- El préstamo nuevo no tiene `previousLoan` establecido
+
+### Diagnóstico - Ver casos afectados:
+
+```sql
+SELECT DISTINCT ON (l.id)
+  l.id as loan_viejo_id,
+  l.borrower,
+  l.status,
+  l."pendingAmountStored"::numeric,
+  l."signDate" as viejo_sign_date,
+  (SELECT MAX(p."receivedAt") FROM "LoanPayment" p WHERE p.loan = l.id) as ultimo_pago,
+  next_loan.id as loan_nuevo_id,
+  next_loan."signDate" as nuevo_sign_date
+FROM "Loan" l
+INNER JOIN "Loan" next_loan ON
+  next_loan.borrower = l.borrower
+  AND next_loan.id != l.id
+  AND next_loan."signDate" > l."signDate"
+  AND DATE(next_loan."signDate") = DATE((SELECT MAX(p."receivedAt") FROM "LoanPayment" p WHERE p.loan = l.id))
+WHERE l.status = 'ACTIVE'
+  AND next_loan."previousLoan" IS NULL
+ORDER BY l.id, next_loan."signDate" ASC;
+```
+
+### Contar casos afectados:
+
+```sql
+SELECT COUNT(*) FROM (
+  SELECT DISTINCT ON (l.id) l.id
+  FROM "Loan" l
+  INNER JOIN "Loan" next_loan ON
+    next_loan.borrower = l.borrower
+    AND next_loan.id != l.id
+    AND next_loan."signDate" > l."signDate"
+    AND DATE(next_loan."signDate") = DATE((SELECT MAX(p."receivedAt") FROM "LoanPayment" p WHERE p.loan = l.id))
+  WHERE l.status = 'ACTIVE'
+    AND next_loan."previousLoan" IS NULL
+  ORDER BY l.id, next_loan."signDate" ASC
+) casos;
+```
+
+### Fix - Corregir todos los casos:
+
+```sql
+BEGIN;
+
+WITH casos AS (
+  SELECT DISTINCT ON (l.id)
+    l.id as loan_viejo_id,
+    next_loan.id as loan_nuevo_id,
+    (SELECT MAX(p."receivedAt") FROM "LoanPayment" p WHERE p.loan = l.id) as ultimo_pago
+  FROM "Loan" l
+  INNER JOIN "Loan" next_loan ON
+    next_loan.borrower = l.borrower
+    AND next_loan.id != l.id
+    AND next_loan."signDate" > l."signDate"
+    AND DATE(next_loan."signDate") = DATE((SELECT MAX(p."receivedAt") FROM "LoanPayment" p WHERE p.loan = l.id))
+  WHERE l.status = 'ACTIVE'
+    AND next_loan."previousLoan" IS NULL
+  ORDER BY l.id, next_loan."signDate" ASC
+),
+update_nuevos AS (
+  UPDATE "Loan" nuevo
+  SET "previousLoan" = casos.loan_viejo_id
+  FROM casos
+  WHERE nuevo.id = casos.loan_nuevo_id
+  RETURNING casos.loan_viejo_id, casos.ultimo_pago
+)
+UPDATE "Loan" viejo
+SET
+  status = 'FINISHED',
+  "renewedDate" = update_nuevos.ultimo_pago
+FROM update_nuevos
+WHERE viejo.id = update_nuevos.loan_viejo_id;
+
+COMMIT;
+```
+
+---
+
+## 8. Corregir préstamos ACTIVE que ya fueron renovados (tienen previousLoan)
+
+Detecta y corrige préstamos que están como ACTIVE pero ya tienen otro préstamo que los referencia como `previousLoan`. Esto significa que ya fueron renovados y deberían ser FINISHED.
+
+### Preview - Ver exactamente qué se va a cambiar:
+
+```sql
+SELECT
+  viejo.id as loan_a_cambiar,
+  pd."fullName" as cliente,
+  viejo.status as status_actual,
+  'FINISHED' as status_nuevo,
+  viejo."finishedDate" as finished_date_actual,
+  COALESCE(viejo."finishedDate", (SELECT MAX("receivedAt") FROM "LoanPayment" WHERE loan = viejo.id)) as finished_date_nuevo,
+  viejo."renewedDate" as renewed_date_actual,
+  COALESCE(viejo."renewedDate", nuevo."signDate") as renewed_date_nuevo,
+  nuevo.id as renovado_por,
+  nuevo."signDate" as fecha_renovacion
+FROM "Loan" viejo
+JOIN "Loan" nuevo ON nuevo."previousLoan" = viejo.id
+JOIN "Borrower" b ON viejo.borrower = b.id
+JOIN "PersonalData" pd ON b."personalData" = pd.id
+WHERE viejo.status = 'ACTIVE'
+ORDER BY pd."fullName";
+```
+
+### Contar casos afectados:
+
+```sql
+SELECT COUNT(*) as total_a_corregir
+FROM "Loan" viejo
+JOIN "Loan" nuevo ON nuevo."previousLoan" = viejo.id
+WHERE viejo.status = 'ACTIVE';
+```
+
+### Fix - Corregir todos los casos:
+
+```sql
+BEGIN;
+
+UPDATE "Loan" viejo
+SET
+  status = 'FINISHED',
+  "finishedDate" = COALESCE(viejo."finishedDate", (SELECT MAX("receivedAt") FROM "LoanPayment" WHERE loan = viejo.id)),
+  "renewedDate" = COALESCE(viejo."renewedDate", nuevo."signDate")
+FROM "Loan" nuevo
+WHERE nuevo."previousLoan" = viejo.id
+  AND viejo.status = 'ACTIVE';
+
+COMMIT;
+```
+
+---
+
 ## Orden de Ejecución Recomendado
 
 1. Query 1 - Convertir RENOVATED a FINISHED
@@ -160,7 +299,9 @@ WHERE l.status != 'CANCELLED'
 4. Query 4 - Corregir status
 5. Query 5 - Corregir finishedDate con último pago
 6. Query 6 - Validar pendingAmountStored
-7. Ejecutar queries de verificación para confirmar
+7. Query 7 - Corregir préstamos renovados sin relación previousLoan (mismo día)
+8. Query 8 - Corregir préstamos ACTIVE que ya fueron renovados
+9. Ejecutar queries de verificación para confirmar
 
 ---
 

@@ -54,10 +54,16 @@ export class LoanRepository {
     borrowerId?: string
     fromDate?: Date
     toDate?: Date
+    excludePortfolioCleanup?: boolean
     limit?: number
     offset?: number
   }) {
     const where: Prisma.LoanWhereInput = {}
+
+    // Exclude loans that are part of a portfolio cleanup
+    if (options?.excludePortfolioCleanup) {
+      where.excludedByCleanup = null
+    }
 
     // Filter by status - now using the normalized status field directly
     if (options?.statuses && options.statuses.length > 0) {
@@ -119,6 +125,7 @@ export class LoanRepository {
     }
 
     // DEBUG: Log query parameters
+    console.log('[LoanRepository.findMany] options:', JSON.stringify(options, null, 2))
     console.log('[LoanRepository.findMany] where:', JSON.stringify(where, null, 2), 'limit:', options?.limit ?? 50)
 
     const [loans, totalCount] = await Promise.all([
