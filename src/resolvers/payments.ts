@@ -377,10 +377,16 @@ export const paymentResolvers = {
 
   FalcoCompensatoryPayment: {
     leadPaymentReceived: async (
-      parent: { leadPaymentReceived: string },
+      parent: { leadPaymentReceived: string | { id: string } },
       _args: unknown,
       context: GraphQLContext
     ) => {
+      // If leadPaymentReceived is already an object (from mutation with include), return it
+      if (typeof parent.leadPaymentReceived === 'object' && parent.leadPaymentReceived !== null) {
+        return parent.leadPaymentReceived
+      }
+
+      // Otherwise, it's a string ID - fetch the relation
       return context.prisma.leadPaymentReceived.findUnique({
         where: { id: parent.leadPaymentReceived },
       })
