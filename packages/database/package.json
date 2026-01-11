@@ -20,6 +20,8 @@
     "db:sync-local-only": "TARGET_DATABASE_URL=\"postgresql://postgres:test1234@localhost:5432/solufacil-api\" tsx scripts/migrate-data.ts --export",
     "db:export-only": "TARGET_DATABASE_URL=\"postgresql://postgres:test1234@localhost:5432/solufacil-api\" tsx scripts/migrate-data.ts --export-only",
     "db:dump-to-remote": "tsx scripts/dump-to-remote.ts",
+    "db:sync-entries": "tsx scripts/sync-account-entries.ts",
+    "db:fix-lead-ids": "tsx scripts/fix-snapshot-lead-id.ts",
     "clean": "rm -rf dist .turbo node_modules"
   },
   "dependencies": {
@@ -27,10 +29,12 @@
     "@prisma/client": "^7.0.0",
     "decimal.js": "^10.4.3",
     "dotenv": "^16.4.1",
-    "pg": "^8.13.0"
+    "pg": "^8.13.0",
+    "pg-copy-streams": "^7.0.0"
   },
   "devDependencies": {
     "@types/pg": "^8.11.0",
+    "@types/pg-copy-streams": "^1.2.5",
     "prisma": "^7.0.0",
     "tsx": "^4.7.1",
     "typescript": "^5.3.3"

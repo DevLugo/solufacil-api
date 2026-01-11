@@ -1137,6 +1137,8 @@ type Query {
     borrowerId: ID
     fromDate: DateTime
     toDate: DateTime
+    """Exclude loans that are part of a portfolio cleanup (excludedByCleanup is not null)"""
+    excludePortfolioCleanup: Boolean
     limit: Int
     offset: Int
   ): LoanConnection! @auth

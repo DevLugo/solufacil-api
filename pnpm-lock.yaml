@@ -124,10 +124,16 @@ importers:
       pg:
         specifier: ^8.13.0
         version: 8.16.3
+      pg-copy-streams:
+        specifier: ^7.0.0
+        version: 7.0.0
     devDependencies:
       '@types/pg':
         specifier: ^8.11.0
         version: 8.16.0
+      '@types/pg-copy-streams':
+        specifier: ^1.2.5
+        version: 1.2.5
       prisma:
         specifier: ^7.0.0
         version: 7.2.0(@types/react@19.2.7)(magicast@0.3.5)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)(typescript@5.9.3)
@@ -1292,6 +1298,9 @@ packages:
 
   '@types/pdfkit@0.17.4':
     resolution: {integrity: sha512-odAmVuuguRxKh1X4pbMrJMp8ecwNqHRw6lweupvzK+wuyNmi6wzlUlGVZ9EqMvp3Bs2+L9Ty0sRlrvKL+gsQZg==}
+
+  '@types/pg-copy-streams@1.2.5':
+    resolution: {integrity: sha512-7D6/GYW2uHIaVU6S/5omI+6RZnwlZBpLQDZAH83xX1rjxAOK0f6/deKyyUTewxqts145VIGn6XWYz1YGf50G5g==}
 
   '@types/pg@8.16.0':
     resolution: {integrity: sha512-RmhMd/wD+CF8Dfo+cVIy3RR5cl8CyfXQ0tGgW6XBL8L4LM/UTEbNXYRbLwU6w+CgrKBNbrQWt4FUtTfaU5jSYQ==}
@@ -3007,6 +3016,9 @@ packages:
 
   pg-connection-string@2.9.1:
     resolution: {integrity: sha512-nkc6NpDcvPVpZXxrreI/FOtX3XemeLl8E0qFr6F2Lrm/I8WOnaWNhIPK2Z7OHpw7gh5XJThi6j6ppgNoaT1w4w==}
+
+  pg-copy-streams@7.0.0:
+    resolution: {integrity: sha512-zBvnY6wtaBRE2ae2xXWOOGMaNVPkXh1vhypAkNSKgMdciJeTyIQAHZaEeRAxUjs/p1El5jgzYmwG5u871Zj3dQ==}
 
   pg-int8@1.0.1:
     resolution: {integrity: sha512-WCtabS6t3c8SkpDBUlb1kjOs7l66xsGdKpIPZsg4wR+B3+u9UAum2odSsF9tnvxg80h4ZxLWMy4pRjOsFIqQpw==}
@@ -5177,6 +5189,11 @@ snapshots:
     dependencies:
       '@types/node': 20.19.27
 
+  '@types/pg-copy-streams@1.2.5':
+    dependencies:
+      '@types/node': 20.19.27
+      '@types/pg': 8.16.0
+
   '@types/pg@8.16.0':
     dependencies:
       '@types/node': 20.19.27
@@ -7153,6 +7170,8 @@ snapshots:
     optional: true
 
   pg-connection-string@2.9.1: {}
+
+  pg-copy-streams@7.0.0: {}
 
   pg-int8@1.0.1: {}
 

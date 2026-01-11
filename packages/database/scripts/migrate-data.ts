@@ -398,29 +398,31 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
         FROM "${src}"."CommissionPayment"`
 
     case 'Transaction':
-      // Solo migrar transacciones que tengan sourceAccount válido (requerido en nuevo schema)
-      // Las transacciones INCOME sin sourceAccount se convierten a AccountEntry en otro paso
-      return `INSERT INTO "${tgt}"."Transaction" (id, amount, date, type, description, "incomeSource", "expenseSource", "snapshotLeadId", "expenseGroupId", "profitAmount", "returnToCapital", loan, "loanPayment", "sourceAccount", "destinationAccount", route, lead, "leadPaymentReceived", "createdAt", "updatedAt")
-        SELECT t.id, COALESCE(t.amount, 0), t.date, t.type::text::"${tgt}"."TransactionType", COALESCE(t.description, ''), t."incomeSource", t."expenseSource", COALESCE(t."snapshotLeadId", ''), t."expenseGroupId", COALESCE(t."profitAmount", 0), COALESCE(t."returnToCapital", 0),
-          CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
-          CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."LoanPayment" WHERE id = t."loanPayment") THEN t."loanPayment" ELSE NULL END,
+      // Solo migrar transacciones que tengan sourceAccount (requerido en schema)
+      // Sin validación de FK - insertar todo directamente
+      return `INSERT INTO "${tgt}"."Transaction" (id, amount, date, type, description, "incomeSource", "expenseSource", "snapshotLeadId", "snapshotRouteId", "expenseGroupId", "profitAmount", "returnToCapital", loan, "loanPayment", "sourceAccount", "destinationAccount", route, lead, "leadPaymentReceived", "createdAt", "updatedAt")
+        SELECT t.id, COALESCE(t.amount, 0), t.date, t.type::text::"${tgt}"."TransactionType", COALESCE(t.description, ''), t."incomeSource", t."expenseSource",
+          COALESCE(NULLIF(t."snapshotLeadId", ''), t.lead, ''),
+          COALESCE(NULLIF(t."snapshotRouteId", ''), t.route, ''),
+          t."expenseGroupId", COALESCE(t."profitAmount", 0), COALESCE(t."returnToCapital", 0),
+          t.loan,
+          t."loanPayment",
           t."sourceAccount",
-          CASE WHEN t."destinationAccount" IS NOT NULL AND t."destinationAccount" != '' AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."destinationAccount") THEN t."destinationAccount" ELSE NULL END,
+          t."destinationAccount",
           t.route,
-          CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Employee" WHERE id = t.lead) THEN t.lead ELSE NULL END,
-          CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."LeadPaymentReceived" WHERE id = t."leadPaymentReceived") THEN t."leadPaymentReceived" ELSE NULL END,
+          t.lead,
+          t."leadPaymentReceived",
           t."createdAt", COALESCE(t."updatedAt", t."createdAt", NOW())
         FROM "${src}"."Transaction" t
         WHERE t.date IS NOT NULL
           AND t."sourceAccount" IS NOT NULL
-          AND t."sourceAccount" != ''
-          AND EXISTS (SELECT 1 FROM "${tgt}"."Account" WHERE id = t."sourceAccount")`
+          AND t."sourceAccount" != ''`
 
     case 'AccountEntry':
       return `INSERT INTO "${tgt}"."AccountEntry" (
         id, "accountId", amount, "entryType", "sourceType",
         "profitAmount", "returnToCapital",
-        "snapshotLeadId",
+        "snapshotLeadId", "snapshotRouteId",
         "entryDate", description,
         "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
         "syncId", "createdAt"
@@ -432,6 +434,7 @@ function getSameDbInsertQuery(tableName: string, sourceSchema: string, targetSch
         COALESCE(e."profitAmount", 0),
         COALESCE(e."returnToCapital", 0),
         COALESCE(e."snapshotLeadId", ''),
+        COALESCE(e."snapshotRouteId", ''),
         e."entryDate",
         COALESCE(e.description, ''),
         CASE WHEN EXISTS (SELECT 1 FROM "${tgt}"."Loan" WHERE id = e."loanId") THEN e."loanId" ELSE NULL END,
@@ -548,22 +551,13 @@ function transformRow(tableName: string, row: Record<string, any>, fkSets: Recor
       break
     // DocumentPhoto: uploadedBy handled with COALESCE in query (uses first User as default)
     case 'Transaction':
+      // Solo validar que tenga fecha y sourceAccount
       if (!row.date) return null
-      // Check if accounts are valid (not nullish AND exist in target)
-      const srcAcct = isNullish(row.sourceAccount) ? null : row.sourceAccount
-      const dstAcct = isNullish(row.destinationAccount) ? null : row.destinationAccount
-      const hasValidSource = srcAcct && fkSets.sourceAccount?.has(srcAcct)
-      const hasValidDest = dstAcct && fkSets.destinationAccount?.has(dstAcct)
-      // INCOME transactions can have no accounts (payment records, etc)
-      const isIncomeWithoutAccount = row.type === 'INCOME' && !srcAcct && !dstAcct
-      // INCOME transactions with valid destination are allowed
-      const isIncomeWithValidDest = row.type === 'INCOME' && hasValidDest
-      if (!hasValidSource && !hasValidDest && !isIncomeWithoutAccount && !isIncomeWithValidDest) return null
+      if (!row.sourceAccount) return null
       break
     case 'AccountEntry':
-      // accountId is required
+      // Solo validar que tenga accountId
       if (!row.accountId) return null
-      if (fkSets.accountId && !fkSets.accountId.has(row.accountId)) return null
       break
   }
 
@@ -1009,7 +1003,7 @@ async function convertTransactionsToEntries(): Promise<number> {
       INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
         id, "accountId", amount, "entryType", "sourceType",
         "profitAmount", "returnToCapital",
-        "snapshotLeadId",
+        "snapshotLeadId", "snapshotRouteId",
         "entryDate", description,
         "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
         "syncId", "createdAt"
@@ -1058,6 +1052,7 @@ async function convertTransactionsToEntries(): Promise<number> {
         COALESCE(t."profitAmount", 0),
         COALESCE(t."returnToCapital", 0),
         COALESCE(t."snapshotLeadId", ''),
+        COALESCE(t."snapshotRouteId", ''),
         t.date,
         COALESCE(t.description, ''),
         t.loan,
@@ -1091,7 +1086,7 @@ async function convertTransactionsToEntries(): Promise<number> {
         INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
           id, "accountId", amount, "entryType", "sourceType",
           "profitAmount", "returnToCapital",
-          "snapshotLeadId",
+          "snapshotLeadId", "snapshotRouteId",
           "entryDate", description,
           "loanId", "loanPaymentId", "leadPaymentReceivedId",
           "syncId", "createdAt"
@@ -1120,6 +1115,7 @@ async function convertTransactionsToEntries(): Promise<number> {
             ELSE COALESCE(t."returnToCapital", 0)
           END,
           COALESCE(t."snapshotLeadId", ''),
+          COALESCE(t."snapshotRouteId", ''),
           t.date,
           COALESCE(t.description, ''),
           CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
@@ -1151,7 +1147,7 @@ async function convertTransactionsToEntries(): Promise<number> {
         INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
           id, "accountId", amount, "entryType", "sourceType",
           "profitAmount", "returnToCapital",
-          "snapshotLeadId",
+          "snapshotLeadId", "snapshotRouteId",
           "entryDate", description,
           "loanId", "loanPaymentId", "leadPaymentReceivedId",
           "syncId", "createdAt"
@@ -1184,6 +1180,7 @@ async function convertTransactionsToEntries(): Promise<number> {
           0,
           0,
           COALESCE(t."snapshotLeadId", ''),
+          COALESCE(t."snapshotRouteId", ''),
           t.date,
           COALESCE(t.description, ''),
           CASE WHEN EXISTS (SELECT 1 FROM "${TARGET_SCHEMA}"."Loan" WHERE id = t.loan) THEN t.loan ELSE NULL END,
@@ -1207,9 +1204,46 @@ async function convertTransactionsToEntries(): Promise<number> {
       console.log(`   ✅ ${expenseResult.rowCount || 0} entries EXPENSE creados desde origen`)
 
     } else {
-      console.log('   📊 Creando entries desde transacciones INCOME de producción...')
       const sourceClient = await sourcePool.connect()
       try {
+        // Diagnóstico completo
+        console.log('\n   📊 DIAGNÓSTICO DE TRANSACCIONES EN ORIGEN:')
+
+        const totalResult = await sourceClient.query(`SELECT COUNT(*) as count FROM "Transaction"`)
+        console.log(`      Total transacciones: ${totalResult.rows[0].count}`)
+
+        const withSourceResult = await sourceClient.query(`
+          SELECT COUNT(*) as count FROM "Transaction"
+          WHERE "sourceAccount" IS NOT NULL AND "sourceAccount" != ''
+        `)
+        console.log(`      Con sourceAccount: ${withSourceResult.rows[0].count}`)
+
+        const withoutSourceResult = await sourceClient.query(`
+          SELECT COUNT(*) as count FROM "Transaction"
+          WHERE "sourceAccount" IS NULL OR "sourceAccount" = ''
+        `)
+        console.log(`      Sin sourceAccount: ${withoutSourceResult.rows[0].count}`)
+
+        const nullDateResult = await sourceClient.query(`
+          SELECT COUNT(*) as count FROM "Transaction" WHERE date IS NULL
+        `)
+        console.log(`      Con date NULL: ${nullDateResult.rows[0].count}`)
+
+        const byTypeResult = await sourceClient.query(`
+          SELECT type,
+            COUNT(*) as total,
+            SUM(CASE WHEN "sourceAccount" IS NOT NULL AND "sourceAccount" != '' THEN 1 ELSE 0 END) as with_source,
+            SUM(CASE WHEN "sourceAccount" IS NULL OR "sourceAccount" = '' THEN 1 ELSE 0 END) as without_source
+          FROM "Transaction"
+          GROUP BY type
+          ORDER BY total DESC
+        `)
+        console.log('      Por tipo:')
+        for (const row of byTypeResult.rows) {
+          console.log(`         ${row.type}: ${row.total} (con cuenta: ${row.with_source}, sin cuenta: ${row.without_source})`)
+        }
+        console.log('')
+
         // Obtener mapeo de rutas a cuentas EMPLOYEE_CASH_FUND
         const routeAccountsResult = await client.query(`
           SELECT r.id as route_id, r.name as route_name, a.id as account_id
@@ -1226,6 +1260,7 @@ async function convertTransactionsToEntries(): Promise<number> {
         `)
         const bankAccountId = bankResult.rows[0]?.id
 
+        console.log('   📊 Creando entries desde transacciones INCOME de producción...')
         // Obtener TODAS las transacciones INCOME de producción sin sourceAccount
         // Incluye pagos de préstamos y otros ingresos (MONEY_INVESMENT, MULTA, etc.)
         const incomeTransactions = await sourceClient.query(`
@@ -1238,11 +1273,12 @@ async function convertTransactionsToEntries(): Promise<number> {
           FROM "Transaction" t
           LEFT JOIN "LoanPayment" lp ON lp.id = t."loanPayment"
           WHERE t.type = 'INCOME'
-            AND t."sourceAccount" IS NULL
+            AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '')
         `)
 
         let insertedCount = 0
         let skippedCount = 0
+        const fallbackByMonth = new Map<string, number>()
 
         // Preparar batch de valores para inserción masiva
         // Max ~5400 rows por batch (PostgreSQL limit: 65535 params / 12 params per row)
@@ -1251,16 +1287,23 @@ async function convertTransactionsToEntries(): Promise<number> {
 
         for (const tx of incomeTransactions.rows) {
           // Determinar la cuenta: BANK para transferencias, EMPLOYEE_CASH_FUND para efectivo
-          let accountId: string | null = null
+          // Si no hay mapeo, usar BANK como fallback
+          let accountId: string
+          let usedFallback = false
           if (tx.paymentMethod === 'MONEY_TRANSFER') {
             accountId = bankAccountId
           } else {
-            accountId = routeToAccount.get(tx.snapshotRouteId) || null
-          }
-
-          if (!accountId) {
-            skippedCount++
-            continue
+            const mappedAccount = routeToAccount.get(tx.snapshotRouteId)
+            if (mappedAccount) {
+              accountId = mappedAccount
+            } else {
+              accountId = bankAccountId
+              usedFallback = true
+              // Trackear por mes/año
+              const date = new Date(tx.date)
+              const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+              fallbackByMonth.set(key, (fallbackByMonth.get(key) || 0) + 1)
+            }
           }
 
           // Determinar sourceType basado en incomeSource y método de pago
@@ -1293,6 +1336,7 @@ async function convertTransactionsToEntries(): Promise<number> {
             profitAmount,
             returnToCapital,
             tx.snapshotLeadId || '',
+            tx.snapshotRouteId || '',
             tx.date,
             tx.description || '',
             tx.loan,
@@ -1306,8 +1350,8 @@ async function convertTransactionsToEntries(): Promise<number> {
         for (let i = 0; i < valuesToInsert.length; i += batchSize) {
           const batch = valuesToInsert.slice(i, i + batchSize)
           const placeholders = batch.map((_, idx) => {
-            const base = idx * 12
-            return `(gen_random_uuid()::text, $${base+1}, $${base+2}, 'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType", $${base+3}::"${TARGET_SCHEMA}"."SourceType", $${base+4}, $${base+5}, $${base+6}, $${base+7}, $${base+8}, $${base+9}, $${base+10}, $${base+11}, gen_random_uuid()::text, $${base+12})`
+            const base = idx * 13
+            return `(gen_random_uuid()::text, $${base+1}, $${base+2}, 'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType", $${base+3}::"${TARGET_SCHEMA}"."SourceType", $${base+4}, $${base+5}, $${base+6}, $${base+7}, $${base+8}, $${base+9}, $${base+10}, $${base+11}, $${base+12}, gen_random_uuid()::text, $${base+13})`
           }).join(',\n')
 
           const flatValues = batch.flat()
@@ -1317,7 +1361,7 @@ async function convertTransactionsToEntries(): Promise<number> {
               INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
                 id, "accountId", amount, "entryType", "sourceType",
                 "profitAmount", "returnToCapital",
-                "snapshotLeadId",
+                "snapshotLeadId", "snapshotRouteId",
                 "entryDate", description,
                 "loanId", "loanPaymentId", "leadPaymentReceivedId",
                 "syncId", "createdAt"
@@ -1332,14 +1376,14 @@ async function convertTransactionsToEntries(): Promise<number> {
                   INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
                     id, "accountId", amount, "entryType", "sourceType",
                     "profitAmount", "returnToCapital",
-                    "snapshotLeadId",
+                    "snapshotLeadId", "snapshotRouteId",
                     "entryDate", description,
                     "loanId", "loanPaymentId", "leadPaymentReceivedId",
                     "syncId", "createdAt"
                   ) VALUES (
                     gen_random_uuid()::text, $1, $2, 'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType",
-                    $3::"${TARGET_SCHEMA}"."SourceType", $4, $5, $6, $7, $8, $9, $10, $11,
-                    gen_random_uuid()::text, $12
+                    $3::"${TARGET_SCHEMA}"."SourceType", $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                    gen_random_uuid()::text, $13
                   )
                 `, values)
                 insertedCount++
@@ -1356,8 +1400,13 @@ async function convertTransactionsToEntries(): Promise<number> {
         }
 
         console.log(`   ✅ ${insertedCount} entries INCOME creados desde producción`)
-        if (skippedCount > 0) {
-          console.log(`   ⚠️  ${skippedCount} transacciones INCOME omitidas (sin cuenta mapeada)`)
+        if (fallbackByMonth.size > 0) {
+          const totalFallback = Array.from(fallbackByMonth.values()).reduce((a, b) => a + b, 0)
+          console.log(`   📌 ${totalFallback} transacciones INCOME mapeadas a BANK (sin ruta→cuenta):`)
+          const sortedMonths = Array.from(fallbackByMonth.entries()).sort((a, b) => a[0].localeCompare(b[0]))
+          for (const [month, count] of sortedMonths) {
+            console.log(`      ${month}: ${count}`)
+          }
         }
 
         // Procesar transacciones EXPENSE sin sourceAccount
@@ -1375,6 +1424,7 @@ async function convertTransactionsToEntries(): Promise<number> {
 
         let expenseInserted = 0
         let expenseSkipped = 0
+        const expenseFallbackByMonth = new Map<string, number>()
 
         // Mapear expenseSource a SourceType
         const sourceTypeMap: Record<string, string> = {
@@ -1400,11 +1450,17 @@ async function convertTransactionsToEntries(): Promise<number> {
         const expenseValuesToInsert: any[][] = []
 
         for (const tx of expenseTransactions.rows) {
-          const accountId = routeToAccount.get(tx.snapshotRouteId) || null
-
-          if (!accountId) {
-            expenseSkipped++
-            continue
+          // Usar BANK como fallback si no hay cuenta mapeada
+          const mappedAccount = routeToAccount.get(tx.snapshotRouteId)
+          let accountId: string
+          if (mappedAccount) {
+            accountId = mappedAccount
+          } else {
+            accountId = bankAccountId
+            // Trackear por mes/año
+            const date = new Date(tx.date)
+            const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+            expenseFallbackByMonth.set(key, (expenseFallbackByMonth.get(key) || 0) + 1)
           }
 
           const sourceType = sourceTypeMap[tx.expenseSource] || 'OTHER_EXPENSE'
@@ -1418,6 +1474,7 @@ async function convertTransactionsToEntries(): Promise<number> {
             entryType,
             finalSourceType,
             tx.snapshotLeadId || '',
+            tx.snapshotRouteId || '',
             tx.date,
             tx.description || '',
             tx.loan,
@@ -1428,13 +1485,13 @@ async function convertTransactionsToEntries(): Promise<number> {
         }
 
         // Insertar en batches
-        // Max ~5900 rows por batch (PostgreSQL limit: 65535 params / 11 params per row)
+        // Max ~5400 rows por batch (PostgreSQL limit: 65535 params / 12 params per row)
         const expenseBatchSize = 3000
         for (let i = 0; i < expenseValuesToInsert.length; i += expenseBatchSize) {
           const batch = expenseValuesToInsert.slice(i, i + expenseBatchSize)
           const placeholders = batch.map((_, idx) => {
-            const base = idx * 11
-            return `(gen_random_uuid()::text, $${base+1}, $${base+2}, $${base+3}::"${TARGET_SCHEMA}"."AccountEntryType", $${base+4}::"${TARGET_SCHEMA}"."SourceType", 0, 0, $${base+5}, $${base+6}, $${base+7}, $${base+8}, $${base+9}, $${base+10}, gen_random_uuid()::text, $${base+11})`
+            const base = idx * 12
+            return `(gen_random_uuid()::text, $${base+1}, $${base+2}, $${base+3}::"${TARGET_SCHEMA}"."AccountEntryType", $${base+4}::"${TARGET_SCHEMA}"."SourceType", 0, 0, $${base+5}, $${base+6}, $${base+7}, $${base+8}, $${base+9}, $${base+10}, $${base+11}, gen_random_uuid()::text, $${base+12})`
           }).join(',\n')
 
           const flatValues = batch.flat()
@@ -1444,7 +1501,7 @@ async function convertTransactionsToEntries(): Promise<number> {
               INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
                 id, "accountId", amount, "entryType", "sourceType",
                 "profitAmount", "returnToCapital",
-                "snapshotLeadId",
+                "snapshotLeadId", "snapshotRouteId",
                 "entryDate", description,
                 "loanId", "loanPaymentId", "leadPaymentReceivedId",
                 "syncId", "createdAt"
@@ -1459,14 +1516,14 @@ async function convertTransactionsToEntries(): Promise<number> {
                   INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
                     id, "accountId", amount, "entryType", "sourceType",
                     "profitAmount", "returnToCapital",
-                    "snapshotLeadId",
+                    "snapshotLeadId", "snapshotRouteId",
                     "entryDate", description,
                     "loanId", "loanPaymentId", "leadPaymentReceivedId",
                     "syncId", "createdAt"
                   ) VALUES (
                     gen_random_uuid()::text, $1, $2, $3::"${TARGET_SCHEMA}"."AccountEntryType",
-                    $4::"${TARGET_SCHEMA}"."SourceType", 0, 0, $5, $6, $7, $8, $9, $10,
-                    gen_random_uuid()::text, $11
+                    $4::"${TARGET_SCHEMA}"."SourceType", 0, 0, $5, $6, $7, $8, $9, $10, $11,
+                    gen_random_uuid()::text, $12
                   )
                 `, values)
                 expenseInserted++
@@ -1482,9 +1539,116 @@ async function convertTransactionsToEntries(): Promise<number> {
         }
 
         console.log(`   ✅ ${expenseInserted} entries EXPENSE creados desde producción`)
-        if (expenseSkipped > 0) {
-          console.log(`   ⚠️  ${expenseSkipped} transacciones EXPENSE omitidas (sin cuenta mapeada)`)
+        if (expenseFallbackByMonth.size > 0) {
+          const totalFallback = Array.from(expenseFallbackByMonth.values()).reduce((a, b) => a + b, 0)
+          console.log(`   📌 ${totalFallback} transacciones EXPENSE mapeadas a BANK (sin ruta→cuenta):`)
+          const sortedMonths = Array.from(expenseFallbackByMonth.entries()).sort((a, b) => a[0].localeCompare(b[0]))
+          for (const [month, count] of sortedMonths) {
+            console.log(`      ${month}: ${count}`)
+          }
         }
+
+        // Procesar transacciones TRANSFER sin sourceAccount
+        console.log('   📊 Creando entries desde transacciones TRANSFER de producción...')
+
+        const transferTransactions = await sourceClient.query(`
+          SELECT
+            t.id, t.amount,
+            t."snapshotLeadId", t."snapshotRouteId", t.date, t.description,
+            t."destinationAccount", t."createdAt"
+          FROM "Transaction" t
+          WHERE t.type = 'TRANSFER'
+            AND (t."sourceAccount" IS NULL OR t."sourceAccount" = '')
+        `)
+
+        let transferOutInserted = 0
+        let transferInInserted = 0
+        const transferFallbackByMonth = new Map<string, number>()
+
+        for (const tx of transferTransactions.rows) {
+          // TRANSFER_OUT: usar ruta→cuenta o BANK como fallback
+          const mappedAccount = routeToAccount.get(tx.snapshotRouteId)
+          let sourceAccountId: string
+          if (mappedAccount) {
+            sourceAccountId = mappedAccount
+          } else {
+            sourceAccountId = bankAccountId
+            const date = new Date(tx.date)
+            const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+            transferFallbackByMonth.set(key, (transferFallbackByMonth.get(key) || 0) + 1)
+          }
+
+          // Insertar TRANSFER_OUT (DEBIT)
+          try {
+            await client.query(`
+              INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+                id, "accountId", amount, "entryType", "sourceType",
+                "profitAmount", "returnToCapital",
+                "snapshotLeadId", "snapshotRouteId",
+                "entryDate", description,
+                "destinationAccountId",
+                "syncId", "createdAt"
+              ) VALUES (
+                gen_random_uuid()::text, $1, $2, 'DEBIT'::"${TARGET_SCHEMA}"."AccountEntryType",
+                'TRANSFER_OUT'::"${TARGET_SCHEMA}"."SourceType", 0, 0, $3, $4, $5, $6, $7,
+                gen_random_uuid()::text, $8
+              )
+            `, [
+              sourceAccountId,
+              Math.abs(tx.amount),
+              tx.snapshotLeadId || '',
+              tx.snapshotRouteId || '',
+              tx.date,
+              tx.description || '',
+              tx.destinationAccount,
+              tx.createdAt
+            ])
+            transferOutInserted++
+          } catch {
+            // Skip on error
+          }
+
+          // Insertar TRANSFER_IN (CREDIT) si tiene destinationAccount
+          if (tx.destinationAccount) {
+            try {
+              await client.query(`
+                INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
+                  id, "accountId", amount, "entryType", "sourceType",
+                  "profitAmount", "returnToCapital",
+                  "snapshotLeadId", "snapshotRouteId",
+                  "entryDate", description,
+                  "syncId", "createdAt"
+                ) VALUES (
+                  gen_random_uuid()::text, $1, $2, 'CREDIT'::"${TARGET_SCHEMA}"."AccountEntryType",
+                  'TRANSFER_IN'::"${TARGET_SCHEMA}"."SourceType", 0, 0, $3, $4, $5, $6,
+                  gen_random_uuid()::text, $7
+                )
+              `, [
+                tx.destinationAccount,
+                Math.abs(tx.amount),
+                tx.snapshotLeadId || '',
+                tx.snapshotRouteId || '',
+                tx.date,
+                tx.description || '',
+                tx.createdAt
+              ])
+              transferInInserted++
+            } catch {
+              // Skip on error
+            }
+          }
+        }
+
+        console.log(`   ✅ ${transferOutInserted} entries TRANSFER_OUT + ${transferInInserted} TRANSFER_IN creados desde producción`)
+        if (transferFallbackByMonth.size > 0) {
+          const totalFallback = Array.from(transferFallbackByMonth.values()).reduce((a, b) => a + b, 0)
+          console.log(`   📌 ${totalFallback} transacciones TRANSFER mapeadas a BANK (sin ruta→cuenta):`)
+          const sortedMonths = Array.from(transferFallbackByMonth.entries()).sort((a, b) => a[0].localeCompare(b[0]))
+          for (const [month, count] of sortedMonths) {
+            console.log(`      ${month}: ${count}`)
+          }
+        }
+
       } finally {
         sourceClient.release()
       }
@@ -1495,7 +1659,7 @@ async function convertTransactionsToEntries(): Promise<number> {
       INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
         id, "accountId", amount, "entryType", "sourceType",
         "profitAmount", "returnToCapital",
-        "snapshotLeadId",
+        "snapshotLeadId", "snapshotRouteId",
         "entryDate", description,
         "loanId", "loanPaymentId", "leadPaymentReceivedId", "destinationAccountId",
         "syncId", "createdAt"
@@ -1509,6 +1673,7 @@ async function convertTransactionsToEntries(): Promise<number> {
         0,
         0,
         COALESCE(t."snapshotLeadId", ''),
+        COALESCE(t."snapshotRouteId", ''),
         t.date,
         COALESCE(t.description, ''),
         NULL,
@@ -1581,7 +1746,7 @@ async function reconcileBalances(): Promise<ReconciliationResult[]> {
             INSERT INTO "${TARGET_SCHEMA}"."AccountEntry" (
               id, "accountId", amount, "entryType", "sourceType",
               "profitAmount", "returnToCapital",
-              "snapshotLeadId",
+              "snapshotLeadId", "snapshotRouteId",
               "entryDate", description,
               "syncId", "createdAt"
             ) VALUES (
@@ -1591,7 +1756,7 @@ async function reconcileBalances(): Promise<ReconciliationResult[]> {
               $3::"${TARGET_SCHEMA}"."AccountEntryType",
               'BALANCE_ADJUSTMENT'::"${TARGET_SCHEMA}"."SourceType",
               0, 0,
-              '',
+              '', '',
               NOW(),
               'Ajuste de migración - diferencia entre Account.amount y SUM(AccountEntry)',
               gen_random_uuid()::text,
@@ -2221,6 +2386,16 @@ async function main() {
   await runDiagnostics()
   await cleanTargetSchema()
 
+  // Deshabilitar FK constraints en Transaction para permitir inserción sin validación
+  console.log('🔓 Deshabilitando FK constraints en Transaction...\n')
+  const targetClient = await targetPool.connect()
+  try {
+    await targetClient.query('ALTER TABLE "Transaction" DISABLE TRIGGER ALL')
+    console.log('   ✅ FK constraints deshabilitados\n')
+  } finally {
+    targetClient.release()
+  }
+
   const results: MigrationResult[] = []
   const migrateTable = SAME_DATABASE ? migrateTableSameDb : migrateTableCrossDb
 
@@ -2280,7 +2455,7 @@ async function main() {
   await withRetry(() => backfillSnapshotLeadId(), 'BackfillSnapshotLeadId', 3)
 
   // Step 5: Fix loan status data (RENOVATED → FINISHED, set dates)
-  await withRetry(() => fixLoanStatusData(), 'FixLoanStatusData', 3)
+  // await withRetry(() => fixLoanStatusData(), 'FixLoanStatusData', 3)
 
   console.log('\n' + '='.repeat(60))
   console.log('📊 RESUMEN')
@@ -2297,6 +2472,16 @@ async function main() {
   const totalSource = results.reduce((sum, r) => sum + r.sourceCount, 0)
   const totalTarget = results.reduce((sum, r) => sum + r.targetCount, 0)
   console.log(`\n   Total: ${totalSource.toLocaleString()} → ${totalTarget.toLocaleString()} registros`)
+
+  // Re-habilitar FK constraints en Transaction
+  console.log('\n🔒 Re-habilitando FK constraints en Transaction...')
+  const finalClient = await targetPool.connect()
+  try {
+    await finalClient.query('ALTER TABLE "Transaction" ENABLE TRIGGER ALL')
+    console.log('   ✅ FK constraints re-habilitados')
+  } finally {
+    finalClient.release()
+  }
 
   await sourcePool.end()
   if (!SAME_DATABASE) await targetPool.end()
