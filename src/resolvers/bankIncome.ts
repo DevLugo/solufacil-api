@@ -29,38 +29,52 @@ export const bankIncomeResolvers = {
         const bankAccountIds = bankAccounts.map((a) => a.id)
 
         // Build where conditions for AccountEntry
-        // Filter by loan's lead current routes
         const whereConditions: any = {
           entryDate: {
             gte: new Date(startDate),
             lte: new Date(endDate),
           },
-          loan: {
+        }
+
+        // Filter by entry type
+        if (onlyAbonos) {
+          // Only client payments to bank - filtered by loan's lead routes
+          whereConditions.sourceType = 'LOAN_PAYMENT_BANK'
+          whereConditions.entryType = 'CREDIT'
+          whereConditions.loan = {
             leadRelation: {
               routes: {
                 some: { id: { in: routeIds } },
               },
             },
-          },
-        }
-
-        // Filter by entry type
-        if (onlyAbonos) {
-          // Only client payments to bank
-          whereConditions.sourceType = 'LOAN_PAYMENT_BANK'
-          whereConditions.entryType = 'CREDIT'
+          }
         } else {
           // Bank payments and transfers to bank
+          // Each entry type filtered by its appropriate route relation
           whereConditions.OR = [
-            // Direct bank payments from clients
+            // Direct bank payments from clients - filtered by loan's lead routes
             {
               sourceType: 'LOAN_PAYMENT_BANK',
               entryType: 'CREDIT',
+              loan: {
+                leadRelation: {
+                  routes: {
+                    some: { id: { in: routeIds } },
+                  },
+                },
+              },
             },
-            // Transfers to bank
+            // Leader deposits to bank - filtered by LeadPaymentReceived's lead routes
             {
               sourceType: 'TRANSFER_IN',
               accountId: { in: bankAccountIds },
+              leadPaymentReceived: {
+                leadRelation: {
+                  routes: {
+                    some: { id: { in: routeIds } },
+                  },
+                },
+              },
             },
           ]
         }
@@ -87,6 +101,23 @@ export const bankIncomeResolvers = {
                                 locationRelation: true,
                               },
                             },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            leadPaymentReceived: {
+              include: {
+                leadRelation: {
+                  include: {
+                    personalDataRelation: {
+                      include: {
+                        addresses: {
+                          include: {
+                            locationRelation: true,
                           },
                         },
                       },
@@ -124,9 +155,10 @@ export const bankIncomeResolvers = {
           const isClientPayment = entry.sourceType === 'LOAN_PAYMENT_BANK'
           const isLeaderPayment = entry.sourceType === 'TRANSFER_IN' && bankAccountIds.includes(entry.accountId)
 
-          // Get leader from snapshotLeadId or from loan relation
+          // Get leader from snapshotLeadId, leadPaymentReceived relation, or loan relation
           const leader =
             leaderMap.get(entry.snapshotLeadId) ||
+            entry.leadPaymentReceived?.leadRelation ||
             entry.loanPayment?.loanRelation?.leadRelation
 
           const employeeName = leader?.personalDataRelation?.fullName
