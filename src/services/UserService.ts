@@ -162,6 +162,33 @@ export class UserService {
     return true
   }
 
+  /**
+   * Admin: Set a user's password without requiring the old password
+   * Only accessible by ADMIN role
+   */
+  async adminSetPassword(userId: string, newPassword: string): Promise<boolean> {
+    // Validate password length early
+    if (newPassword.length < 4) {
+      throw new GraphQLError('Password must be at least 4 characters', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      })
+    }
+
+    // Verify user exists
+    const user = await this.userRepository.findById(userId)
+    if (!user) {
+      throw new GraphQLError('User not found', {
+        extensions: { code: 'NOT_FOUND' },
+      })
+    }
+
+    // Update password
+    const hashedPassword = await bcrypt.hash(newPassword, 10)
+    await this.userRepository.update(userId, { password: hashedPassword })
+
+    return true
+  }
+
   async verifyCredentials(
     email: string,
     password: string
@@ -169,9 +196,15 @@ export class UserService {
     const user = await this.userRepository.findByEmailWithEmployee(email)
     if (!user) return null
 
-    // TODO: Temporarily disabled password verification for development
-    // const isValid = await bcrypt.compare(password, user.password)
-    // if (!isValid) return null
+    // TODO: Temporalmente permite a ADMIN acceder sin verificar password
+    // para poder setear los passwords de todos los usuarios
+    // ELIMINAR ESTO después de configurar los passwords
+    if (user.role === 'ADMIN') {
+      return user
+    }
+
+    const isValid = await bcrypt.compare(password, user.password)
+    if (!isValid) return null
 
     return user
   }

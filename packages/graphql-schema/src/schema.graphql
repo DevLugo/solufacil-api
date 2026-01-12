@@ -1712,6 +1712,7 @@ type Mutation {
   createUser(input: CreateUserInput!): User! @requireRole(roles: [ADMIN])
   updateUser(id: ID!, input: UpdateUserInput!): User! @requireRole(roles: [ADMIN])
   deleteUser(id: ID!): Boolean! @requireRole(roles: [ADMIN])
+  adminSetPassword(userId: ID!, newPassword: String!): Boolean! @requireRole(roles: [ADMIN])
 
   # Employees
   createEmployee(input: CreateEmployeeInput!): Employee! @auth

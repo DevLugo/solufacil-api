@@ -87,6 +87,17 @@ export const userResolvers = {
       const userService = new UserService(context.prisma)
       return userService.delete(args.id)
     },
+
+    adminSetPassword: async (
+      _parent: unknown,
+      args: { userId: string; newPassword: string },
+      context: GraphQLContext
+    ) => {
+      authenticateUser(context)
+      requireRole(context, [UserRole.ADMIN])
+      const userService = new UserService(context.prisma)
+      return userService.adminSetPassword(args.userId, args.newPassword)
+    },
   },
 
   User: {
