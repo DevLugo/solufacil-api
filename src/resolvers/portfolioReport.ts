@@ -2,6 +2,7 @@ import type { GraphQLContext } from '../context'
 import {
   PortfolioReportService,
   type PortfolioFilters,
+  type FinishedClientDetail,
 } from '../services/PortfolioReportService'
 import { PortfolioReportPDFService } from '../services/PortfolioReportPDFService'
 import type {
@@ -276,6 +277,35 @@ export const portfolioReportResolvers = {
         category: client.category,
         expectedWeekly: client.expectedWeekly.toString(),
         paidThisWeek: client.paidThisWeek.toString(),
+      }))
+    },
+
+    finishedClientsWithoutRenewal: async (
+      _parent: unknown,
+      args: {
+        localityId: string
+        year: number
+        month: number
+        weekNumber?: number
+      },
+      context: GraphQLContext
+    ) => {
+      const service = new PortfolioReportService(context.prisma)
+      const clients = await service.getFinishedClientsWithoutRenewal(
+        args.localityId,
+        args.year,
+        args.month,
+        args.weekNumber
+      )
+      return clients.map((client) => ({
+        loanId: client.loanId,
+        clientName: client.clientName,
+        clientCode: client.clientCode,
+        amountGived: client.amountGived.toString(),
+        totalPaid: client.totalPaid.toString(),
+        finishedDate: client.finishedDate,
+        loanType: client.loanType,
+        hadPendingDebt: client.hadPendingDebt,
       }))
     },
   },

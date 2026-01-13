@@ -40,6 +40,17 @@ export interface PortfolioFilters {
   loantypeIds?: string[]
 }
 
+export interface FinishedClientDetail {
+  loanId: string
+  clientName: string
+  clientCode: string
+  amountGived: number
+  totalPaid: number
+  finishedDate: Date
+  loanType: string
+  hadPendingDebt: boolean
+}
+
 export class PortfolioReportService {
   private locationHistoryService: LocationHistoryService
 
@@ -1408,7 +1419,8 @@ export class PortfolioReportService {
       })
     }
 
-    return result.sort((a, b) => a.clientName.localeCompare(b.clientName))
+    // Sort by signDate ascending (oldest loans first)
+    return result.sort((a, b) => a.signDate.getTime() - b.signDate.getTime())
   }
 
   // ========== Private Helper Methods ==========
@@ -2546,5 +2558,95 @@ export class PortfolioReportService {
     }))
 
     return calculateRenovationKPIs(portfolioLoans, periodStart, periodEnd)
+  }
+
+  /**
+   * Get clients that finished without renewal in a specific period (locality drill-down)
+   * These are clients that "exit" the portfolio without being replaced by a new loan.
+   */
+  async getFinishedClientsWithoutRenewal(
+    localityId: string,
+    year: number,
+    month: number,
+    weekNumber?: number
+  ): Promise<FinishedClientDetail[]> {
+    const weeks = getWeeksInMonth(year, month - 1)
+    if (weeks.length === 0) {
+      return []
+    }
+
+    // Determine the week range (same pattern as getLocalityClients)
+    let targetWeek: WeekRange
+    if (weekNumber) {
+      targetWeek = weeks.find((w) => w.weekNumber === weekNumber) || weeks[weeks.length - 1]
+    } else {
+      const lastCompletedWeek = this.getLastCompletedWeek(weeks)
+      targetWeek = lastCompletedWeek || weeks[weeks.length - 1]
+    }
+
+    // Query loans that finished in the target week WITHOUT a renewal (no loan points to them as previousLoan)
+    const loans = await this.prisma.$queryRaw<Array<{
+      id: string
+      oldId: string | null
+      borrowerName: string
+      clientCode: string
+      amountGived: string
+      totalPaid: string
+      pendingAmountStored: string
+      finishedDate: Date
+      loanTypeName: string
+      leadLocationId: string | null
+    }>>`
+      SELECT
+        l.id,
+        l."oldId",
+        pd."fullName" as "borrowerName",
+        pd."clientCode",
+        l."amountGived"::text,
+        l."totalPaid"::text,
+        l."pendingAmountStored"::text,
+        l."finishedDate",
+        lt.name as "loanTypeName",
+        (
+          SELECT addr.location
+          FROM "Address" addr
+          WHERE addr."personalData" = lpd.id
+          ORDER BY addr."createdAt"
+          LIMIT 1
+        ) as "leadLocationId"
+      FROM "Loan" l
+      JOIN "Borrower" b ON l.borrower = b.id
+      JOIN "PersonalData" pd ON b."personalData" = pd.id
+      JOIN "Employee" e ON l.lead = e.id
+      JOIN "PersonalData" lpd ON e."personalData" = lpd.id
+      LEFT JOIN "Loantype" lt ON l.loantype = lt.id
+      WHERE l."finishedDate" >= ${targetWeek.start}
+        AND l."finishedDate" <= ${targetWeek.end}
+        AND l.status = 'FINISHED'
+        AND NOT EXISTS (
+          SELECT 1 FROM "Loan" renewal
+          WHERE renewal."previousLoan" = l.id
+        )
+      ORDER BY l."signDate" ASC
+    `
+
+    // Filter by locality (lead's first address)
+    const filteredLoans = loans.filter(loan => {
+      if (localityId === 'sin-localidad') {
+        return loan.leadLocationId === null
+      }
+      return loan.leadLocationId === localityId
+    })
+
+    return filteredLoans.map(loan => ({
+      loanId: loan.id,
+      clientName: loan.borrowerName,
+      clientCode: loan.clientCode,
+      amountGived: parseFloat(loan.amountGived),
+      totalPaid: parseFloat(loan.totalPaid),
+      finishedDate: loan.finishedDate,
+      loanType: loan.loanTypeName || 'N/A',
+      hadPendingDebt: parseFloat(loan.pendingAmountStored) > 0,
+    }))
   }
 }

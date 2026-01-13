@@ -999,6 +999,19 @@ type LocalityClientDetail {
   paidThisWeek: Decimal!
 }
 
+"Cliente que terminó sin renovar en el período"
+type FinishedClientDetail {
+  loanId: ID!
+  clientName: String!
+  clientCode: String!
+  amountGived: Decimal!
+  totalPaid: Decimal!
+  finishedDate: DateTime!
+  loanType: String!
+  "true si el cliente tenía deuda pendiente al finalizar"
+  hadPendingDebt: Boolean!
+}
+
 # Annual Financial Report Types
 type AnnualFinancialReport {
   routes: [RouteInfo!]!
@@ -1275,6 +1288,14 @@ type Query {
     weekNumber: Int
     category: ClientCategory
   ): [LocalityClientDetail!]! @auth
+
+  "Clientes que terminaron sin renovar en el período (salen del portafolio)"
+  finishedClientsWithoutRenewal(
+    localityId: ID!
+    year: Int!
+    month: Int!
+    weekNumber: Int
+  ): [FinishedClientDetail!]! @auth
 
   # Portfolio Cleanup
   previewPortfolioCleanup(maxSignDate: DateTime!, routeId: ID): CleanupPreview! @requireRole(roles: [ADMIN])

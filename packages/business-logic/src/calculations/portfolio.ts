@@ -997,7 +997,8 @@ export function calculateCVContribution(
     ? loan.totalDebt
     : calculatedDebt
   const weekDuration = loan.weekDuration ?? 16
-  const expectedWeekly = weekDuration > 0 ? totalDebt / weekDuration : 0
+  // Round to avoid floating point precision errors (e.g., 385.00000000000006)
+  const expectedWeekly = weekDuration > 0 ? Math.round((totalDebt / weekDuration) * 100) / 100 : 0
 
   if (expectedWeekly <= 0 || Number.isNaN(expectedWeekly)) {
     return 0 // No se puede calcular CV sin pago esperado válido
@@ -1037,9 +1038,11 @@ export function calculateCVContribution(
   const weeksElapsed = Math.max(0, weeksSinceSign - 1)
 
   // Calcular lo que debería haberse pagado antes de esta semana
-  const expectedBefore = weeksElapsed > 0 ? weeksElapsed * expectedWeekly : 0
+  // Round to avoid floating point precision errors
+  const expectedBefore = weeksElapsed > 0 ? Math.round(weeksElapsed * expectedWeekly * 100) / 100 : 0
   // Sobrepago acumulado de semanas anteriores
-  const surplusBefore = paidBeforeWeek - expectedBefore
+  // Round to avoid tiny negative numbers from floating point errors
+  const surplusBefore = Math.round((paidBeforeWeek - expectedBefore) * 100) / 100
 
   // Determinar tipo de cobertura
   const coversWithSurplus = (surplusBefore + weeklyPaid) >= expectedWeekly
