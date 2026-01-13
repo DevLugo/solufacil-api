@@ -1382,7 +1382,8 @@ type Query {
 
   # Transaction Summary (Summary Tab)
   transactionsSummaryByLocation(
-    routeId: ID!
+    routeId: ID
+    routeIds: [ID!]
     startDate: DateTime!
     endDate: DateTime!
   ): TransactionSummaryResponse! @auth

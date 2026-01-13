@@ -146,38 +146,41 @@ export class TransactionSummaryService {
   constructor(private prisma: PrismaClient) {}
 
   async getSummaryByLocation(
-    routeId: string,
+    routeIds: string | string[],
     startDate: Date,
     endDate: Date
   ): Promise<TransactionSummaryResponse> {
-    // First, get all leaders that belong to this route
+    // Normalize to array
+    const routeIdArray = Array.isArray(routeIds) ? routeIds : [routeIds]
+
+    // First, get all leaders that belong to these routes
     const leadersInRoute = await this.prisma.employee.findMany({
       where: {
         routes: {
-          some: { id: routeId },
+          some: { id: { in: routeIdArray } },
         },
       },
       select: { id: true },
     })
     const leaderIdsInRoute = leadersInRoute.map(l => l.id)
 
-    // Get all account IDs that belong to this route (for general expenses)
+    // Get all account IDs that belong to these routes (for general expenses)
     const routeAccounts = await this.prisma.account.findMany({
       where: {
         routes: {
-          some: { id: routeId },
+          some: { id: { in: routeIdArray } },
         },
       },
       select: { id: true },
     })
     const routeAccountIds = routeAccounts.map(a => a.id)
 
-    // Fetch all AccountEntry records for the route in the date range
+    // Fetch all AccountEntry records for the routes in the date range
     // Include entries that either:
-    // 1. Have snapshotRouteId matching the route (primary - most accurate), OR
+    // 1. Have snapshotRouteId matching any of the routes (primary - most accurate), OR
     // 2. Legacy fallback for entries without snapshotRouteId:
-    //    a. Have a loan where the lead is in the route, OR
-    //    b. Have a snapshotLeadId pointing to a leader in the route (for PAYMENT_COMMISSION), OR
+    //    a. Have a loan where the lead is in any of the routes, OR
+    //    b. Have a snapshotLeadId pointing to a leader in any of the routes (for PAYMENT_COMMISSION), OR
     //    c. Are general expenses on route accounts (no loan, no snapshotLeadId)
     const entries = await this.prisma.accountEntry.findMany({
       where: {
@@ -188,23 +191,23 @@ export class TransactionSummaryService {
         OR: [
           // Primary: Use snapshotRouteId when available (prevents duplicate counting)
           {
-            snapshotRouteId: routeId,
+            snapshotRouteId: { in: routeIdArray },
           },
           // Legacy fallback: entries without snapshotRouteId
           {
             snapshotRouteId: { equals: '' },
             OR: [
-              // Entries with loan where lead is in route
+              // Entries with loan where lead is in any of the routes
               {
                 loan: {
                   leadRelation: {
                     routes: {
-                      some: { id: routeId },
+                      some: { id: { in: routeIdArray } },
                     },
                   },
                 },
               },
-              // Entries without loan but with snapshotLeadId in route (e.g., PAYMENT_COMMISSION)
+              // Entries without loan but with snapshotLeadId in any of the routes (e.g., PAYMENT_COMMISSION)
               {
                 loan: { is: null },
                 snapshotLeadId: {

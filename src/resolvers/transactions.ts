@@ -141,7 +141,8 @@ export const transactionResolvers = {
     transactionsSummaryByLocation: async (
       _parent: unknown,
       args: {
-        routeId: string
+        routeId?: string
+        routeIds?: string[]
         startDate: Date
         endDate: Date
       },
@@ -149,9 +150,21 @@ export const transactionResolvers = {
     ) => {
       authenticateUser(context)
 
+      // Support both single routeId and array of routeIds
+      // If routeIds is provided, use it; otherwise fall back to routeId
+      const routeIdsToUse = args.routeIds && args.routeIds.length > 0
+        ? args.routeIds
+        : args.routeId
+          ? [args.routeId]
+          : []
+
+      if (routeIdsToUse.length === 0) {
+        throw new Error('At least one routeId or routeIds must be provided')
+      }
+
       const summaryService = new TransactionSummaryService(context.prisma)
       const result = await summaryService.getSummaryByLocation(
-        args.routeId,
+        routeIdsToUse,
         args.startDate,
         args.endDate
       )
