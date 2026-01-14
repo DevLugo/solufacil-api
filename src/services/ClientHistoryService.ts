@@ -142,59 +142,57 @@ export class ClientHistoryService {
       return []
     }
 
-    // Search in PersonalData
-    // If NOT admin, exclude personalData associated with Users (through Employee -> User)
-    const personalDataResults = await this.prisma.personalData.findMany({
-      where: {
-        AND: [
-          // Search filter
+    // Build where clause
+    // Search filter is always applied
+    const searchFilter = {
+      OR: [
+        { fullName: { contains: searchTerm, mode: 'insensitive' as const } },
+        { clientCode: { contains: searchTerm, mode: 'insensitive' as const } },
+      ],
+    }
+
+    // Security filters for non-admin users
+    const securityFilters = isAdmin
+      ? []
+      : [
+          // Cannot see data of people with User accounts
           {
             OR: [
-              { fullName: { contains: searchTerm, mode: 'insensitive' } },
-              { clientCode: { contains: searchTerm, mode: 'insensitive' } },
+              { employee: null },
+              { employee: { user: null } },
             ],
           },
-          // Security: Non-admin users cannot see data of people with User accounts
-          ...(isAdmin
-            ? []
-            : [
-                {
+          // Cannot see clients with loans in "Ruta Ciudad"
+          {
+            OR: [
+              { borrower: null },
+              {
+                borrower: {
                   OR: [
-                    { employee: null },
-                    { employee: { user: null } },
-                  ],
-                },
-              ]),
-          // Security: Non-admin users cannot see clients with loans in "Ruta Ciudad"
-          ...(isAdmin
-            ? []
-            : [
-                {
-                  OR: [
-                    { borrower: null }, // No borrower record
+                    { loans: { none: {} } },
                     {
-                      borrower: {
-                        OR: [
-                          { loans: { none: {} } }, // No loans
-                          {
-                            loans: {
-                              none: {
-                                leadRelation: {
-                                  routes: {
-                                    some: { name: { equals: 'CIUDAD', mode: 'insensitive' } },
-                                  },
-                                },
-                              },
+                      loans: {
+                        none: {
+                          leadRelation: {
+                            routes: {
+                              some: { name: { equals: 'CIUDAD', mode: 'insensitive' as const } },
                             },
                           },
-                        ],
+                        },
                       },
                     },
                   ],
                 },
-              ]),
-        ],
-      },
+              },
+            ],
+          },
+        ]
+
+    // Search in PersonalData
+    const personalDataResults = await this.prisma.personalData.findMany({
+      where: {
+        AND: [searchFilter, ...securityFilters],
+      } as any, // Type assertion needed due to complex conditional filters
       take: limit * 2,
       include: {
         phones: true,
@@ -505,24 +503,20 @@ export class ClientHistoryService {
   ): Promise<ClientHistoryData> {
     const { isAdmin = false } = options
 
-    // Get PersonalData with all related info
-    // If NOT admin, exclude personalData associated with Users (through Employee -> User)
-    const personalData = await this.prisma.personalData.findFirst({
-      where: {
-        id: clientId,
-        // Security: Non-admin users cannot see data of people with User accounts
-        ...(isAdmin
-          ? {}
-          : {
+    // Build security filters for non-admin users
+    const historySecurityFilters = isAdmin
+      ? {}
+      : {
+          AND: [
+            // Cannot see data of people with User accounts
+            {
               OR: [
                 { employee: null },
                 { employee: { user: null } },
               ],
-            }),
-        // Security: Non-admin users cannot see clients with loans in "Ruta Ciudad"
-        ...(isAdmin
-          ? {}
-          : {
+            },
+            // Cannot see clients with loans in "Ruta Ciudad"
+            {
               OR: [
                 { borrower: null },
                 {
@@ -534,7 +528,7 @@ export class ClientHistoryService {
                           none: {
                             leadRelation: {
                               routes: {
-                                some: { name: { equals: 'CIUDAD', mode: 'insensitive' } },
+                                some: { name: { equals: 'CIUDAD', mode: 'insensitive' as const } },
                               },
                             },
                           },
@@ -544,8 +538,16 @@ export class ClientHistoryService {
                   },
                 },
               ],
-            }),
-      },
+            },
+          ],
+        }
+
+    // Get PersonalData with all related info
+    const personalData = await this.prisma.personalData.findFirst({
+      where: {
+        id: clientId,
+        ...historySecurityFilters,
+      } as any, // Type assertion needed due to complex conditional filters
       include: {
         phones: true,
         addresses: {
@@ -618,7 +620,7 @@ export class ClientHistoryService {
                     some: {
                       leadRelation: {
                         routes: {
-                          some: { name: { equals: 'CIUDAD', mode: 'insensitive' } },
+                          some: { name: { equals: 'CIUDAD', mode: 'insensitive' as const } },
                         },
                       },
                     },
