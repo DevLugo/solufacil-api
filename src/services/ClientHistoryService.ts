@@ -425,11 +425,13 @@ export class ClientHistoryService {
     const totalAmountDue = requestedAmount * (1 + rate)
     const interestAmount = requestedAmount * rate
 
-    // Calculate balance progression for payments
+    // Calculate balance progression for payments and total paid on the fly
     let runningBalance = totalAmountDue
+    let calculatedTotalPaid = 0
     const payments: LoanPaymentDetail[] = loan.payments.map(
       (p: any, idx: number) => {
         const amount = parseFloat(p.amount?.toString() || '0')
+        calculatedTotalPaid += amount
         const balanceBefore = runningBalance
         runningBalance -= amount
         const balanceAfter = Math.max(0, runningBalance)
@@ -469,7 +471,7 @@ export class ClientHistoryService {
       amountRequested: loan.requestedAmount,
       totalAmountDue: totalAmountDue.toString(),
       interestAmount: interestAmount.toString(),
-      totalPaid: loan.totalPaid,
+      totalPaid: calculatedTotalPaid.toString(),
       pendingDebt: loan.pendingAmountStored,
       daysSinceSign,
       status: loan.status,
