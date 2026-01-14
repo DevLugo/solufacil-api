@@ -165,6 +165,34 @@ export class ClientHistoryService {
                   ],
                 },
               ]),
+          // Security: Non-admin users cannot see clients with loans in "Ruta Ciudad"
+          ...(isAdmin
+            ? []
+            : [
+                {
+                  OR: [
+                    { borrower: null }, // No borrower record
+                    {
+                      borrower: {
+                        OR: [
+                          { loans: { none: {} } }, // No loans
+                          {
+                            loans: {
+                              none: {
+                                leadRelation: {
+                                  routes: {
+                                    some: { name: { equals: 'CIUDAD', mode: 'insensitive' } },
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              ]),
         ],
       },
       take: limit * 2,
@@ -491,6 +519,32 @@ export class ClientHistoryService {
                 { employee: { user: null } },
               ],
             }),
+        // Security: Non-admin users cannot see clients with loans in "Ruta Ciudad"
+        ...(isAdmin
+          ? {}
+          : {
+              OR: [
+                { borrower: null },
+                {
+                  borrower: {
+                    OR: [
+                      { loans: { none: {} } },
+                      {
+                        loans: {
+                          none: {
+                            leadRelation: {
+                              routes: {
+                                some: { name: { equals: 'CIUDAD', mode: 'insensitive' } },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
       },
       include: {
         phones: true,
@@ -549,18 +603,33 @@ export class ClientHistoryService {
     })
 
     if (!personalData) {
-      // Check if the client exists but has an associated User account (for non-admin users)
+      // Check if the client exists but is blocked (for non-admin users)
       if (!isAdmin) {
-        const existsWithUser = await this.prisma.personalData.findFirst({
+        const existsButBlocked = await this.prisma.personalData.findFirst({
           where: {
             id: clientId,
-            employee: {
-              user: { not: null },
-            },
+            OR: [
+              // Has User account
+              { employee: { user: { not: null } } },
+              // Has loans in "Ruta Ciudad"
+              {
+                borrower: {
+                  loans: {
+                    some: {
+                      leadRelation: {
+                        routes: {
+                          some: { name: { equals: 'CIUDAD', mode: 'insensitive' } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
           },
           select: { id: true },
         })
-        if (existsWithUser) {
+        if (existsButBlocked) {
           throw new Error('Acceso denegado: Información privada de usuario')
         }
       }

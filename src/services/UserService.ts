@@ -196,13 +196,6 @@ export class UserService {
     const user = await this.userRepository.findByEmailWithEmployee(email)
     if (!user) return null
 
-    // TODO: Temporalmente permite a ADMIN acceder sin verificar password
-    // para poder setear los passwords de todos los usuarios
-    // ELIMINAR ESTO después de configurar los passwords
-    if (user.role === 'ADMIN') {
-      return user
-    }
-
     const isValid = await bcrypt.compare(password, user.password)
     if (!isValid) return null
 

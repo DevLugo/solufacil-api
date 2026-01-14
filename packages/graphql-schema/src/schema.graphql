@@ -1372,6 +1372,7 @@ type Query {
     badDebtStatus: DeadDebtStatus
     fromDate: DateTime
     toDate: DateTime
+    evaluationDate: DateTime
   ): DeadDebtQueryResult! @requireRole(roles: [ADMIN])
 
   deadDebtMonthlySummary(

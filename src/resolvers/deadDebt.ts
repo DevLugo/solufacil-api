@@ -188,20 +188,22 @@ export const deadDebtResolvers = {
         badDebtStatus?: 'ALL' | 'MARKED' | 'UNMARKED' | null
         fromDate?: string | null
         toDate?: string | null
+        evaluationDate?: string | null
       },
       context: GraphQLContext
     ) => {
       authenticateUser(context)
       requireRole(context, [UserRole.ADMIN])
 
-      const now = new Date()
+      // Use evaluationDate if provided, otherwise use current date
+      const evaluationDate = args.evaluationDate ? new Date(args.evaluationDate) : new Date()
       const filters: DeadDebtFilters = {
         ...args,
         fromDate: args.fromDate ? new Date(args.fromDate) : null,
         toDate: args.toDate ? new Date(args.toDate) : null
       }
 
-      const whereClause = buildLoanFilters(filters, now)
+      const whereClause = buildLoanFilters(filters, evaluationDate)
 
       let loans = await context.prisma.loan.findMany({
         where: whereClause,
@@ -210,17 +212,17 @@ export const deadDebtResolvers = {
       })
 
       // Filter by route using historical route lookup (consistent with portfolioReportMonthly)
-      // Uses current date as reference to match the "last completed week" concept
+      // Uses evaluationDate as reference for historical route lookup
       if (args.routeId) {
         const locationHistoryService = new LocationHistoryService(context.prisma)
         loans = await locationHistoryService.filterEntitiesByHistoricalRoute(
-          loans, args.routeId, now, getLoanLocationId
+          loans, args.routeId, evaluationDate, getLoanLocationId
         )
       }
 
       loans = filterByLocalities(loans, args.localities)
 
-      const processedLoans = loans.map(loan => processLoan(loan, now))
+      const processedLoans = loans.map(loan => processLoan(loan, evaluationDate))
 
       const totalPendingAmount = processedLoans.reduce((sum, loan) => sum + parseFloat(loan.pendingAmountStored), 0)
       const totalBadDebtCandidate = processedLoans.reduce((sum, loan) => sum + parseFloat(loan.badDebtCandidate), 0)
