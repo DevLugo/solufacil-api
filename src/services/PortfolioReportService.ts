@@ -208,6 +208,7 @@ export class PortfolioReportService {
       {
         weekRange: activeWeek,
         clientesActivos: summary.totalClientesActivos,
+        clientesAlCorriente: summary.clientesAlCorriente,
         clientesEnCV: summary.clientesEnCV,
         balance: summary.clientBalance.balance,
         isCompleted: this.isWeekCompleted(activeWeek),
@@ -276,8 +277,9 @@ export class PortfolioReportService {
     const previousWeek = completedWeeks.length > 1 ? completedWeeks[completedWeeks.length - 2] : null
 
     // OPTIMIZATION: Run main query and renovation KPIs in parallel
+    // Pass lastCompletedWeek.end as route filter reference to ensure consistency with getRouteKPIs
     const [loansResult, renovationKPIs] = await Promise.all([
-      this.getActiveLoansWithPaymentsForMonth(periodStart, periodEnd, filters),
+      this.getActiveLoansWithPaymentsForMonth(periodStart, periodEnd, filters, lastCompletedWeek?.end),
       this.getRenovationKPIs(periodStart, periodEnd, filters),
     ])
     const { loans, allPayments, routeInfoMap } = loansResult
@@ -345,6 +347,7 @@ export class PortfolioReportService {
       weeklyData.push({
         weekRange: week,
         clientesActivos: weekStatus.totalActivos,
+        clientesAlCorriente: isCompleted ? weekStatus.alCorriente : 0, // Only show for completed weeks
         clientesEnCV: isCompleted ? weekStatus.enCV : 0, // Only show CV for completed weeks
         balance: weekBalance.balance,
         isCompleted,
@@ -1840,12 +1843,14 @@ export class PortfolioReportService {
    * @param periodStart - Start date of the period
    * @param periodEnd - End date of the period
    * @param filters - Optional filters
+   * @param routeFilterReferenceDate - Date to use for route filtering (defaults to signDate if not provided)
    * @returns Loans and their payments in the period
    */
   async getActiveLoansWithPaymentsForMonth(
     periodStart: Date,
     periodEnd: Date,
-    filters?: PortfolioFilters
+    filters?: PortfolioFilters,
+    routeFilterReferenceDate?: Date
   ): Promise<{
     loans: LoanForPortfolio[]
     allPayments: Map<string, PaymentForCV[]>
@@ -1957,14 +1962,31 @@ export class PortfolioReportService {
     ])
 
     // Build lookups for historical route determination
-    // Each loan's route is determined by the lead's location at the loan's signDate
+    // When routeFilterReferenceDate is provided (for consistent filtering with getRouteKPIs),
+    // use that date for route filtering. Otherwise, use each loan's signDate.
+    const useReferenceDate = routeFilterReferenceDate && filters?.routeIds?.length
     const routeLookups: Array<{ locationId: string; date: Date; loanId: string }> = []
+    const uniqueLocationIds = new Set<string>()
+
     for (const loan of loansResult) {
       if (loan.leadLocationId) {
+        uniqueLocationIds.add(loan.leadLocationId)
+        // Always add signDate lookup for routeInfoMap (attribution)
         routeLookups.push({
           locationId: loan.leadLocationId,
           date: loan.signDate,
           loanId: loan.id,
+        })
+      }
+    }
+
+    // If using reference date for filtering, add those lookups too
+    if (useReferenceDate) {
+      for (const locationId of uniqueLocationIds) {
+        routeLookups.push({
+          locationId,
+          date: routeFilterReferenceDate,
+          loanId: '', // Not needed for filtering lookup
         })
       }
     }
@@ -1978,11 +2000,15 @@ export class PortfolioReportService {
     const loans: LoanForPortfolio[] = []
     const routeInfoMap = new Map<string, { routeId: string; routeName: string }>()
 
-    // Filter by route if needed (using historical route assignment)
+    // Filter by route if needed
+    // When routeFilterReferenceDate is provided, use it for filtering (consistent with getRouteKPIs)
+    // Otherwise, use each loan's signDate for historical route attribution
     const filteredLoansResult = filters?.routeIds?.length
       ? loansResult.filter((loan) => {
           if (!loan.leadLocationId) return false
-          const key = `${loan.leadLocationId}:${loan.signDate.toISOString()}`
+          // Use reference date if provided, otherwise use signDate
+          const filterDate = useReferenceDate ? routeFilterReferenceDate : loan.signDate
+          const key = `${loan.leadLocationId}:${filterDate.toISOString()}`
           const routeInfo = historicalRouteMap.get(key)
           return routeInfo && filters.routeIds!.includes(routeInfo.routeId)
         })

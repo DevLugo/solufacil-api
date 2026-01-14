@@ -2,6 +2,7 @@ import type { GraphQLContext } from '@solufacil/graphql-schema'
 import { UserRole } from '@solufacil/database'
 import { toDecimal, MONTH_NAMES } from '@solufacil/shared'
 import { authenticateUser, requireRole } from '../middleware/auth'
+import { LocationHistoryService } from '../services/LocationHistoryService'
 
 interface DeadDebtFilters {
   weeksSinceLoanMin?: number | null
@@ -42,12 +43,15 @@ const LOAN_INCLUDE_WITH_RELATIONS = {
 
 /**
  * Build base filters for loans query
+ * Note: Route filtering is done after the query using historical route lookup
+ * to be consistent with portfolioReportMonthly
  */
 function buildLoanFilters(filters: DeadDebtFilters, now: Date) {
   const {
     weeksSinceLoanMin,
     weeksWithoutPaymentMin,
-    routeId,
+    // routeId is NOT used here - filtering by route is done after query
+    // using LocationHistoryService for consistency with portfolioReportMonthly
     badDebtStatus,
     fromDate,
     toDate
@@ -58,9 +62,7 @@ function buildLoanFilters(filters: DeadDebtFilters, now: Date) {
     { pendingAmountStored: { gt: 0 } }
   ]
 
-  if (routeId) {
-    andFilters.push({ leadRelation: { routes: { some: { id: routeId } } } })
-  }
+  // Route filter removed - now done via LocationHistoryService after query
 
   if (badDebtStatus === 'MARKED') {
     const badDebtDateFilter: any = { not: null }
@@ -168,6 +170,12 @@ function filterByLocalities(loans: any[], localities: string[] | null | undefine
   })
 }
 
+/**
+ * Helper to extract locationId from a loan entity
+ */
+const getLoanLocationId = (loan: any): string | null | undefined =>
+  loan.leadRelation?.personalDataRelation?.addresses?.[0]?.location
+
 export const deadDebtResolvers = {
   Query: {
     deadDebtLoans: async (
@@ -200,6 +208,15 @@ export const deadDebtResolvers = {
         include: LOAN_INCLUDE_WITH_RELATIONS,
         orderBy: { signDate: 'asc' }
       })
+
+      // Filter by route using historical route lookup (consistent with portfolioReportMonthly)
+      // Uses current date as reference to match the "last completed week" concept
+      if (args.routeId) {
+        const locationHistoryService = new LocationHistoryService(context.prisma)
+        loans = await locationHistoryService.filterEntitiesByHistoricalRoute(
+          loans, args.routeId, now, getLoanLocationId
+        )
+      }
 
       loans = filterByLocalities(loans, args.localities)
 
@@ -244,9 +261,7 @@ export const deadDebtResolvers = {
         { pendingAmountStored: { gt: 0 } }
       ]
 
-      if (routeId) {
-        andFilters.push({ leadRelation: { routes: { some: { id: routeId } } } })
-      }
+      // Route filter removed - now done via LocationHistoryService after query
 
       if (badDebtStatus === 'MARKED') {
         andFilters.push({ badDebtDate: { not: null } })
@@ -258,6 +273,14 @@ export const deadDebtResolvers = {
         where: { AND: andFilters },
         include: LOAN_INCLUDE_WITH_RELATIONS
       })
+
+      // Filter by route using historical route lookup (consistent with portfolioReportMonthly)
+      if (routeId) {
+        const locationHistoryService = new LocationHistoryService(context.prisma)
+        allLoans = await locationHistoryService.filterEntitiesByHistoricalRoute(
+          allLoans, routeId, new Date(), getLoanLocationId
+        )
+      }
 
       allLoans = filterByLocalities(allLoans, localities)
 
@@ -392,6 +415,14 @@ export const deadDebtResolvers = {
         }
       })
 
+      // Filter by route using historical route lookup (consistent with portfolioReportMonthly)
+      if (args.routeId) {
+        const locationHistoryService = new LocationHistoryService(context.prisma)
+        loans = await locationHistoryService.filterEntitiesByHistoricalRoute(
+          loans, args.routeId, now, getLoanLocationId
+        )
+      }
+
       loans = filterByLocalities(loans, args.localities)
 
       const summaryMap = new Map<string, { loanCount: number; totalPending: number; totalBadDebtCandidate: number }>()
@@ -434,7 +465,7 @@ export const deadDebtResolvers = {
       const monthStart = new Date(year, month - 1, 1)
       const monthEnd = new Date(year, month, 0, 23, 59, 59, 999)
 
-      // Build where clause for loans
+      // Build where clause for loans (without route filter - done after with historical lookup)
       const loanWhere: any = {
         badDebtDate: {
           not: null,
@@ -442,12 +473,10 @@ export const deadDebtResolvers = {
         }
       }
 
-      if (routeId) {
-        loanWhere.leadRelation = { routes: { some: { id: routeId } } }
-      }
+      // Route filter removed - now done via LocationHistoryService after query
 
       // Find all payments in the period from loans that were marked as dead debt BEFORE the payment date
-      const payments = await context.prisma.loanPayment.findMany({
+      let payments = await context.prisma.loanPayment.findMany({
         where: {
           receivedAt: {
             gte: monthStart,
@@ -482,6 +511,46 @@ export const deadDebtResolvers = {
         },
         orderBy: { receivedAt: 'desc' }
       })
+
+      // Filter by route using historical route lookup (consistent with portfolioReportMonthly)
+      if (routeId) {
+        const locationHistoryService = new LocationHistoryService(context.prisma)
+
+        // Get unique location IDs from payments' loans
+        const locationIds = new Set<string>()
+        const paymentLocationMap = new Map<string, string>()
+
+        for (const payment of payments) {
+          const loan = (payment as any).loanRelation
+          const locationId = loan?.leadRelation?.personalDataRelation?.addresses?.[0]?.location
+          if (locationId) {
+            locationIds.add(locationId)
+            paymentLocationMap.set(payment.id, locationId)
+          }
+        }
+
+        if (locationIds.size > 0) {
+          // Batch lookup routes for all locations at the reference date (now)
+          const routeLookups = Array.from(locationIds).map(locationId => ({
+            locationId,
+            date: new Date()
+          }))
+
+          const historicalRouteMap = await locationHistoryService.getRoutesForLocationsAtDates(routeLookups)
+
+          // Filter payments where the loan's lead location was in the specified route
+          payments = payments.filter(payment => {
+            const locationId = paymentLocationMap.get(payment.id)
+            if (!locationId) return false
+
+            const key = `${locationId}:${new Date().toISOString()}`
+            const routeInfo = historicalRouteMap.get(key)
+            return routeInfo?.routeId === routeId
+          })
+        } else {
+          payments = []
+        }
+      }
 
       // Calculate summary
       const totalRecovered = payments.reduce((sum, p) => sum + toDecimal(p.amount), 0)

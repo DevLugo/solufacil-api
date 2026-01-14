@@ -236,6 +236,8 @@ export interface WeeklyPortfolioData {
   weekRange: WeekRange
   /** Clientes activos esa semana */
   clientesActivos: number
+  /** Clientes al corriente (pagaron en la semana) */
+  clientesAlCorriente: number
   /** Clientes en CV esa semana */
   clientesEnCV: number
   /** Balance de clientes esa semana */

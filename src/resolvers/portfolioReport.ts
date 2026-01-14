@@ -62,6 +62,7 @@ function serializePortfolioReport(report: PortfolioReport) {
     weeklyData: report.weeklyData.map((week) => ({
       weekRange: serializeWeekRange(week.weekRange),
       clientesActivos: week.clientesActivos,
+      clientesAlCorriente: week.clientesAlCorriente,
       clientesEnCV: week.clientesEnCV,
       balance: week.balance,
       isCompleted: week.isCompleted,

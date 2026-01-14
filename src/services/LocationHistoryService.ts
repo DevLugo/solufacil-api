@@ -890,4 +890,53 @@ export class LocationHistoryService {
       where: { id },
     })
   }
+
+  /**
+   * Generic method to filter entities by their historical route assignment.
+   * This method is useful for filtering loans, payments, or any other entities
+   * that have a location association.
+   *
+   * @param entities - Array of entities to filter
+   * @param routeId - Target route ID to filter by (if null/undefined, returns all entities)
+   * @param referenceDate - Date to use for historical route lookup
+   * @param getLocationId - Function to extract locationId from an entity
+   * @returns Filtered array of entities that were in the specified route at the reference date
+   */
+  async filterEntitiesByHistoricalRoute<T extends { id: string }>(
+    entities: T[],
+    routeId: string | null | undefined,
+    referenceDate: Date,
+    getLocationId: (entity: T) => string | null | undefined
+  ): Promise<T[]> {
+    if (!routeId || entities.length === 0) return entities
+
+    // Collect location IDs and build entity-to-location map
+    const locationIds = new Set<string>()
+    const entityLocationMap = new Map<string, string>()
+
+    for (const entity of entities) {
+      const locationId = getLocationId(entity)
+      if (locationId) {
+        locationIds.add(locationId)
+        entityLocationMap.set(entity.id, locationId)
+      }
+    }
+
+    if (locationIds.size === 0) return []
+
+    // Batch lookup routes for all locations at the reference date
+    const routeMap = await this.getRoutesForLocationsAtDate(
+      Array.from(locationIds),
+      referenceDate
+    )
+
+    // Filter entities by route
+    return entities.filter(entity => {
+      const locationId = entityLocationMap.get(entity.id)
+      if (!locationId) return false
+
+      const entityRouteId = routeMap.get(locationId)
+      return entityRouteId === routeId
+    })
+  }
 }

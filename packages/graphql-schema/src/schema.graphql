@@ -831,6 +831,8 @@ type PortfolioSummary {
 type WeeklyPortfolioData {
   weekRange: WeekRange!
   clientesActivos: Int!
+  "Clientes al corriente (puede ser decimal por conteo parcial)"
+  clientesAlCorriente: Float!
   "Clientes en CV (puede ser decimal por conteo parcial)"
   clientesEnCV: Float!
   balance: Int!
