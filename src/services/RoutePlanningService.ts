@@ -448,6 +448,10 @@ export class RoutePlanningService {
    * Gets all locations from multiple routes (or all routes if none specified).
    * Each location includes route info for color-coding on the map.
    *
+   * IMPORTANT: Uses the MOST RECENT route assignment from LocationRouteHistory
+   * to determine each location's current route. This prevents duplicates when
+   * a location has overlapping history records.
+   *
    * @param routeIds - Optional array of route IDs to filter (null/empty = all routes)
    * @returns Array of locations with planning statistics and route info
    */
@@ -456,39 +460,47 @@ export class RoutePlanningService {
   ): Promise<LocationPlanningStatsWithRoute[]> {
     const today = new Date()
 
-    // Get all routes or filter by IDs
-    const routes = await this.prisma.route.findMany({
-      where: routeIds && routeIds.length > 0 ? { id: { in: routeIds } } : undefined,
+    // Get all routes for name lookup
+    const allRoutes = await this.prisma.route.findMany({
       select: { id: true, name: true },
-      orderBy: { name: 'asc' },
+    })
+    const routeNameMap = new Map(allRoutes.map((r) => [r.id, r.name]))
+
+    // Get all locations (we'll filter by route later using history)
+    const allLocations = await this.prisma.location.findMany({
+      select: { id: true, name: true, latitude: true, longitude: true },
     })
 
-    if (routes.length === 0) {
+    if (allLocations.length === 0) {
       return []
     }
 
-    // Get locations for each route using LocationHistoryService
-    const routeLocationsMap = new Map<string, { routeId: string; routeName: string; locations: Array<{ id: string; name: string; latitude: number | null; longitude: number | null }> }>()
+    const allLocationIds = allLocations.map((l) => l.id)
 
-    for (const route of routes) {
-      const locations = await this.locationHistoryService.getLocationsInRouteAtDate(route.id, today)
-      routeLocationsMap.set(route.id, {
-        routeId: route.id,
-        routeName: route.name,
-        locations,
-      })
-    }
+    // Get the CURRENT route for each location using the most recent history entry
+    // This method correctly handles overlapping records by taking the most recent startDate
+    const locationRouteMap = await this.locationHistoryService.getRoutesForLocationsAtDate(
+      allLocationIds,
+      today
+    )
 
-    // Collect all unique location IDs
-    const allLocationIds = new Set<string>()
-    for (const routeData of routeLocationsMap.values()) {
-      for (const loc of routeData.locations) {
-        allLocationIds.add(loc.id)
+    // Build location map for quick lookup
+    const locationMap = new Map(allLocations.map((l) => [l.id, l]))
+
+    // Filter locations: only those with a current route assignment
+    // and optionally filter by routeIds if specified
+    const filteredLocationIds = allLocationIds.filter((locId) => {
+      const currentRouteId = locationRouteMap.get(locId)
+      if (!currentRouteId) return false // No route assigned
+
+      // If routeIds filter is specified, check if location's route is in the list
+      if (routeIds && routeIds.length > 0) {
+        return routeIds.includes(currentRouteId)
       }
-    }
+      return true
+    })
 
-    const locationIds = Array.from(allLocationIds)
-    if (locationIds.length === 0) {
+    if (filteredLocationIds.length === 0) {
       return []
     }
 
@@ -496,8 +508,8 @@ export class RoutePlanningService {
 
     // Fetch all data in parallel
     const [loans, borrowerCounts] = await Promise.all([
-      this.fetchActiveLoansForLocations(locationIds),
-      this.countBorrowersGroupedByLocation(locationIds),
+      this.fetchActiveLoansForLocations(filteredLocationIds),
+      this.countBorrowersGroupedByLocation(filteredLocationIds),
     ])
 
     const loanIds = loans.map((loan) => loan.id)
@@ -505,27 +517,32 @@ export class RoutePlanningService {
     const paymentsMap = this.groupPaymentsByLoan(payments)
     const loansByLocation = this.groupLoansByLocation(loans)
 
-    // Build results with route info
+    // Build results - each location appears ONCE with its current route
     const results: LocationPlanningStatsWithRoute[] = []
 
-    for (const routeData of routeLocationsMap.values()) {
-      for (const location of routeData.locations) {
-        const locationLoans = loansByLocation.get(location.id) || []
-        const stats = countClientsStatus(locationLoans, paymentsMap, activeWeek)
+    for (const locationId of filteredLocationIds) {
+      const location = locationMap.get(locationId)
+      if (!location) continue
 
-        results.push({
-          locationId: location.id,
-          locationName: location.name,
-          latitude: location.latitude,
-          longitude: location.longitude,
-          totalClientes: borrowerCounts.get(location.id) ?? 0,
-          clientesActivos: stats.totalActivos,
-          clientesEnCV: stats.enCV,
-          clientesAlCorriente: stats.alCorriente,
-          routeId: routeData.routeId,
-          routeName: routeData.routeName,
-        })
-      }
+      const currentRouteId = locationRouteMap.get(locationId)
+      if (!currentRouteId) continue
+
+      const routeName = routeNameMap.get(currentRouteId) ?? 'Sin ruta'
+      const locationLoans = loansByLocation.get(locationId) || []
+      const stats = countClientsStatus(locationLoans, paymentsMap, activeWeek)
+
+      results.push({
+        locationId: location.id,
+        locationName: location.name,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        totalClientes: borrowerCounts.get(location.id) ?? 0,
+        clientesActivos: stats.totalActivos,
+        clientesEnCV: stats.enCV,
+        clientesAlCorriente: stats.alCorriente,
+        routeId: currentRouteId,
+        routeName,
+      })
     }
 
     // Sort by route name, then location name
