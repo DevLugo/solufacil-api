@@ -58,9 +58,9 @@ export class RouteManagementService {
         type: employee.type,
         personalData: employee.personalData,
         personalDataRelation: hasValidPersonalData ? employee.personalDataRelation : null,
-        activos: employeeStats.totalActivos,
-        enCV: employeeStats.enCV,
-        alCorriente: employeeStats.alCorriente,
+        activos: Math.round(employeeStats.totalActivos),
+        enCV: Math.round(employeeStats.enCV),
+        alCorriente: Math.round(employeeStats.alCorriente),
       }
     })
   }
@@ -209,9 +209,9 @@ export class RouteManagementService {
         return {
           routeId: route.id,
           routeName: route.name,
-          totalActivos: stats.totalActivos,
-          enCV: stats.enCV,
-          alCorriente: stats.alCorriente,
+          totalActivos: Math.round(stats.totalActivos),
+          enCV: Math.round(stats.enCV),
+          alCorriente: Math.round(stats.alCorriente),
           employees: employeesWithStats,
         }
       })
