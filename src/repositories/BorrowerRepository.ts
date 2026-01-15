@@ -37,14 +37,37 @@ export interface BorrowerSearchResultRaw {
     pendingAmountStored: string
     signDate: Date
     requestedAmount: string
+    amountGived: string
+    profitAmount: string
+    totalDebtAcquired: string
+    expectedWeeklyPayment: string
+    totalPaid: string
     loantype: string
     loantypeRelation?: {
       id: string
       name: string
       weekDuration: number
       rate: string
+      loanPaymentComission: string
+      loanGrantedComission: string
     } | null
     renewedBy?: { id: string } | null
+    leadRelation?: {
+      personalDataRelation?: {
+        addresses?: Array<{
+          location: string
+          locationRelation?: {
+            id: string
+            name: string
+          }
+        }>
+      }
+    }
+    collaterals?: Array<{
+      id: string
+      fullName: string
+      phones?: Array<{ number: string }>
+    }>
   }[]
   isFromCurrentLocation?: boolean
   locationId?: string
@@ -271,6 +294,11 @@ export class BorrowerRepository {
             pendingAmountStored: true,
             signDate: true,
             requestedAmount: true,
+            amountGived: true,
+            profitAmount: true,
+            totalDebtAcquired: true,
+            expectedWeeklyPayment: true,
+            totalPaid: true,
             loantype: true,
             // Incluir relación de loantype para obtener nombre, weekDuration y rate
             loantypeRelation: {
@@ -279,6 +307,8 @@ export class BorrowerRepository {
                 name: true,
                 weekDuration: true,
                 rate: true,
+                loanPaymentComission: true,
+                loanGrantedComission: true,
               },
             },
             // Verificar si el préstamo ya fue renovado (tiene otro préstamo que lo referencia como previousLoan)
@@ -379,10 +409,17 @@ export class BorrowerRepository {
           ...loan,
           pendingAmountStored: loan.pendingAmountStored.toString(),
           requestedAmount: loan.requestedAmount.toString(),
+          amountGived: loan.amountGived.toString(),
+          profitAmount: loan.profitAmount.toString(),
+          totalDebtAcquired: loan.totalDebtAcquired.toString(),
+          expectedWeeklyPayment: loan.expectedWeeklyPayment.toString(),
+          totalPaid: loan.totalPaid.toString(),
           status: loan.status as string,
           loantypeRelation: loan.loantypeRelation ? {
             ...loan.loantypeRelation,
             rate: loan.loantypeRelation.rate.toString(),
+            loanPaymentComission: loan.loantypeRelation.loanPaymentComission.toString(),
+            loanGrantedComission: loan.loantypeRelation.loanGrantedComission.toString(),
           } : null,
         })),
         isFromCurrentLocation,
@@ -393,16 +430,13 @@ export class BorrowerRepository {
 
     // Reordenar: primero los de la localidad actual, luego los demás
     if (locationId) {
-      const fromCurrentLocation: BorrowerSearchResultRaw[] = []
-      const fromOtherLocations: BorrowerSearchResultRaw[] = []
-
-      for (const borrower of enrichedResults) {
-        if (borrower.isFromCurrentLocation) {
-          fromCurrentLocation.push(borrower)
-        } else {
-          fromOtherLocations.push(borrower)
-        }
-      }
+      const [fromCurrentLocation, fromOtherLocations] = enrichedResults.reduce<[BorrowerSearchResultRaw[], BorrowerSearchResultRaw[]]>(
+        ([current, other], borrower) => {
+          borrower.isFromCurrentLocation ? current.push(borrower) : other.push(borrower)
+          return [current, other]
+        },
+        [[], []]
+      )
 
       return [...fromCurrentLocation, ...fromOtherLocations].slice(0, limit)
     }

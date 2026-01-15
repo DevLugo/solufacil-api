@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Location" ADD COLUMN "latitude" DOUBLE PRECISION;
+ALTER TABLE "Location" ADD COLUMN "longitude" DOUBLE PRECISION;

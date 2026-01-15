@@ -184,6 +184,25 @@ type BorrowerSearchResult {
   locationName: String
   isFromCurrentLocation: Boolean!
   lastFinishedLoan: LastFinishedLoan
+  "Préstamo activo más reciente (para renovaciones) - incluye datos necesarios para calcular profit heredado"
+  activeLoan: ActiveLoanForRenewal
+}
+
+# Tipo para el préstamo activo en resultados de búsqueda (usado para renovaciones)
+type ActiveLoanForRenewal {
+  id: ID!
+  requestedAmount: String!
+  amountGived: String!
+  pendingAmountStored: String!
+  profitAmount: String!
+  totalDebtAcquired: String!
+  expectedWeeklyPayment: String!
+  totalPaid: String!
+  signDate: DateTime!
+  loantype: Loantype!
+  collaterals: [PersonalData!]!
+  "Nombre de la localidad del líder (para mostrar origen del préstamo)"
+  leadLocationName: String
 }
 
 type LastFinishedLoan {
@@ -366,6 +385,10 @@ type EmployeeWithStats {
 type Location {
   id: ID!
   name: String!
+  "GPS latitude coordinate for route planning"
+  latitude: Float
+  "GPS longitude coordinate for route planning"
+  longitude: Float
   route: Route
   municipality: Municipality!
   addresses: [Address!]!
@@ -449,6 +472,81 @@ type BatchUpsertHistoricalResult {
   recordsDeleted: Int!
   errors: [BatchUpsertHistoricalError!]!
   details: [BatchUpsertHistoricalDetail!]!
+}
+
+# ========================================
+# ROUTE PLANNING TYPES
+# ========================================
+
+"""
+Location with planning statistics for route optimization
+"""
+type LocationPlanningStats {
+  locationId: ID!
+  locationName: String!
+  "GPS latitude coordinate"
+  latitude: Float
+  "GPS longitude coordinate"
+  longitude: Float
+  "Total number of clients (borrowers) in this location"
+  totalClientes: Int!
+  "Clients with active loans"
+  clientesActivos: Int!
+  "Clients in cartera vencida (missed payments)"
+  clientesEnCV: Int!
+  "Clients al corriente (up to date with payments)"
+  clientesAlCorriente: Int!
+}
+
+"""
+Location with planning statistics including route info (for multi-route view)
+"""
+type LocationPlanningStatsWithRoute {
+  locationId: ID!
+  locationName: String!
+  "GPS latitude coordinate"
+  latitude: Float
+  "GPS longitude coordinate"
+  longitude: Float
+  "Total number of clients (borrowers) in this location"
+  totalClientes: Int!
+  "Clients with active loans"
+  clientesActivos: Int!
+  "Clients in cartera vencida (missed payments)"
+  clientesEnCV: Int!
+  "Clients al corriente (up to date with payments)"
+  clientesAlCorriente: Int!
+  "Route ID this location belongs to"
+  routeId: ID!
+  "Route name for display"
+  routeName: String!
+}
+
+"""
+Aggregated statistics for selected locations
+"""
+type AggregatedLocationStats {
+  "Number of locations included"
+  totalLocations: Int!
+  "Total clients across all selected locations"
+  totalClientes: Int!
+  "Total active clients"
+  clientesActivos: Int!
+  "Total clients in CV"
+  clientesEnCV: Int!
+  "Total clients al corriente"
+  clientesAlCorriente: Int!
+  "Total distance in kilometers between locations (sequential order)"
+  totalDistanceKm: Float!
+}
+
+"""
+Input for updating location coordinates
+"""
+input UpdateLocationCoordinatesInput {
+  locationId: ID!
+  latitude: Float!
+  longitude: Float!
 }
 
 type Municipality {
@@ -1216,6 +1314,14 @@ type Query {
   routeForLocationAtDate(locationId: ID!, date: DateTime!): Route @auth
   municipalities: [Municipality!]! @auth
 
+  # Route Planning
+  "Get locations for route planning with client statistics"
+  locationsForPlanning(routeId: ID!): [LocationPlanningStats!]! @auth
+  "Get all locations from multiple routes (or all routes if none specified) with route info"
+  allLocationsForPlanning(routeIds: [ID!]): [LocationPlanningStatsWithRoute!]! @auth
+  "Get aggregated statistics for selected locations"
+  aggregatedLocationStats(locationIds: [ID!]!): AggregatedLocationStats! @auth
+
   # Loan types
   loantype(id: ID!): Loantype @auth
   loantypes(isActive: Boolean): [Loantype!]! @auth
@@ -1803,6 +1909,12 @@ type Mutation {
   deleteLocationRouteHistory(id: ID!): Boolean! @auth
   batchChangeLocationRoutes(input: BatchChangeLocationRouteInput!): BatchLocationRouteChangeResult! @auth
   batchUpsertHistoricalAssignment(input: BatchUpsertHistoricalInput!): BatchUpsertHistoricalResult! @auth
+
+  # Route Planning
+  "Update GPS coordinates for a single location"
+  updateLocationCoordinates(input: UpdateLocationCoordinatesInput!): Location! @auth
+  "Update GPS coordinates for multiple locations"
+  batchUpdateLocationCoordinates(inputs: [UpdateLocationCoordinatesInput!]!): [Location!]! @auth
 
   # Loan types
   createLoantype(input: CreateLoantypeInput!): Loantype! @requireRole(roles: [ADMIN])

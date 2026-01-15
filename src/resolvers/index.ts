@@ -23,6 +23,7 @@ import { batchTransferResolvers } from './batchTransfer'
 import { bulkDateMigrationResolvers } from './bulkDateMigration'
 import { badDebtClientsResolvers } from './badDebtClients'
 import { locationHistoryResolvers } from './locationHistory'
+import { routePlanningResolvers } from './routePlanning'
 
 export const resolvers = {
   ...scalars,
@@ -51,6 +52,7 @@ export const resolvers = {
     ...bulkDateMigrationResolvers.Query,
     ...badDebtClientsResolvers.Query,
     ...locationHistoryResolvers.Query,
+    ...routePlanningResolvers.Query,
   },
 
   Mutation: {
@@ -74,6 +76,7 @@ export const resolvers = {
     ...batchTransferResolvers.Mutation,
     ...bulkDateMigrationResolvers.Mutation,
     ...locationHistoryResolvers.Mutation,
+    ...routePlanningResolvers.Mutation,
   },
 
   // Type resolvers

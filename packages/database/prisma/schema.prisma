@@ -539,6 +539,10 @@ model Location {
   id   String @id @default(cuid())
   name String @unique @default("")
 
+  // GPS coordinates for route planning
+  latitude  Float?
+  longitude Float?
+
   municipality String
   municipalityRelation Municipality @relation(fields: [municipality], references: [id])
 

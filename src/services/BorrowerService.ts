@@ -83,6 +83,18 @@ export class BorrowerService {
     )
   }
 
+  /**
+   * Obtiene el préstamo activo más reciente (para renovaciones)
+   * Ordena por signDate descendente y devuelve el primero
+   */
+  private getMostRecentActiveLoan(activeLoans: any[]): any | null {
+    if (!activeLoans.length) return null
+
+    return [...activeLoans].sort((a, b) =>
+      new Date(b.signDate).getTime() - new Date(a.signDate).getTime()
+    )[0]
+  }
+
   private calculatePendingDebt(activeLoans: any[]) {
     return activeLoans.reduce(
       (sum, loan) => sum + parseFloat(loan.pendingAmountStored || '0'),
@@ -92,11 +104,44 @@ export class BorrowerService {
 
   private getLastFinishedLoan(borrower: any) {
     const finishedLoans = borrower.loans.filter((loan: any) => loan.status === 'FINISHED')
-    if (finishedLoans.length === 0) return null
+    if (!finishedLoans.length) return null
 
-    return finishedLoans.sort((a: any, b: any) =>
+    return [...finishedLoans].sort((a, b) =>
       new Date(b.signDate).getTime() - new Date(a.signDate).getTime()
     )[0]
+  }
+
+  /**
+   * Construye el objeto activeLoan con todos los datos necesarios para renovaciones
+   */
+  private buildActiveLoanData(loan: any) {
+    if (!loan) return undefined
+
+    return {
+      id: loan.id,
+      requestedAmount: loan.requestedAmount.toString(),
+      amountGived: loan.amountGived.toString(),
+      pendingAmountStored: loan.pendingAmountStored.toString(),
+      profitAmount: loan.profitAmount.toString(),
+      totalDebtAcquired: loan.totalDebtAcquired.toString(),
+      expectedWeeklyPayment: loan.expectedWeeklyPayment.toString(),
+      totalPaid: loan.totalPaid.toString(),
+      signDate: loan.signDate,
+      loantype: loan.loantypeRelation ? {
+        id: loan.loantypeRelation.id,
+        name: loan.loantypeRelation.name,
+        weekDuration: loan.loantypeRelation.weekDuration,
+        rate: loan.loantypeRelation.rate,
+        loanPaymentComission: loan.loantypeRelation.loanPaymentComission || '0',
+        loanGrantedComission: loan.loantypeRelation.loanGrantedComission || '0',
+      } : null,
+      collaterals: (loan.collaterals || []).map((c: any) => ({
+        id: c.id,
+        fullName: c.fullName,
+        phones: c.phones || [],
+      })),
+      leadLocationName: loan.leadRelation?.personalDataRelation?.addresses?.[0]?.locationRelation?.name || undefined,
+    }
   }
 
   async searchByName(input: SearchBorrowersInput) {
@@ -115,6 +160,8 @@ export class BorrowerService {
       const activeLoans = this.getActiveLoans(borrower)
       const pendingDebtAmount = this.calculatePendingDebt(activeLoans)
       const lastFinishedLoan = this.getLastFinishedLoan(borrower)
+      const mostRecentActiveLoan = this.getMostRecentActiveLoan(activeLoans)
+      const activeLoan = this.buildActiveLoanData(mostRecentActiveLoan)
 
       return {
         id: borrower.id,
@@ -139,6 +186,7 @@ export class BorrowerService {
             phone: c.phones?.[0]?.number || null,
           })),
         } : undefined,
+        activeLoan,
       }
     })
   }

@@ -17,6 +17,7 @@ export * from './snapshots/loan-snapshot'
 
 // Export utils
 export * from './utils/paymentChronology'
+export * from './utils/geo'
 
 // Export LoanEngine - Single source of truth for loan business logic
 // Use this class for Flutter/mobile app replication
