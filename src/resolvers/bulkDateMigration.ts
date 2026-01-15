@@ -1,12 +1,6 @@
-import type { GraphQLContext } from '@solufacil/graphql-schema'
+import type { GraphQLContext, BulkDateMigrationInput } from '@solufacil/graphql-schema'
 import { BulkDateMigrationService } from '../services/BulkDateMigrationService'
 import { authenticateUser } from '../middleware/auth'
-
-export interface BulkDateMigrationInput {
-  startCreatedAt: Date
-  endCreatedAt: Date
-  newBusinessDate: Date
-}
 
 export const bulkDateMigrationResolvers = {
   Query: {
@@ -18,7 +12,12 @@ export const bulkDateMigrationResolvers = {
       authenticateUser(context)
 
       const service = new BulkDateMigrationService(context.prisma)
-      return service.previewMigration(args.input)
+      return service.previewMigration({
+        startBusinessDate: new Date(args.input.startBusinessDate),
+        endBusinessDate: new Date(args.input.endBusinessDate),
+        newBusinessDate: new Date(args.input.newBusinessDate),
+        routeId: args.input.routeId ?? undefined,
+      })
     },
   },
 
@@ -31,7 +30,12 @@ export const bulkDateMigrationResolvers = {
       authenticateUser(context)
 
       const service = new BulkDateMigrationService(context.prisma)
-      return service.executeMigration(args.input)
+      return service.executeMigration({
+        startBusinessDate: new Date(args.input.startBusinessDate),
+        endBusinessDate: new Date(args.input.endBusinessDate),
+        newBusinessDate: new Date(args.input.newBusinessDate),
+        routeId: args.input.routeId ?? undefined,
+      })
     },
   },
 }

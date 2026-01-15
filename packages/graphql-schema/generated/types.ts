@@ -129,6 +129,23 @@ export type Address = {
   zipCode?: Maybe<Scalars['String']['output']>;
 };
 
+/** Aggregated statistics for selected locations */
+export type AggregatedLocationStats = {
+  __typename?: 'AggregatedLocationStats';
+  /** Total active clients */
+  clientesActivos: Scalars['Int']['output'];
+  /** Total clients al corriente */
+  clientesAlCorriente: Scalars['Int']['output'];
+  /** Total clients in CV */
+  clientesEnCV: Scalars['Int']['output'];
+  /** Total clients across all selected locations */
+  totalClientes: Scalars['Int']['output'];
+  /** Total distance in kilometers between locations (sequential order) */
+  totalDistanceKm: Scalars['Float']['output'];
+  /** Number of locations included */
+  totalLocations: Scalars['Int']['output'];
+};
+
 export type AnnualFinancialReport = {
   __typename?: 'AnnualFinancialReport';
   annualWeeklyAverageExpenses: Scalars['Decimal']['output'];
@@ -317,10 +334,10 @@ export type BorrowerSearchResult = {
 };
 
 export type BulkDateMigrationInput = {
-  endCreatedAt: Scalars['DateTime']['input'];
+  endBusinessDate: Scalars['DateTime']['input'];
   newBusinessDate: Scalars['DateTime']['input'];
   routeId?: InputMaybe<Scalars['ID']['input']>;
-  startCreatedAt: Scalars['DateTime']['input'];
+  startBusinessDate: Scalars['DateTime']['input'];
 };
 
 export type BulkDateMigrationPreview = {
@@ -1185,6 +1202,10 @@ export type Location = {
   createdAt: Scalars['DateTime']['output'];
   currentRouteId?: Maybe<Scalars['ID']['output']>;
   id: Scalars['ID']['output'];
+  /** GPS latitude coordinate for route planning */
+  latitude?: Maybe<Scalars['Float']['output']>;
+  /** GPS longitude coordinate for route planning */
+  longitude?: Maybe<Scalars['Float']['output']>;
   municipality: Municipality;
   name: Scalars['String']['output'];
   route?: Maybe<Route>;
@@ -1203,6 +1224,48 @@ export type LocationBreakdown = {
   pagandoPromedio?: Maybe<Scalars['Float']['output']>;
   routeId?: Maybe<Scalars['ID']['output']>;
   routeName?: Maybe<Scalars['String']['output']>;
+};
+
+/** Location with planning statistics for route optimization */
+export type LocationPlanningStats = {
+  __typename?: 'LocationPlanningStats';
+  /** Clients with active loans */
+  clientesActivos: Scalars['Int']['output'];
+  /** Clients al corriente (up to date with payments) */
+  clientesAlCorriente: Scalars['Int']['output'];
+  /** Clients in cartera vencida (missed payments) */
+  clientesEnCV: Scalars['Int']['output'];
+  /** GPS latitude coordinate */
+  latitude?: Maybe<Scalars['Float']['output']>;
+  locationId: Scalars['ID']['output'];
+  locationName: Scalars['String']['output'];
+  /** GPS longitude coordinate */
+  longitude?: Maybe<Scalars['Float']['output']>;
+  /** Total number of clients (borrowers) in this location */
+  totalClientes: Scalars['Int']['output'];
+};
+
+/** Location with planning statistics including route info (for multi-route view) */
+export type LocationPlanningStatsWithRoute = {
+  __typename?: 'LocationPlanningStatsWithRoute';
+  /** Clients with active loans */
+  clientesActivos: Scalars['Int']['output'];
+  /** Clients al corriente (up to date with payments) */
+  clientesAlCorriente: Scalars['Int']['output'];
+  /** Clients in cartera vencida (missed payments) */
+  clientesEnCV: Scalars['Int']['output'];
+  /** GPS latitude coordinate */
+  latitude?: Maybe<Scalars['Float']['output']>;
+  locationId: Scalars['ID']['output'];
+  locationName: Scalars['String']['output'];
+  /** GPS longitude coordinate */
+  longitude?: Maybe<Scalars['Float']['output']>;
+  /** Route ID this location belongs to */
+  routeId: Scalars['ID']['output'];
+  /** Route name for display */
+  routeName: Scalars['String']['output'];
+  /** Total number of clients (borrowers) in this location */
+  totalClientes: Scalars['Int']['output'];
 };
 
 export type LocationRouteHistory = {
@@ -1302,6 +1365,8 @@ export type Mutation = {
   addLocationRouteHistory: LocationRouteHistory;
   adminSetPassword: Scalars['Boolean']['output'];
   batchChangeLocationRoutes: BatchLocationRouteChangeResult;
+  /** Update GPS coordinates for multiple locations */
+  batchUpdateLocationCoordinates: Array<Location>;
   batchUpsertHistoricalAssignment: BatchUpsertHistoricalResult;
   cancelLoan: Loan;
   cancelLoanWithAccountRestore: CancelLoanResult;
@@ -1361,6 +1426,8 @@ export type Mutation = {
   updateLoanExtended: Loan;
   updateLoanPayment: LoanPayment;
   updateLoantype: Loantype;
+  /** Update GPS coordinates for a single location */
+  updateLocationCoordinates: Location;
   updateLocationRouteHistory: LocationRouteHistory;
   updatePersonalData: PersonalData;
   updatePhone: Phone;
@@ -1392,6 +1459,11 @@ export type MutationAdminSetPasswordArgs = {
 
 export type MutationBatchChangeLocationRoutesArgs = {
   input: BatchChangeLocationRouteInput;
+};
+
+
+export type MutationBatchUpdateLocationCoordinatesArgs = {
+  inputs: Array<UpdateLocationCoordinatesInput>;
 };
 
 
@@ -1708,6 +1780,11 @@ export type MutationUpdateLoantypeArgs = {
 };
 
 
+export type MutationUpdateLocationCoordinatesArgs = {
+  input: UpdateLocationCoordinatesInput;
+};
+
+
 export type MutationUpdateLocationRouteHistoryArgs = {
   id: Scalars['ID']['input'];
   input: LocationRouteHistoryInput;
@@ -1913,6 +1990,10 @@ export type Query = {
   accountEntries: AccountEntryConnection;
   accounts: Array<Account>;
   activeClientsWithCVStatus: Array<ActiveClientStatus>;
+  /** Get aggregated statistics for selected locations */
+  aggregatedLocationStats: AggregatedLocationStats;
+  /** Get all locations from multiple routes (or all routes if none specified) with route info */
+  allLocationsForPlanning: Array<LocationPlanningStatsWithRoute>;
   badDebtByMonth: Array<BadDebtData>;
   badDebtClients: BadDebtClientsResult;
   badDebtSummary: BadDebtSummary;
@@ -1952,6 +2033,8 @@ export type Query = {
   locationRouteHistory: Array<LocationRouteHistory>;
   locations: Array<Location>;
   locationsCreatedInPeriod: Array<Location>;
+  /** Get locations for route planning with client statistics */
+  locationsForPlanning: Array<LocationPlanningStats>;
   locationsInRouteAtDate: Array<Location>;
   me?: Maybe<User>;
   municipalities: Array<Municipality>;
@@ -2011,6 +2094,16 @@ export type QueryAccountsArgs = {
 
 export type QueryActiveClientsWithCvStatusArgs = {
   filters?: InputMaybe<PortfolioFiltersInput>;
+};
+
+
+export type QueryAggregatedLocationStatsArgs = {
+  locationIds: Array<Scalars['ID']['input']>;
+};
+
+
+export type QueryAllLocationsForPlanningArgs = {
+  routeIds?: InputMaybe<Array<Scalars['ID']['input']>>;
 };
 
 
@@ -2263,6 +2356,11 @@ export type QueryLocationsCreatedInPeriodArgs = {
   fromDate: Scalars['DateTime']['input'];
   routeId?: InputMaybe<Scalars['ID']['input']>;
   toDate: Scalars['DateTime']['input'];
+};
+
+
+export type QueryLocationsForPlanningArgs = {
+  routeId: Scalars['ID']['input'];
 };
 
 
@@ -2891,6 +2989,13 @@ export type UpdateLoantypeInput = {
   weekDuration?: InputMaybe<Scalars['Int']['input']>;
 };
 
+/** Input for updating location coordinates */
+export type UpdateLocationCoordinatesInput = {
+  latitude: Scalars['Float']['input'];
+  locationId: Scalars['ID']['input'];
+  longitude: Scalars['Float']['input'];
+};
+
 export type UpdatePaymentForLeadInput = {
   amount: Scalars['Decimal']['input'];
   comission?: InputMaybe<Scalars['Decimal']['input']>;
@@ -3105,6 +3210,7 @@ export type ResolversTypes = ResolversObject<{
   ActiveLoanForRenewal: ResolverTypeWrapper<ActiveLoanForRenewal>;
   ActiveLoansBreakdown: ResolverTypeWrapper<ActiveLoansBreakdown>;
   Address: ResolverTypeWrapper<Address>;
+  AggregatedLocationStats: ResolverTypeWrapper<AggregatedLocationStats>;
   AnnualFinancialReport: ResolverTypeWrapper<AnnualFinancialReport>;
   AuthPayload: ResolverTypeWrapper<AuthPayload>;
   BadDebtClientItem: ResolverTypeWrapper<BadDebtClientItem>;
@@ -3217,6 +3323,8 @@ export type ResolversTypes = ResolversObject<{
   LocalityWeekData: ResolverTypeWrapper<LocalityWeekData>;
   Location: ResolverTypeWrapper<Location>;
   LocationBreakdown: ResolverTypeWrapper<LocationBreakdown>;
+  LocationPlanningStats: ResolverTypeWrapper<LocationPlanningStats>;
+  LocationPlanningStatsWithRoute: ResolverTypeWrapper<LocationPlanningStatsWithRoute>;
   LocationRouteHistory: ResolverTypeWrapper<LocationRouteHistory>;
   LocationRouteHistoryInput: LocationRouteHistoryInput;
   MarkDeadDebtResult: ResolverTypeWrapper<MarkDeadDebtResult>;
@@ -3288,6 +3396,7 @@ export type ResolversTypes = ResolversObject<{
   UpdateLoanInput: UpdateLoanInput;
   UpdateLoanPaymentInput: UpdateLoanPaymentInput;
   UpdateLoantypeInput: UpdateLoantypeInput;
+  UpdateLocationCoordinatesInput: UpdateLocationCoordinatesInput;
   UpdatePaymentForLeadInput: UpdatePaymentForLeadInput;
   UpdatePersonalDataInput: UpdatePersonalDataInput;
   UpdatePhoneInput: UpdatePhoneInput;
@@ -3317,6 +3426,7 @@ export type ResolversParentTypes = ResolversObject<{
   ActiveLoanForRenewal: ActiveLoanForRenewal;
   ActiveLoansBreakdown: ActiveLoansBreakdown;
   Address: Address;
+  AggregatedLocationStats: AggregatedLocationStats;
   AnnualFinancialReport: AnnualFinancialReport;
   AuthPayload: AuthPayload;
   BadDebtClientItem: BadDebtClientItem;
@@ -3421,6 +3531,8 @@ export type ResolversParentTypes = ResolversObject<{
   LocalityWeekData: LocalityWeekData;
   Location: Location;
   LocationBreakdown: LocationBreakdown;
+  LocationPlanningStats: LocationPlanningStats;
+  LocationPlanningStatsWithRoute: LocationPlanningStatsWithRoute;
   LocationRouteHistory: LocationRouteHistory;
   LocationRouteHistoryInput: LocationRouteHistoryInput;
   MarkDeadDebtResult: MarkDeadDebtResult;
@@ -3485,6 +3597,7 @@ export type ResolversParentTypes = ResolversObject<{
   UpdateLoanInput: UpdateLoanInput;
   UpdateLoanPaymentInput: UpdateLoanPaymentInput;
   UpdateLoantypeInput: UpdateLoantypeInput;
+  UpdateLocationCoordinatesInput: UpdateLocationCoordinatesInput;
   UpdatePaymentForLeadInput: UpdatePaymentForLeadInput;
   UpdatePersonalDataInput: UpdatePersonalDataInput;
   UpdatePhoneInput: UpdatePhoneInput;
@@ -3604,6 +3717,16 @@ export type AddressResolvers<ContextType = GraphQLContext, ParentType extends Re
   personalData?: Resolver<ResolversTypes['PersonalData'], ParentType, ContextType>;
   street?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   zipCode?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type AggregatedLocationStatsResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['AggregatedLocationStats'] = ResolversParentTypes['AggregatedLocationStats']> = ResolversObject<{
+  clientesActivos?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  clientesAlCorriente?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  clientesEnCV?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  totalClientes?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  totalDistanceKm?: Resolver<ResolversTypes['Float'], ParentType, ContextType>;
+  totalLocations?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
   __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
 }>;
 
@@ -4401,6 +4524,8 @@ export type LocationResolvers<ContextType = GraphQLContext, ParentType extends R
   createdAt?: Resolver<ResolversTypes['DateTime'], ParentType, ContextType>;
   currentRouteId?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType>;
   id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  latitude?: Resolver<Maybe<ResolversTypes['Float']>, ParentType, ContextType>;
+  longitude?: Resolver<Maybe<ResolversTypes['Float']>, ParentType, ContextType>;
   municipality?: Resolver<ResolversTypes['Municipality'], ParentType, ContextType>;
   name?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   route?: Resolver<Maybe<ResolversTypes['Route']>, ParentType, ContextType>;
@@ -4419,6 +4544,32 @@ export type LocationBreakdownResolvers<ContextType = GraphQLContext, ParentType 
   pagandoPromedio?: Resolver<Maybe<ResolversTypes['Float']>, ParentType, ContextType>;
   routeId?: Resolver<Maybe<ResolversTypes['ID']>, ParentType, ContextType>;
   routeName?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type LocationPlanningStatsResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['LocationPlanningStats'] = ResolversParentTypes['LocationPlanningStats']> = ResolversObject<{
+  clientesActivos?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  clientesAlCorriente?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  clientesEnCV?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  latitude?: Resolver<Maybe<ResolversTypes['Float']>, ParentType, ContextType>;
+  locationId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  locationName?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  longitude?: Resolver<Maybe<ResolversTypes['Float']>, ParentType, ContextType>;
+  totalClientes?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
+}>;
+
+export type LocationPlanningStatsWithRouteResolvers<ContextType = GraphQLContext, ParentType extends ResolversParentTypes['LocationPlanningStatsWithRoute'] = ResolversParentTypes['LocationPlanningStatsWithRoute']> = ResolversObject<{
+  clientesActivos?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  clientesAlCorriente?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  clientesEnCV?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  latitude?: Resolver<Maybe<ResolversTypes['Float']>, ParentType, ContextType>;
+  locationId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  locationName?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  longitude?: Resolver<Maybe<ResolversTypes['Float']>, ParentType, ContextType>;
+  routeId?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
+  routeName?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  totalClientes?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
   __isTypeOf?: IsTypeOfResolverFn<ParentType, ContextType>;
 }>;
 
@@ -4505,6 +4656,7 @@ export type MutationResolvers<ContextType = GraphQLContext, ParentType extends R
   addLocationRouteHistory?: Resolver<ResolversTypes['LocationRouteHistory'], ParentType, ContextType, RequireFields<MutationAddLocationRouteHistoryArgs, 'input'>>;
   adminSetPassword?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType, RequireFields<MutationAdminSetPasswordArgs, 'newPassword' | 'userId'>>;
   batchChangeLocationRoutes?: Resolver<ResolversTypes['BatchLocationRouteChangeResult'], ParentType, ContextType, RequireFields<MutationBatchChangeLocationRoutesArgs, 'input'>>;
+  batchUpdateLocationCoordinates?: Resolver<Array<ResolversTypes['Location']>, ParentType, ContextType, RequireFields<MutationBatchUpdateLocationCoordinatesArgs, 'inputs'>>;
   batchUpsertHistoricalAssignment?: Resolver<ResolversTypes['BatchUpsertHistoricalResult'], ParentType, ContextType, RequireFields<MutationBatchUpsertHistoricalAssignmentArgs, 'input'>>;
   cancelLoan?: Resolver<ResolversTypes['Loan'], ParentType, ContextType, RequireFields<MutationCancelLoanArgs, 'id'>>;
   cancelLoanWithAccountRestore?: Resolver<ResolversTypes['CancelLoanResult'], ParentType, ContextType, RequireFields<MutationCancelLoanWithAccountRestoreArgs, 'accountId' | 'id'>>;
@@ -4564,6 +4716,7 @@ export type MutationResolvers<ContextType = GraphQLContext, ParentType extends R
   updateLoanExtended?: Resolver<ResolversTypes['Loan'], ParentType, ContextType, RequireFields<MutationUpdateLoanExtendedArgs, 'id' | 'input'>>;
   updateLoanPayment?: Resolver<ResolversTypes['LoanPayment'], ParentType, ContextType, RequireFields<MutationUpdateLoanPaymentArgs, 'id' | 'input'>>;
   updateLoantype?: Resolver<ResolversTypes['Loantype'], ParentType, ContextType, RequireFields<MutationUpdateLoantypeArgs, 'id' | 'input'>>;
+  updateLocationCoordinates?: Resolver<ResolversTypes['Location'], ParentType, ContextType, RequireFields<MutationUpdateLocationCoordinatesArgs, 'input'>>;
   updateLocationRouteHistory?: Resolver<ResolversTypes['LocationRouteHistory'], ParentType, ContextType, RequireFields<MutationUpdateLocationRouteHistoryArgs, 'id' | 'input'>>;
   updatePersonalData?: Resolver<ResolversTypes['PersonalData'], ParentType, ContextType, RequireFields<MutationUpdatePersonalDataArgs, 'fullName' | 'id'>>;
   updatePhone?: Resolver<ResolversTypes['Phone'], ParentType, ContextType, RequireFields<MutationUpdatePhoneArgs, 'input'>>;
@@ -4687,6 +4840,8 @@ export type QueryResolvers<ContextType = GraphQLContext, ParentType extends Reso
   accountEntries?: Resolver<ResolversTypes['AccountEntryConnection'], ParentType, ContextType, Partial<QueryAccountEntriesArgs>>;
   accounts?: Resolver<Array<ResolversTypes['Account']>, ParentType, ContextType, Partial<QueryAccountsArgs>>;
   activeClientsWithCVStatus?: Resolver<Array<ResolversTypes['ActiveClientStatus']>, ParentType, ContextType, Partial<QueryActiveClientsWithCvStatusArgs>>;
+  aggregatedLocationStats?: Resolver<ResolversTypes['AggregatedLocationStats'], ParentType, ContextType, RequireFields<QueryAggregatedLocationStatsArgs, 'locationIds'>>;
+  allLocationsForPlanning?: Resolver<Array<ResolversTypes['LocationPlanningStatsWithRoute']>, ParentType, ContextType, Partial<QueryAllLocationsForPlanningArgs>>;
   badDebtByMonth?: Resolver<Array<ResolversTypes['BadDebtData']>, ParentType, ContextType, RequireFields<QueryBadDebtByMonthArgs, 'month' | 'year'>>;
   badDebtClients?: Resolver<ResolversTypes['BadDebtClientsResult'], ParentType, ContextType, RequireFields<QueryBadDebtClientsArgs, 'limit' | 'offset'>>;
   badDebtSummary?: Resolver<ResolversTypes['BadDebtSummary'], ParentType, ContextType>;
@@ -4725,6 +4880,7 @@ export type QueryResolvers<ContextType = GraphQLContext, ParentType extends Reso
   locationRouteHistory?: Resolver<Array<ResolversTypes['LocationRouteHistory']>, ParentType, ContextType, RequireFields<QueryLocationRouteHistoryArgs, 'locationId'>>;
   locations?: Resolver<Array<ResolversTypes['Location']>, ParentType, ContextType, Partial<QueryLocationsArgs>>;
   locationsCreatedInPeriod?: Resolver<Array<ResolversTypes['Location']>, ParentType, ContextType, RequireFields<QueryLocationsCreatedInPeriodArgs, 'fromDate' | 'toDate'>>;
+  locationsForPlanning?: Resolver<Array<ResolversTypes['LocationPlanningStats']>, ParentType, ContextType, RequireFields<QueryLocationsForPlanningArgs, 'routeId'>>;
   locationsInRouteAtDate?: Resolver<Array<ResolversTypes['Location']>, ParentType, ContextType, RequireFields<QueryLocationsInRouteAtDateArgs, 'date' | 'routeId'>>;
   me?: Resolver<Maybe<ResolversTypes['User']>, ParentType, ContextType>;
   municipalities?: Resolver<Array<ResolversTypes['Municipality']>, ParentType, ContextType>;
@@ -5104,6 +5260,7 @@ export type Resolvers<ContextType = GraphQLContext> = ResolversObject<{
   ActiveLoanForRenewal?: ActiveLoanForRenewalResolvers<ContextType>;
   ActiveLoansBreakdown?: ActiveLoansBreakdownResolvers<ContextType>;
   Address?: AddressResolvers<ContextType>;
+  AggregatedLocationStats?: AggregatedLocationStatsResolvers<ContextType>;
   AnnualFinancialReport?: AnnualFinancialReportResolvers<ContextType>;
   AuthPayload?: AuthPayloadResolvers<ContextType>;
   BadDebtClientItem?: BadDebtClientItemResolvers<ContextType>;
@@ -5178,6 +5335,8 @@ export type Resolvers<ContextType = GraphQLContext> = ResolversObject<{
   LocalityWeekData?: LocalityWeekDataResolvers<ContextType>;
   Location?: LocationResolvers<ContextType>;
   LocationBreakdown?: LocationBreakdownResolvers<ContextType>;
+  LocationPlanningStats?: LocationPlanningStatsResolvers<ContextType>;
+  LocationPlanningStatsWithRoute?: LocationPlanningStatsWithRouteResolvers<ContextType>;
   LocationRouteHistory?: LocationRouteHistoryResolvers<ContextType>;
   MarkDeadDebtResult?: MarkDeadDebtResultResolvers<ContextType>;
   MonthInfo?: MonthInfoResolvers<ContextType>;

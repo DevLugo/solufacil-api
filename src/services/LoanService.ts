@@ -13,6 +13,17 @@ import { calculateLoanMetrics, createLoanSnapshot, calculatePaymentProfit, calcu
 import { generateClientCode } from '@solufacil/shared'
 import { getWeekStartDate, getWeekEndDate } from '../utils/weekUtils'
 
+/**
+ * Normaliza una fecha para guardarla con hora fija 06:00:00 UTC-6 (mediodía en México)
+ * Esto evita problemas con timezones y mantiene consistencia en los datos
+ */
+function normalizeBusinessDate(date: Date): Date {
+  const normalized = new Date(date)
+  // Establecer hora a 06:00:00.000 (6am es un punto seguro que no cambia de día por timezone)
+  normalized.setUTCHours(12, 0, 0, 0) // 12:00 UTC = 06:00 México (UTC-6)
+  return normalized
+}
+
 export interface CreateLoanInput {
   requestedAmount: string | number
   amountGived: string | number
@@ -234,12 +245,15 @@ export class LoanService {
       new Decimal(previousLoan.totalDebtAcquired.toString())
     )
 
+    // Normalizar fecha para consistencia (hora fija 06:00:00)
+    const normalizedDate = normalizeBusinessDate(signDate)
+
     await client.loan.update({
       where: { id: previousLoanId },
       data: {
         status: 'FINISHED',
-        renewedDate: signDate,
-        finishedDate: signDate,
+        renewedDate: normalizedDate,
+        finishedDate: normalizedDate,
       },
     })
 
@@ -301,11 +315,14 @@ export class LoanService {
     // Deuda siempre es: requestedAmount + profitBase
     const finalProfitAmount = metrics.profitAmount.plus(pendingProfit)
 
+    // Normalizar signDate para consistencia (hora fija 06:00:00)
+    const normalizedSignDate = normalizeBusinessDate(input.signDate)
+
     // Crear el préstamo
     return this.loanRepository.create({
       requestedAmount: requestedAmount,
       amountGived: amountGived,
-      signDate: input.signDate,
+      signDate: normalizedSignDate,
       profitAmount: finalProfitAmount,
       totalDebtAcquired: metrics.totalDebtAcquired,
       expectedWeeklyPayment: metrics.expectedWeeklyPayment,
@@ -430,6 +447,9 @@ export class LoanService {
         extensions: { code: 'BAD_USER_INPUT' },
       })
     }
+
+    // Normalizar la fecha de firma para guardarla con hora fija 06:00:00
+    const normalizedSignDate = normalizeBusinessDate(input.signDate)
 
     // Calcular el total a deducir de la cuenta (amountGived + comisión de cada préstamo)
     let totalAmountToDeduct = new Decimal(0)
@@ -564,7 +584,7 @@ export class LoanService {
 
         // 5. Manejar profit pendiente si es renovación
         const pendingProfit = loanInput.previousLoanId
-          ? await this.processLoanRenewal(loanInput.previousLoanId, input.signDate, tx)
+          ? await this.processLoanRenewal(loanInput.previousLoanId, normalizedSignDate, tx)
           : new Decimal(0)
 
         // 6. Crear el préstamo
@@ -583,7 +603,7 @@ export class LoanService {
           data: {
             requestedAmount,
             amountGived,
-            signDate: input.signDate,
+            signDate: normalizedSignDate,
             profitAmount: finalProfitAmount,
             totalDebtAcquired: metrics.totalDebtAcquired,
             expectedWeeklyPayment: metrics.expectedWeeklyPayment,
@@ -625,7 +645,7 @@ export class LoanService {
           entryType: 'DEBIT',
           amount: amountGived,
           sourceType: 'LOAN_GRANT',
-          entryDate: input.signDate,
+          entryDate: normalizedSignDate,
           loanId: loan.id,
           snapshotLeadId: input.leadId,
           snapshotRouteId: routeId,
@@ -638,7 +658,7 @@ export class LoanService {
             entryType: 'DEBIT',
             amount: comissionAmount,
             sourceType: 'LOAN_GRANT_COMMISSION',
-            entryDate: input.signDate,
+            entryDate: normalizedSignDate,
             loanId: loan.id,
             snapshotLeadId: input.leadId,
             snapshotRouteId: routeId,
@@ -668,7 +688,7 @@ export class LoanService {
             data: {
               amount: paymentAmount,
               comission: firstPaymentComission,
-              receivedAt: input.signDate,
+              receivedAt: normalizedSignDate,
               paymentMethod: loanInput.firstPayment.paymentMethod,
               type: 'PAYMENT',
               loan: loan.id,
@@ -689,7 +709,7 @@ export class LoanService {
             entryType: 'CREDIT',
             amount: paymentAmount,
             sourceType: loanInput.firstPayment.paymentMethod === 'CASH' ? 'LOAN_PAYMENT_CASH' : 'LOAN_PAYMENT_BANK',
-            entryDate: input.signDate,
+            entryDate: normalizedSignDate,
             loanId: loan.id,
             loanPaymentId: payment.id,
             profitAmount,
@@ -705,7 +725,7 @@ export class LoanService {
               entryType: 'DEBIT',
               amount: firstPaymentComission,
               sourceType: 'PAYMENT_COMMISSION',
-              entryDate: input.signDate,
+              entryDate: normalizedSignDate,
               loanPaymentId: payment.id,
               snapshotLeadId: input.leadId,
               snapshotRouteId: routeId,
@@ -725,7 +745,7 @@ export class LoanService {
               // La comisión del primer pago está en loanPayment.comission
               ...(updatedPending.lessThanOrEqualTo(0) && {
                 status: 'FINISHED',
-                finishedDate: input.signDate,
+                finishedDate: normalizedSignDate,
               }),
             },
           })
@@ -751,8 +771,8 @@ export class LoanService {
         }
 
         // Search for existing LPR from the same day (signDate) and lead to reuse
-        // Important: Use signDate, not current date, to correctly associate with the payment day
-        const signDateStart = new Date(input.signDate)
+        // Important: Use normalizedSignDate as base to correctly match with the stored dates
+        const signDateStart = new Date(normalizedSignDate)
         signDateStart.setHours(0, 0, 0, 0)
         const signDateEnd = new Date(signDateStart)
         signDateEnd.setDate(signDateEnd.getDate() + 1)
@@ -810,8 +830,8 @@ export class LoanService {
               paymentStatus: 'COMPLETE',
               lead: input.leadId,
               agent: input.leadId,
-              // Use signDate, not current date, for correct day association
-              createdAt: input.signDate,
+              // Use normalizedSignDate for consistent date handling
+              createdAt: normalizedSignDate,
             },
           })
           leadPaymentReceivedId = newLPR.id

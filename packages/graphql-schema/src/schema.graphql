@@ -2287,8 +2287,8 @@ type BatchTransferResult {
 
 # Bulk Date Migration Types
 input BulkDateMigrationInput {
-  startCreatedAt: DateTime!
-  endCreatedAt: DateTime!
+  startBusinessDate: DateTime!
+  endBusinessDate: DateTime!
   newBusinessDate: DateTime!
   routeId: ID
 }
@@ -2297,6 +2297,7 @@ type BulkDateMigrationPreview {
   transactionsCount: Int!
   loanPaymentsCount: Int!
   loansCount: Int!
+  leadPaymentReceivedCount: Int!
   totalRecords: Int!
 }
 
@@ -2306,6 +2307,7 @@ type BulkDateMigrationResult {
   transactionsUpdated: Int!
   loanPaymentsUpdated: Int!
   loansUpdated: Int!
+  leadPaymentReceivedUpdated: Int!
   totalUpdated: Int!
 }
 

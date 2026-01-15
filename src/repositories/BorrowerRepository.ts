@@ -66,7 +66,7 @@ export interface BorrowerSearchResultRaw {
     collaterals?: Array<{
       id: string
       fullName: string
-      phones?: Array<{ number: string }>
+      phones?: Array<{ id: string; number: string }>
     }>
   }[]
   isFromCurrentLocation?: boolean
@@ -342,7 +342,7 @@ export class BorrowerRepository {
                 id: true,
                 fullName: true,
                 phones: {
-                  select: { number: true },
+                  select: { id: true, number: true },
                   take: 1,
                 },
               },
