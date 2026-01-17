@@ -76,10 +76,25 @@ export class LoanRepository {
       where.lead = options.leadId
     }
 
-    // Filter by lead's location - finds all active loans in a specific locality
-    // The lead's address defines the locality where the loan was granted
+    if (options?.borrowerId) {
+      where.borrower = options.borrowerId
+    }
+
+    // Build leadRelation filter combining routeId and locationId
+    // Both can be specified together, and both are optional
+    const leadRelationConditions: Prisma.EmployeeWhereInput[] = []
+
+    if (options?.routeId) {
+      leadRelationConditions.push({
+        routes: {
+          some: { id: options.routeId },
+        },
+      })
+    }
+
     if (options?.locationId) {
-      where.leadRelation = {
+      // Location is accessed through Employee -> PersonalData -> Addresses -> Location
+      leadRelationConditions.push({
         personalDataRelation: {
           addresses: {
             some: {
@@ -87,30 +102,13 @@ export class LoanRepository {
             },
           },
         },
-      }
+      })
     }
 
-    if (options?.borrowerId) {
-      where.borrower = options.borrowerId
-    }
-
-    if (options?.routeId) {
-      // Filter by lead's current routes
-      const routeCondition: Prisma.LoanWhereInput = {
-        leadRelation: {
-          routes: {
-            some: { id: options.routeId },
-          },
-        },
-      }
-
-      // If there are already OR conditions (from status), wrap both in AND
-      if (where.OR && where.OR.length > 0) {
-        const existingOr = where.OR
-        delete where.OR
-        where.AND = [{ OR: existingOr }, routeCondition]
-      } else {
-        Object.assign(where, routeCondition)
+    // Apply leadRelation filter if any conditions exist
+    if (leadRelationConditions.length > 0) {
+      where.leadRelation = {
+        AND: leadRelationConditions,
       }
     }
 
@@ -123,10 +121,6 @@ export class LoanRepository {
         where.signDate.lte = options.toDate
       }
     }
-
-    // DEBUG: Log query parameters
-    console.log('[LoanRepository.findMany] options:', JSON.stringify(options, null, 2))
-    console.log('[LoanRepository.findMany] where:', JSON.stringify(where, null, 2), 'limit:', options?.limit ?? 50)
 
     const [loans, totalCount] = await Promise.all([
       this.prisma.loan.findMany({
@@ -203,9 +197,6 @@ export class LoanRepository {
       }),
       this.prisma.loan.count({ where }),
     ])
-
-    // DEBUG: Log result count
-    console.log('[LoanRepository.findMany] found:', loans.length, 'total:', totalCount)
 
     return { loans, totalCount }
   }

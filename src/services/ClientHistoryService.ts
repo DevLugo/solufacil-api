@@ -47,6 +47,7 @@ export interface ClientHistoryData {
       state: string | null
       phone: string | null
     } | null
+    isDeceased: boolean
   }
   summary: {
     totalLoansAsClient: number
@@ -92,6 +93,7 @@ export interface LoanHistoryDetail {
   avalPhone: string | null
   clientName: string | null
   clientDui: string | null
+  isDeceased: boolean
 }
 
 export interface LoanPaymentDetail {
@@ -494,6 +496,7 @@ export class ClientHistoryService {
         : collateral?.phones?.[0]?.number || null,
       clientName: isCollateral ? borrowerData?.fullName || null : null,
       clientDui: isCollateral ? borrowerData?.clientCode || null : null,
+      isDeceased: loan.isDeceased || false,
     }
   }
 
@@ -681,7 +684,7 @@ export class ClientHistoryService {
     const leadPersonalData = leadInfo?.personalDataRelation
     const leadAddress = leadPersonalData?.addresses?.[0]
 
-    // Build client info
+    // Build client info (isDeceased is added later after we check all loans)
     const clientInfo = {
       id: personalData.id,
       fullName: personalData.fullName,
@@ -706,6 +709,7 @@ export class ClientHistoryService {
             phone: leadPersonalData.phones[0]?.number || null,
           }
         : null,
+      isDeceased: false, // Will be updated after checking loans
     }
 
     // Calculate summary
@@ -715,6 +719,11 @@ export class ClientHistoryService {
     const activeLoansAsCollateral = loansAsCollateral.filter(
       (l) => l.status === 'ACTIVE'
     )
+
+    // Check if any loan has deceased flag (either as client or collateral)
+    const isDeceased =
+      loansAsClient.some((l) => l.isDeceased) ||
+      loansAsCollateral.some((l) => l.isDeceased)
 
     // Get first loan date (oldest loan)
     const allLoanDates = loansAsClient.map((l) => new Date(l.signDate))
@@ -790,6 +799,9 @@ export class ClientHistoryService {
 
     // Combine all loans to find renewing loans across both types (for renewedTo field)
     const allLoansCombined = [...loansAsClient, ...loansAsCollateral]
+
+    // Update isDeceased with actual value
+    clientInfo.isDeceased = isDeceased
 
     return {
       client: clientInfo,

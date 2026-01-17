@@ -647,6 +647,7 @@ type ClientInfo {
   phones: [String!]!
   addresses: [ClientAddressInfo!]!
   leader: LeaderInfo
+  isDeceased: Boolean!
 }
 
 type ClientAddressInfo {
@@ -719,6 +720,7 @@ type LoanHistoryDetail {
   avalPhone: String
   clientName: String
   clientDui: String
+  isDeceased: Boolean!
 }
 
 type LoanPaymentDetail {
